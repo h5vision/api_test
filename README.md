@@ -1,243 +1,214 @@
-# VS Code AI Code Assistant Backend
+# VS Code AI Code Assistant
 
-이 저장소는 VS Code 확장 프로그램에서 채팅 기반 AI 코드 어시스턴트를 구현할 때, Backend가 어떻게 VectorDB와 임베딩 모델을 연결해 주고받아야 하는지 보여주기 위한 FastAPI 예제입니다. README를 읽은 개발자는 이 서버를 기준으로 프론트엔드 확장 프로그램이 호출할 API 구조를 바로 구성할 수 있습니다.
+VS Code 확장 프로그램에서 현재 코드를 인덱싱하고 질문하면 FastAPI가 VectorDB를 검색한 뒤 NVIDIA NIM으로 근거 기반 답변을 생성하는 실행 가능한 예제입니다.
 
-## 1. 목적
+## 전체 구조
 
-이 프로젝트의 목표는 다음을 지원하는 것입니다.
-
-- VS Code 확장 프로그램에서 사용자가 질문을 입력할 수 있다.
-- Backend가 질문을 임베딩한다.
-- VectorDB에서 유사 문서를 검색한다.
-- 검색 결과를 바탕으로 응답을 생성하거나, 확장 프로그램이 추가로 처리할 수 있도록 제공한다.
-
-즉, 확장 프로그램과 Backend 간의 기본 통신 구조를 FastAPI로 구현한 예제입니다.
-
-## 2. 제공되는 API
-
-### 2.1 상태 확인
-
-- GET /
-- 서버가 정상 동작 중인지 확인하는 용도입니다.
-
-### 2.2 문서 인덱싱
-
-- POST /ingest
-- 텍스트를 임베딩하고 VectorDB에 저장합니다.
-
-요청 예시:
-
-```json
-{
-  "document_id": "doc-001",
-  "text": "결제 실패 시 재시도는 어디에서 처리하나요?",
-  "metadata": {
-    "source": "faq"
-  }
-}
+```text
+VS Code Extension (frontend/)
+  ├─ 현재 파일 읽기
+  ├─ 채팅 Webview
+  └─ HTTP JSON 요청
+           │
+           ▼
+FastAPI Backend (/v1)
+  ├─ 문서 청크 분할
+  ├─ NVIDIA Embeddings
+  ├─ SQLite Vector Store
+  └─ NVIDIA Chat Completions
+           │
+           ▼
+답변 + 근거 파일 + 유사도 점수
 ```
 
-### 2.3 검색
+백엔드는 키나 내부 DB 구조를 프론트엔드에 노출하지 않습니다. 확장 프로그램은 공개 `/v1` API만 사용합니다.
 
-- POST /search
-- 사용자의 질문을 임베딩한 뒤, VectorDB에서 유사 문서를 검색합니다.
+## 프로젝트 구조
 
-요청 예시:
-
-```json
-{
-  "query": "결제 실패 재시도 처리",
-  "top_k": 3
-}
+```text
+Vision/
+├─ backend/
+│  ├─ app.py             # FastAPI 라우트와 처리 흐름
+│  ├─ config.py          # .env 설정 로딩
+│  ├─ schemas.py         # 요청/응답 계약
+│  ├─ services.py        # NVIDIA AI 및 Embedding 클라이언트
+│  ├─ text.py            # 문서 청크 분할
+│  └─ vector_store.py    # SQLite 영구 VectorDB
+├─ frontend/
+│  ├─ src/extension.ts   # VS Code 확장과 Webview
+│  ├─ package.json
+│  └─ tsconfig.json
+├─ .env                  # 로컬 비밀 설정, Git 제외
+├─ .env.example          # 공유 가능한 설정 템플릿
+├─ main.py               # 백엔드 실행 진입점
+├─ start_backend.ps1     # 올바른 가상환경 Python으로 실행
+└─ verify_full_flow.py   # ingest → search → chat 통합 검증
 ```
 
-### 2.4 채팅 응답용 엔드포인트
+## 1. Python 가상환경
 
-- POST /chat
-- 검색 결과를 바탕으로 확장 프로그램이 AI 응답을 구성할 수 있도록 기본 응답 포맷을 제공합니다.
+PowerShell 활성화 스크립트는 Python 파일이 아닙니다. 다음처럼 `python3` 없이 실행해야 합니다.
 
-## 3. 실행 방법
-
-### 3.1 의존성 설치
-
-```bash
-pip install fastapi uvicorn
+```powershell
+Set-Location "C:\Users\PC2412\Documents\HancomAI5"
+& ".\.venv\Scripts\Activate.ps1"
 ```
 
-### 3.2 서버 실행
+절대 경로도 가능합니다.
 
-```bash
+```powershell
+& "C:\Users\PC2412\Documents\HancomAI5\.venv\Scripts\Activate.ps1"
+```
+
+실행 정책 오류가 발생할 때만 현재 터미널 범위에서 허용합니다.
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+& "C:\Users\PC2412\Documents\HancomAI5\.venv\Scripts\Activate.ps1"
+```
+
+활성화하지 않고 가상환경 Python을 직접 실행해도 됩니다.
+
+```powershell
+& "C:\Users\PC2412\Documents\HancomAI5\.venv\Scripts\python.exe" `
+  "C:\Users\PC2412\Documents\HancomAI5\Vision\main.py"
+```
+
+## 2. 백엔드 실행
+
+프로젝트의 실행 스크립트가 상위 `.venv`를 자동으로 선택합니다.
+
+```powershell
+Set-Location "C:\Users\PC2412\Documents\HancomAI5\Vision"
+.\start_backend.ps1
+```
+
+또는 활성화된 터미널에서 다음을 실행합니다.
+
+```powershell
 python main.py
 ```
 
-서버는 기본적으로 http://0.0.0.0:8000 에서 실행됩니다.
+- API: `http://127.0.0.1:8000/v1`
+- Swagger UI: `http://127.0.0.1:8000/docs`
+- 상태 확인: `http://127.0.0.1:8000/v1/health`
 
-## 4. 환경 변수
+## 3. VS Code 확장 실행
 
-다음 환경 변수를 사용할 수 있습니다.
+```powershell
+Set-Location .\frontend
+npm install
+npm run compile
+```
 
-- EMBEDDING_BASE_URL: 임베딩 모델 API 주소
-- EMBEDDING_API_KEY: 임베딩 모델 API 키
-- EMBEDDING_MODEL: 사용 모델명
-- EMBEDDING_PROVIDER: openai 또는 ollama
-- VECTOR_DB_BASE_URL: VectorDB API 주소
-- VECTOR_DB_COLLECTION: 사용할 컬렉션명
+프로젝트 루트 `Vision`을 VS Code로 연 뒤 `F5`를 누르고 `Run Backend + Extension`을 선택합니다. 새 Extension Development Host에서 명령 팔레트를 열어 다음 명령을 실행합니다.
 
-## 5. 동작 방식
+1. `Hancom AI: 현재 파일 인덱싱`
+2. `Hancom AI: 채팅 열기`
+3. 프로젝트 코드에 관해 질문
 
-1. 확장 프로그램이 질문을 Backend로 전송한다.
-2. Backend가 질문 텍스트를 임베딩한다.
-3. VectorDB에서 관련 문서를 검색한다.
-4. 검색 결과를 확장 프로그램에 반환한다.
-5. 확장 프로그램은 이 결과를 기반으로 AI 응답을 구성한다.
+확장 설정:
 
-## 6. 확장 프로그램 연동 포인트
+- `hancomAi.backendUrl`: 기본값 `http://127.0.0.1:8000`
+- `hancomAi.projectId`: 비어 있으면 첫 워크스페이스 폴더명
+- `hancomAi.topK`: 답변에 사용할 검색 청크 수
 
-VS Code 확장 프로그램에서는 다음 방식으로 이 API를 호출하면 됩니다.
+## API 계약
 
-- 사용자의 채팅 입력을 /search 또는 /chat에 전송
-- 검색 결과를 UI에 표시
-- 필요 시 추가 프롬프트와 결합해 답변 생성
-
-## 7. 참고
-
-- 현재 기본 구현은 외부 임베딩 API나 VectorDB가 없어도 로컬 fallback으로 동작합니다.
-- 실제 서비스에서는 OpenAI, Ollama, Qdrant, Weaviate, Pinecone 등으로 교체할 수 있습니다.
-
-## 1. 문서 목적
-
-이 문서는 다음 내용을 정리하기 위해 작성되었습니다.
-
-- API가 무엇인지
-- HTTP API의 기본 구성 요소가 무엇인지
-- 프론트엔드와 Backend가 어떻게 통신하는지
-- 일반 요청과 장기 실행 요청이 어떻게 다른지
-- Streaming API가 왜 필요한지
-- 기능과 API를 1:1로 매칭하는 원칙이 무엇인지
-
-## 2. 핵심 원칙
-
-### 2.1 1:1 매칭 원칙
-
-- 서버 처리가 필요한 사용자 기능은 공개 HTTP API 하나로 연결한다.
-- 하나의 장기 실행 작업에 포함되는 실시간 상태 기능은 Streaming Event Type 하나로 연결한다.
-- VS Code 내부에서만 처리 가능한 기능은 Extension Local Command로 연결한다.
-- Backend 내부 처리 기능은 Internal Service Contract로 연결한다.
-
-### 2.2 구현 독립성 원칙
-
-API 계약은 특정 DB, Vector DB, Queue, Cache, Storage 방식에 종속되지 않도록 설계됩니다. 실제 구현이 바뀌더라도 다음 계약은 유지되어야 합니다.
-
-- Endpoint
-- Request Schema
-- Response Schema
-- 상태값
-- 오류 코드
-- Streaming Event 형식
-- ID 관계
-
-## 3. API 기본 규칙
-
-### 3.1 Base URL
-
-- 기본 경로: /v1
-- 예시: POST /v1/generate
-
-### 3.2 Content Type
-
-- 일반 요청: application/json
-- Streaming 요청: text/event-stream
-
-### 3.3 공통 Header
-
-- X-Client-Version
-- X-Request-ID
-- 필요 시 Idempotency-Key
-
-> 현재 데모 범위에서는 인증 기능이 제외되어 있으며, 향후 인증이 추가될 경우 Authorization 헤더를 보조적으로 사용할 수 있습니다.
-
-### 3.4 식별자 규칙
-
-- project_id
-- job_id
-- generation_id
-- question_id
-- answer_id
-- revision_id
-- proposal_id
-- source_id
-
-식별자는 내부 DB의 Primary Key 구조를 노출하지 않는 불투명 문자열로 다루는 것이 원칙입니다.
-
-## 4. 주요 공개 API
-
-### 4.1 인덱싱 관련
-
-| 기능 | Method | Endpoint |
-|---|---|---|
-| 인덱싱 실행 | POST | /v1/ingest |
-| 인덱싱 진행 상태 조회 | GET | /v1/ingest/{job_id} |
-| 인덱싱 상태 조회 | GET | /v1/projects/{project_id}/index-status |
-| 인덱스 갱신 | POST | /v1/projects/{project_id}/reindex |
-| 프로젝트 브리핑 조회 | GET | /v1/projects/{project_id}/briefing |
-
-### 4.2 질문 및 생성 관련
-
-| 기능 | Method | Endpoint |
-|---|---|---|
-| 질문 입력 및 생성 요청 | POST | /v1/generate |
-| 생성 상태 및 답변 스트리밍 | GET | /v1/generations/{generation_id}/events |
-| 생성 작업 취소 | DELETE | /v1/generations/{generation_id} |
-| 질문 수정 및 새 답변 생성 | POST | /v1/questions/{question_id}/revisions |
-| 답변 재생성 | POST | /v1/answers/{answer_id}/regenerations |
-| 출처 조회 | GET | /v1/generations/{generation_id}/sources |
-
-### 4.3 연관 파일 관련
-
-| 기능 | Method | Endpoint |
-|---|---|---|
-| 연관 파일 조회 | POST | /v1/related-files |
-
-## 5. 요청 예시
-
-### 질문 생성 요청 예시
+### 상태 확인
 
 ```http
-POST /v1/generate
+GET /v1/health
+```
+
+키 값은 반환하지 않고 provider와 설정 여부만 반환합니다.
+
+### 문서 인덱싱
+
+```http
+POST /v1/documents/ingest
 Content-Type: application/json
-Accept: application/json
 
 {
-  "project_id": "project_01",
-  "question": {
-    "content": "결제 실패 시 재시도는 어디에서 처리해?"
-  }
+  "project_id": "my-project",
+  "documents": [
+    {
+      "document_id": "file:///workspace/payment.py",
+      "path": "src/payment.py",
+      "language": "python",
+      "text": "def retry_payment(): ...",
+      "metadata": {"file_name": "payment.py"}
+    }
+  ]
 }
 ```
 
-### 스트리밍 상태 수신 예시
+동일한 `project_id`와 `document_id`를 다시 보내면 기존 청크를 교체하므로 파일 변경 후 재인덱싱할 수 있습니다.
+
+### VectorDB 검색
 
 ```http
-GET /v1/generations/{generation_id}/events
-Accept: text/event-stream
+POST /v1/search
+Content-Type: application/json
+
+{
+  "project_id": "my-project",
+  "query": "결제 재시도는 어디에서 처리하나요?",
+  "top_k": 5
+}
 ```
 
-## 6. 처리 흐름
+### 근거 기반 AI 채팅
 
-1. 사용자가 질문을 입력한다.
-2. Extension이 Backend API로 요청을 전달한다.
-3. Backend가 프로젝트 검색, 근거 확인, 답변 생성을 수행한다.
-4. 생성 과정은 Streaming Event로 상태를 전달한다.
-5. 최종 결과와 출처 정보를 조회한다.
+```http
+POST /v1/chat
+Content-Type: application/json
 
-## 7. 참고 사항
+{
+  "message": "결제 재시도 횟수를 알려줘",
+  "session_id": "my-project",
+  "top_k": 5,
+  "history": []
+}
+```
 
-- 이 문서는 API 계약 중심으로 작성되었으며, 내부 저장소 구조나 DB 구현 방식은 명시하지 않는다.
-- API는 URL, Method, Request/Response Schema, 상태값, 오류 코드, Streaming Event 형식을 기준으로 설계된다.
-- 기능 변경이 있어도 공개 계약이 유지되도록 관리하는 것이 핵심이다.
+`session_id`에는 프론트엔드가 현재 프로젝트 폴더명을 넣어 전송합니다. 백엔드는 이 값을 변경하거나 하드코딩하지 않고 그대로 응답하며, `project_id`가 생략되면 같은 값을 VectorDB 프로젝트 검색 범위로 사용합니다. `project_id`를 별도로 보내면 해당 값이 검색 범위로 우선 사용됩니다.
 
-## 8. 관련 문서
+응답에는 `answer`, `sources`, `metadata`가 포함됩니다. `sources`에는 원본 파일, 청크 ID, 텍스트, 유사도 점수가 들어갑니다.
 
-- [VS Code AI Code Assistant API 1&1.docx](VS%20Code%20AI%20Code%20Assistant%20API%201&1.docx)
-- [VS Code AI Code Assistant API uni.docx](VS%20Code%20AI%20Code%20Assistant%20API%20uni.docx)
+## 환경 변수
 
+`.env`는 Git에서 제외됩니다. 공유할 때는 `.env.example`만 사용합니다.
+
+| 변수 | 설명 |
+|---|---|
+| `NVIDIA_API_KEY` | NVIDIA API 키 |
+| `AI_BASE_URL` | Chat Completions API base URL |
+| `AI_MODEL` | 답변 생성 모델 |
+| `EMBEDDING_BASE_URL` | Embeddings API base URL |
+| `EMBEDDING_MODEL` | 검색 임베딩 모델 |
+| `VECTOR_DB_PATH` | SQLite DB 파일 경로 |
+| `ALLOW_LOCAL_FALLBACK` | 외부 API 실패 시 로컬 검색 응답 허용 |
+| `CHUNK_SIZE` | 문서 청크 최대 문자 수 |
+| `CHUNK_OVERLAP` | 인접 청크 중첩 문자 수 |
+
+## 검증
+
+외부 API 비용 없이 전체 왕복 흐름을 검증합니다.
+
+```powershell
+& "C:\Users\PC2412\Documents\HancomAI5\.venv\Scripts\python.exe" verify_full_flow.py
+```
+
+NVIDIA API까지 실제로 검증하려면 다음을 사용합니다.
+
+```powershell
+& "C:\Users\PC2412\Documents\HancomAI5\.venv\Scripts\python.exe" verify_full_flow.py --live
+```
+
+## 현재 저장 방식과 확장 지점
+
+- 기본 VectorDB는 별도 서버 없이 동작하는 영구 SQLite 저장소입니다.
+- 프로젝트와 문서 ID가 분리되어 여러 VS Code 워크스페이스를 저장할 수 있습니다.
+- Qdrant, Weaviate, Pinecone 등으로 교체할 때는 `backend/vector_store.py`와 설정 provider를 확장하면 공개 API 계약은 그대로 유지할 수 있습니다.
+- 기존 `/ingest`, `/search`, `/chat`, `/extension/chat` 경로는 호환용으로 유지되며 신규 확장은 `/v1` 경로를 사용합니다.
