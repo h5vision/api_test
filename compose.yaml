@@ -1,0 +1,355 @@
+name: vision
+
+services:
+  traefik:
+    image: traefik:latest
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "${TRAEFIK_BIND_IP:-192.168.0.7}:80:8081"
+      - "${TRAEFIK_BIND_IP:-192.168.0.7}:443:443"
+      - "${TRAEFIK_BIND_IP:-192.168.0.7}:8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./deploy/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./deploy/traefik/dynamic:/etc/traefik/dynamic:ro
+    networks:
+      edge:
+        aliases:
+          # Cloudflare에 이미 저장된 origin http://web:80과 호환한다.
+          - web
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    pull_policy: missing
+    restart: unless-stopped
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --loglevel
+      - info
+      - --metrics
+      - 0.0.0.0:2000
+      - run
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN must be set}"
+    expose:
+      - "2000"
+    networks:
+      - edge
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      traefik:
+        condition: service_healthy
+
+  api-deps:
+    image: mecodia/python-base-granian:v1
+    pull_policy: never
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - >-
+        python -m pip install --disable-pip-version-check --no-cache-dir
+        --upgrade --target /opt/vision-deps -r /workspace/requirements.txt
+        && chown -R 100:101 /opt/vision-deps /data
+    volumes:
+      - type: bind
+        source: "${PROJECT_PATH:-C:/Users/PC2412/Documents/HancomAI5/Vision}"
+        target: /workspace
+        read_only: true
+        bind:
+          create_host_path: false
+      - api_python_deps:/opt/vision-deps
+      - api_data:/data
+    networks:
+      - edge
+    security_opt:
+      - no-new-privileges:true
+
+  runtime-secrets-init:
+    image: mecodia/python-base-granian:v1
+    pull_policy: never
+    restart: "no"
+    entrypoint:
+      - python
+      - -c
+    command:
+      - >-
+        from pathlib import Path; import os, secrets;
+        root = Path('/run/vision-secrets'); root.mkdir(parents=True, exist_ok=True);
+        target = root / 'postgres_password';
+        existing = target.read_text(encoding='utf-8').strip() if target.exists() else '';
+        target.write_text(existing or secrets.token_urlsafe(48), encoding='utf-8');
+        os.chmod(target, 0o444)
+    volumes:
+      - runtime_secrets:/run/vision-secrets
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    image: mecodia/python-base-granian:v1
+    pull_policy: never
+    restart: unless-stopped
+    working_dir: /workspace
+    user: "100:101"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8000
+      VECTOR_DB_PROVIDER: sqlite
+      VECTOR_DB_PATH: /data/vector_store.sqlite3
+      PYTHONPATH: /opt/vision-deps:/workspace
+      CORS_ORIGINS: "vscode-webview://*,http://127.0.0.1:*,http://localhost:*,http://192.168.0.7:8000,https://dashboard.blakeedenparker.cloud,https://index.blakeedenparker.cloud"
+      TRUSTED_PROXY_HOSTS: "${EDGE_SUBNET:-172.30.0.0/24}"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: "${POSTGRES_DB:-vision}"
+      POSTGRES_USER: "${POSTGRES_USER:-vision}"
+      POSTGRES_PASSWORD_FILE: /run/vision-secrets/postgres_password
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY must be set}"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
+    command:
+      - --interface
+      - asgi
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "2"
+      - --log-level
+      - info
+      - --access-log
+      - backend.asgi:app
+    expose:
+      - "8000"
+    volumes:
+      - type: bind
+        source: "${PROJECT_PATH:-C:/Users/PC2412/Documents/HancomAI5/Vision}"
+        target: /workspace
+        read_only: true
+        bind:
+          create_host_path: false
+      - api_python_deps:/opt/vision-deps:ro
+      - api_data:/data
+      - runtime_secrets:/run/vision-secrets:ro
+    networks:
+      - edge
+      - data
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      api-deps:
+        condition: service_completed_successfully
+      runtime-secrets-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: vision-edge
+      traefik.http.routers.vision-api-tunnel.rule: "Host(`${API_DOMAIN:-api.blakeedenparker.cloud}`)"
+      traefik.http.routers.vision-api-tunnel.entrypoints: web,tunnel
+      traefik.http.routers.vision-api-tunnel.middlewares: public-api-chain@file
+      traefik.http.routers.vision-api-tunnel.service: vision-api
+      traefik.http.routers.vision-api-direct.rule: "PathPrefix(`/`)"
+      traefik.http.routers.vision-api-direct.entrypoints: direct-api
+      traefik.http.routers.vision-api-direct.middlewares: public-api-chain@file
+      traefik.http.routers.vision-api-direct.service: vision-api
+      traefik.http.routers.vision-api-lan.rule: "Host(`${API_DOMAIN:-api.blakeedenparker.cloud}`)"
+      traefik.http.routers.vision-api-lan.entrypoints: websecure
+      traefik.http.routers.vision-api-lan.tls: "true"
+      traefik.http.routers.vision-api-lan.tls.options: default@file
+      traefik.http.routers.vision-api-lan.middlewares: public-api-chain@file
+      traefik.http.routers.vision-api-lan.service: vision-api
+      traefik.http.routers.vision-index-tunnel.rule: "Host(`${INDEX_DOMAIN:-index.blakeedenparker.cloud}`)"
+      traefik.http.routers.vision-index-tunnel.entrypoints: web,tunnel
+      traefik.http.routers.vision-index-tunnel.middlewares: public-api-chain@file
+      traefik.http.routers.vision-index-tunnel.service: vision-api
+      traefik.http.routers.vision-index-lan.rule: "Host(`${INDEX_DOMAIN:-index.blakeedenparker.cloud}`)"
+      traefik.http.routers.vision-index-lan.entrypoints: websecure
+      traefik.http.routers.vision-index-lan.tls: "true"
+      traefik.http.routers.vision-index-lan.tls.options: default@file
+      traefik.http.routers.vision-index-lan.middlewares: public-api-chain@file
+      traefik.http.routers.vision-index-lan.service: vision-api
+      traefik.http.services.vision-api.loadbalancer.server.port: "8000"
+
+  admin-build:
+    image: node:22-alpine
+    pull_policy: missing
+    restart: "no"
+    working_dir: /workspace
+    environment:
+      VITE_API_BASE_URL: "https://${API_DOMAIN:-api.blakeedenparker.cloud}"
+    command:
+      - /bin/sh
+      - -c
+      - npm ci && npm run build -- --outDir /dist --emptyOutDir
+    volumes:
+      - type: bind
+        source: "${PROJECT_PATH:-C:/Users/PC2412/Documents/HancomAI5/Vision}/admin"
+        target: /workspace
+        read_only: true
+        bind:
+          create_host_path: false
+      - admin_node_modules:/workspace/node_modules
+      - admin_dist:/dist
+    networks:
+      - edge
+    security_opt:
+      - no-new-privileges:true
+
+  admin-web:
+    image: nginx:1.28-alpine
+    pull_policy: missing
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${ADMIN_PREVIEW_PORT:-4173}:8080"
+    expose:
+      - "8080"
+    volumes:
+      - admin_dist:/usr/share/nginx/html:ro
+      - ./deploy/nginx/admin.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - edge
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      admin-build:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: vision-edge
+      traefik.http.routers.vision-admin-tunnel.rule: "Host(`${DASHBOARD_DOMAIN:-dashboard.blakeedenparker.cloud}`)"
+      traefik.http.routers.vision-admin-tunnel.entrypoints: web,tunnel
+      traefik.http.routers.vision-admin-tunnel.middlewares: admin-internal-chain@file
+      traefik.http.routers.vision-admin-tunnel.service: vision-admin
+      traefik.http.routers.vision-admin-lan.rule: "Host(`${DASHBOARD_DOMAIN:-dashboard.blakeedenparker.cloud}`)"
+      traefik.http.routers.vision-admin-lan.entrypoints: websecure
+      traefik.http.routers.vision-admin-lan.tls: "true"
+      traefik.http.routers.vision-admin-lan.tls.options: default@file
+      traefik.http.routers.vision-admin-lan.middlewares: admin-internal-chain@file
+      traefik.http.services.vision-admin.loadbalancer.server.port: "8080"
+
+  postgres:
+    image: postgres:17.10-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-vision}"
+      POSTGRES_USER: "${POSTGRES_USER:-vision}"
+      POSTGRES_PASSWORD_FILE: /run/vision-secrets/postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - runtime_secrets:/run/vision-secrets:ro
+    depends_on:
+      runtime-secrets-init:
+        condition: service_completed_successfully
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY must be set}"
+      QDRANT__SERVICE__ENABLE_TLS: "false"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    expose:
+      - "6333"
+      - "6334"
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7.4.9-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
+    command:
+      - /bin/sh
+      - -c
+      - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    volumes:
+      - redis_data:/data
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+networks:
+  edge:
+    name: vision-edge
+    ipam:
+      config:
+        - subnet: "${EDGE_SUBNET:-172.30.0.0/24}"
+  data:
+    name: vision-data
+    internal: true
+    ipam:
+      config:
+        - subnet: "${DATA_SUBNET:-172.31.0.0/24}"
+
+volumes:
+  admin_node_modules:
+  admin_dist:
+  api_python_deps:
+  api_data:
+  postgres_data:
+  qdrant_data:
+  redis_data:
+  runtime_secrets:

@@ -1,0 +1,53 @@
+http:
+  middlewares:
+    public-api-chain:
+      chain:
+        middlewares:
+          - public-api-rate-limit
+          - public-security-headers
+          - response-compression
+
+    public-api-rate-limit:
+      rateLimit:
+        average: 60
+        period: 1s
+        burst: 120
+
+    public-security-headers:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        customResponseHeaders:
+          Server: ""
+          X-Robots-Tag: "noindex, nofollow, noarchive"
+
+    response-compression:
+      compress: {}
+
+    # Admin Backend 라우터를 추가할 때 이 체인 뒤에 ForwardAuth(SSO+MFA)와
+    # mTLS TLS option을 함께 연결한다. 현재는 관리자 API를 외부에 노출하지 않는다.
+    admin-internal-chain:
+      chain:
+        middlewares:
+          - admin-ip-allow-list
+          - admin-noindex
+
+    admin-ip-allow-list:
+      ipAllowList:
+        sourceRange:
+          - "127.0.0.1/32"
+          - "192.168.0.0/24"
+          - "172.30.0.0/24"
+
+    admin-noindex:
+      headers:
+        customResponseHeaders:
+          X-Robots-Tag: "noindex, nofollow, noarchive"
+
+tls:
+  options:
+    default:
+      minVersion: VersionTLS12

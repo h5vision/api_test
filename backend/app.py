@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
+from .metadata_store import MetadataStoreError, PostgresMetadataStore
 from .schemas import (
     ChatRequest,
     ChatResponse,
@@ -14,6 +15,11 @@ from .schemas import (
     IngestResponse,
     LegacyIngestRequest,
     LegacyQueryRequest,
+    MetadataListResponse,
+    MetadataRecord,
+    MetadataScope,
+    MetadataUpsertRequest,
+    ProjectMetadataIngestRequest,
     SearchRequest,
     SearchResponse,
 )
@@ -41,10 +47,18 @@ chat_service = ChatService(settings)
 if settings.vector_db_provider != "sqlite":
     raise RuntimeError("현재 구현된 VECTOR_DB_PROVIDER는 sqlite입니다.")
 vector_store = SQLiteVectorStore(settings.vector_db_path)
+metadata_store = PostgresMetadataStore(settings)
 
 
 def _service_error(exc: ServiceError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+def _metadata_store_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="PostgreSQL metadata store is unavailable",
+    )
 
 
 @app.get("/")
@@ -65,6 +79,7 @@ def health() -> dict[str, Any]:
         "version": "2.0.0",
         "configuration": settings.public_status(),
         "vector_store": vector_store.stats(),
+        "metadata_store": metadata_store.status(),
         "message": "백엔드 API 서버에서 응답중 입니다."
     }
 # @app.get("/v1/health")
@@ -76,7 +91,15 @@ def health() -> dict[str, Any]:
 
 @app.post("/v1/documents/ingest", response_model=IngestResponse)
 def ingest_documents(payload: IngestRequest) -> IngestResponse:
+    return _ingest_documents(payload)
+
+
+def _ingest_documents(
+    payload: IngestRequest,
+    project_metadata: dict[str, Any] | None = None,
+) -> IngestResponse:
     chunks_stored = 0
+    metadata_records_stored = 0
     providers: set[str] = set()
     try:
         for document in payload.documents:
@@ -104,6 +127,33 @@ def ingest_documents(payload: IngestRequest) -> IngestResponse:
                 embedded_chunks,
                 document.metadata,
             )
+            if document.metadata:
+                try:
+                    metadata_store.upsert(
+                        MetadataUpsertRequest(
+                            project_id=payload.project_id,
+                            scope="document",
+                            entity_id=document.document_id,
+                            source="document-ingest",
+                            metadata=document.metadata,
+                        )
+                    )
+                    metadata_records_stored += 1
+                except MetadataStoreError as exc:
+                    raise _metadata_store_error() from exc
+        if project_metadata:
+            try:
+                metadata_store.upsert(
+                    MetadataUpsertRequest(
+                        project_id=payload.project_id,
+                        scope="project",
+                        source="project-document-ingest",
+                        metadata=project_metadata,
+                    )
+                )
+                metadata_records_stored += 1
+            except MetadataStoreError as exc:
+                raise _metadata_store_error() from exc
     except ServiceError as exc:
         raise _service_error(exc) from exc
     return IngestResponse(
@@ -111,6 +161,80 @@ def ingest_documents(payload: IngestRequest) -> IngestResponse:
         documents_received=len(payload.documents),
         chunks_stored=chunks_stored,
         embedding_provider=",".join(sorted(providers)) or settings.embedding_provider,
+        metadata_records_stored=metadata_records_stored,
+    )
+
+
+@app.post(
+    "/v1/documents/ingest-with-metadata",
+    response_model=IngestResponse,
+)
+def ingest_documents_with_project_metadata(
+    payload: ProjectMetadataIngestRequest,
+) -> IngestResponse:
+    metadata_records_stored = 0
+    try:
+        documents_registered = metadata_store.upsert_documents(
+            payload.project_id,
+            payload.documents,
+        )
+        if payload.metadata:
+            metadata_store.upsert(
+                MetadataUpsertRequest(
+                    project_id=payload.project_id,
+                    scope="project",
+                    source="project-document-registration",
+                    metadata=payload.metadata,
+                )
+            )
+            metadata_records_stored = 1
+    except MetadataStoreError as exc:
+        raise _metadata_store_error() from exc
+    return IngestResponse(
+        project_id=payload.project_id,
+        documents_received=len(payload.documents),
+        chunks_stored=0,
+        embedding_provider="not_requested",
+        metadata_records_stored=metadata_records_stored,
+        documents_registered=documents_registered,
+    )
+
+
+@app.post(
+    "/v1/metadata",
+    response_model=MetadataRecord,
+    status_code=status.HTTP_201_CREATED,
+)
+def upsert_metadata(payload: MetadataUpsertRequest) -> MetadataRecord:
+    try:
+        return metadata_store.upsert(payload)
+    except MetadataStoreError as exc:
+        raise _metadata_store_error() from exc
+
+
+@app.get(
+    "/v1/projects/{project_id}/metadata",
+    response_model=MetadataListResponse,
+)
+def list_project_metadata(
+    project_id: str,
+    scope: MetadataScope | None = None,
+    limit: int = Query(default=5000, ge=1, le=10000),
+) -> MetadataListResponse:
+    normalized_project_id = project_id.strip()
+    if not normalized_project_id:
+        raise HTTPException(status_code=422, detail="project_id must not be blank")
+    try:
+        records = metadata_store.list_project(
+            normalized_project_id,
+            scope,
+            limit,
+        )
+    except MetadataStoreError as exc:
+        raise _metadata_store_error() from exc
+    return MetadataListResponse(
+        project_id=normalized_project_id,
+        records=records,
     )
 
 

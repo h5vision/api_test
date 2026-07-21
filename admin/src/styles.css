@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink-950: #06100e;
+  --color-ink-900: #0a1714;
+  --color-ink-850: #0d1d19;
+  --color-ink-800: #12251f;
+  --color-mint-300: #77e7bd;
+  --color-mint-400: #42d69f;
+  --color-amber-300: #ffd27a;
+  --color-danger-300: #ff9b96;
+  --font-sans: "Pretendard Variable", Pretendard, Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  color: #e8f2ed;
+  background: #06100e;
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at 78% -10%, rgb(66 214 159 / 0.12), transparent 32rem),
+    radial-gradient(circle at 12% 90%, rgb(255 210 122 / 0.07), transparent 28rem),
+    #06100e;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.grid-surface {
+  background-image:
+    linear-gradient(rgb(255 255 255 / 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 0.025) 1px, transparent 1px);
+  background-size: 36px 36px;
+}
+
+.panel {
+  border: 1px solid rgb(137 180 161 / 0.13);
+  background: linear-gradient(145deg, rgb(16 35 29 / 0.92), rgb(8 22 18 / 0.88));
+  box-shadow: 0 24px 60px rgb(0 0 0 / 0.18);
+}
+
+.status-dot {
+  box-shadow: 0 0 0 5px rgb(66 214 159 / 0.08), 0 0 20px rgb(66 214 159 / 0.35);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .enter {
+    animation: enter 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .enter-delay-1 { animation-delay: 80ms; }
+  .enter-delay-2 { animation-delay: 150ms; }
+
+  @keyframes enter {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}

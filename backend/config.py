@@ -37,6 +37,16 @@ def _resolve_path(value: str) -> Path:
     return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
 
+def _env_or_secret(name: str, file_name: str) -> str:
+    secret_path = os.getenv(file_name, "").strip()
+    if secret_path:
+        try:
+            return Path(secret_path).read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+    return os.getenv(name, "").strip()
+
+
 @dataclass(frozen=True)
 class Settings:
     backend_host: str
@@ -58,6 +68,12 @@ class Settings:
     embedding_api_key: str
     vector_db_provider: str
     vector_db_path: Path
+    postgres_host: str
+    postgres_port: int
+    postgres_db: str
+    postgres_user: str
+    postgres_password: str
+    postgres_connect_timeout_seconds: int
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -102,6 +118,16 @@ class Settings:
             vector_db_path=_resolve_path(
                 os.getenv("VECTOR_DB_PATH", "./data/vector_store.sqlite3")
             ),
+            postgres_host=os.getenv("POSTGRES_HOST", "127.0.0.1").strip(),
+            postgres_port=_as_int("POSTGRES_PORT", 5432),
+            postgres_db=os.getenv("POSTGRES_DB", "vision").strip(),
+            postgres_user=os.getenv("POSTGRES_USER", "vision").strip(),
+            postgres_password=_env_or_secret(
+                "POSTGRES_PASSWORD", "POSTGRES_PASSWORD_FILE"
+            ),
+            postgres_connect_timeout_seconds=max(
+                1, _as_int("POSTGRES_CONNECT_TIMEOUT_SECONDS", 3)
+            ),
         )
 
     def public_status(self) -> dict[str, object]:
@@ -114,8 +140,9 @@ class Settings:
             "embedding_configured": bool(self.embedding_api_key)
             or self.embedding_provider == "local",
             "vector_db_provider": self.vector_db_provider,
+            "metadata_db_provider": "postgresql",
+            "metadata_db_configured": bool(self.postgres_password),
         }
 
 
 settings = Settings.from_environment()
-
