@@ -25,7 +25,11 @@ def _post_json(
     api_key: str,
     timeout: int,
 ) -> dict[str, Any]:
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "VisionBackend/1.0",
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
@@ -59,18 +63,23 @@ class EmbeddingService:
         self.settings = settings
 
     def embed(self, text: str, input_type: str) -> EmbeddingResult:
-        if not text.strip():
+        return self.embed_many([text], input_type)[0]
+
+    def embed_many(self, texts: list[str], input_type: str) -> list[EmbeddingResult]:
+        if not texts or any(not text.strip() for text in texts):
             raise ServiceError("임베딩할 텍스트가 비어 있습니다.", status_code=400)
+        if self.settings.embedding_provider == "ollama":
+            return self._ollama_embeddings(texts)
         if self.settings.embedding_provider == "local":
-            return self._local_embedding(text)
+            return [self._local_embedding(text) for text in texts]
         if not self.settings.embedding_api_key:
             if self.settings.allow_local_fallback:
-                return self._local_embedding(text)
+                return [self._local_embedding(text) for text in texts]
             raise ServiceError("EMBEDDING_API_KEY 또는 NVIDIA_API_KEY가 필요합니다.", 503)
 
         try:
             payload = {
-                "input": [text],
+                "input": texts,
                 "model": self.settings.embedding_model,
                 "input_type": input_type,
                 "encoding_format": "float",
@@ -82,18 +91,60 @@ class EmbeddingService:
                 self.settings.embedding_api_key,
                 self.settings.request_timeout_seconds,
             )
-            embedding = data.get("data", [{}])[0].get("embedding")
-            if not isinstance(embedding, list) or not embedding:
-                raise ServiceError("임베딩 API 응답에 벡터가 없습니다.")
-            return EmbeddingResult(
-                vector=[float(value) for value in embedding],
-                provider=self.settings.embedding_provider,
-                model=self.settings.embedding_model,
-            )
+            rows = data.get("data")
+            if not isinstance(rows, list) or len(rows) != len(texts):
+                raise ServiceError("임베딩 API 응답 개수가 요청과 일치하지 않습니다.")
+            results: list[EmbeddingResult] = []
+            for row in rows:
+                embedding = row.get("embedding") if isinstance(row, dict) else None
+                if not isinstance(embedding, list) or not embedding:
+                    raise ServiceError("임베딩 API 응답에 벡터가 없습니다.")
+                results.append(
+                    EmbeddingResult(
+                        vector=[float(value) for value in embedding],
+                        provider=self.settings.embedding_provider,
+                        model=self.settings.embedding_model,
+                    )
+                )
+            return results
         except ServiceError:
             if self.settings.allow_local_fallback:
-                return self._local_embedding(text)
+                return [self._local_embedding(text) for text in texts]
             raise
+
+    def _ollama_embeddings(self, texts: list[str]) -> list[EmbeddingResult]:
+        data = _post_json(
+            f"{self.settings.embedding_base_url}/api/embed",
+            {
+                "model": self.settings.embedding_model,
+                "input": texts,
+                "truncate": False,
+                "keep_alive": self.settings.embedding_keep_alive,
+            },
+            "",
+            self.settings.embedding_timeout_seconds,
+        )
+        embeddings = data.get("embeddings")
+        if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+            raise ServiceError("Ollama embedding 응답 개수가 요청과 일치하지 않습니다.")
+        results: list[EmbeddingResult] = []
+        for embedding in embeddings:
+            if not isinstance(embedding, list) or not embedding:
+                raise ServiceError("Ollama embedding 응답에 벡터가 없습니다.")
+            vector = [float(value) for value in embedding]
+            if len(vector) != self.settings.embedding_dimension:
+                raise ServiceError(
+                    "Ollama embedding 차원이 설정과 일치하지 않습니다: "
+                    f"expected={self.settings.embedding_dimension}, actual={len(vector)}"
+                )
+            results.append(
+                EmbeddingResult(
+                    vector=vector,
+                    provider="ollama",
+                    model=self.settings.embedding_model,
+                )
+            )
+        return results
 
     @staticmethod
     def _local_embedding(text: str) -> EmbeddingResult:
@@ -192,4 +243,3 @@ class ChatService:
             excerpt = source.text[:500].strip()
             lines.append(f"[{index}] {label}\n{excerpt}")
         return "\n\n".join(lines)
-

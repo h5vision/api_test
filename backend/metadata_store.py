@@ -78,6 +78,7 @@ class PostgresMetadataStore:
                             language TEXT,
                             type TEXT NOT NULL,
                             string_value TEXT,
+                            details JSONB NOT NULL DEFAULT '{}'::jsonb,
                             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                             PRIMARY KEY (project_id, document_id)
@@ -100,6 +101,12 @@ class PostgresMetadataStore:
                         """
                         ALTER TABLE frontend_documents
                         ADD COLUMN IF NOT EXISTS type TEXT
+                        """
+                    )
+                    connection.execute(
+                        """
+                        ALTER TABLE frontend_documents
+                        ADD COLUMN IF NOT EXISTS details JSONB NOT NULL DEFAULT '{}'::jsonb
                         """
                     )
                     connection.execute(
@@ -180,13 +187,14 @@ class PostgresMetadataStore:
                     connection.execute(
                         """
                         INSERT INTO frontend_documents (
-                            project_id, document_id, path, language, type
-                        ) VALUES (%s, %s, %s, %s, %s)
+                            project_id, document_id, path, language, type, details
+                        ) VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (project_id, document_id)
                         DO UPDATE SET
                             path = EXCLUDED.path,
                             language = EXCLUDED.language,
                             type = EXCLUDED.type,
+                            details = EXCLUDED.details,
                             updated_at = NOW()
                         """,
                         (
@@ -195,6 +203,14 @@ class PostgresMetadataStore:
                             document.path,
                             document.language,
                             document.type,
+                            Jsonb(
+                                document.model_dump(
+                                    mode="json",
+                                    by_alias=True,
+                                    exclude={"name", "path", "language", "type"},
+                                    exclude_none=True,
+                                )
+                            ),
                         ),
                     )
             return len(documents)

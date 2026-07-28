@@ -1,4 +1,65 @@
 import "./styles.css";
+import { startOrbBackground } from "./orbBackground";
+import { playgroundMarkup, startPlayground } from "./playground";
+import {
+  SYSTEM_STATUS_ROUTE,
+  addSystemStatusEvent as addActivity,
+  initializeSystemStatus,
+  loadSystemCommunicationLogs,
+  loadSystemEndpointActivity,
+  setProviderDetails,
+  setTopologyStatus as setServiceStatus,
+  systemStatusMarkup,
+} from "./systemStatus";
+
+type ThemePreference = "dark" | "light" | "system";
+
+const THEME_STORAGE_KEY = "vision-admin-theme";
+const systemColorPreference = window.matchMedia("(prefers-color-scheme: dark)");
+
+function isThemePreference(value: string | undefined): value is ThemePreference {
+  return value === "dark" || value === "light" || value === "system";
+}
+
+function readThemePreference(): ThemePreference {
+  const initial = document.documentElement.dataset.theme;
+  if (isThemePreference(initial)) return initial;
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY) ?? undefined;
+    return isThemePreference(stored) ? stored : "system";
+  } catch {
+    return "system";
+  }
+}
+
+let themePreference = readThemePreference();
+
+function syncThemePresentation(): void {
+  const resolvedTheme = themePreference === "system"
+    ? systemColorPreference.matches ? "dark" : "light"
+    : themePreference;
+  document.documentElement.dataset.theme = themePreference;
+  document.documentElement.dataset.resolvedTheme = resolvedTheme;
+  document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+    ?.setAttribute("content", resolvedTheme === "dark" ? "#06100e" : "#edf5f1");
+  const select = document.querySelector<HTMLSelectElement>("#theme-mode");
+  if (select) select.value = themePreference;
+}
+
+function setThemePreference(value: ThemePreference): void {
+  themePreference = value;
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, value);
+  } catch {
+    // Storage 차단 환경에서도 현재 페이지의 테마 전환은 유지한다.
+  }
+  syncThemePresentation();
+}
+
+syncThemePresentation();
+systemColorPreference.addEventListener("change", () => {
+  if (themePreference === "system") syncThemePresentation();
+});
 
 type ProviderStatus = {
   ai_provider: string;
@@ -8,6 +69,7 @@ type ProviderStatus = {
   embedding_model: string;
   embedding_configured: boolean;
   vector_db_provider: string;
+  default_model_id: string;
 };
 
 type HealthResponse = {
@@ -15,12 +77,253 @@ type HealthResponse = {
   service: string;
   version: string;
   configuration: ProviderStatus;
-  vector_store: { projects: number; chunks: number };
+  vector_store: {
+    provider?: string;
+    status?: "ok" | "unavailable" | string;
+    projects: number;
+    chunks: number;
+    error?: string;
+  };
+};
+
+type ConnectionState = "online" | "stale" | "degraded" | "offline" | "unknown";
+
+type ConnectivityResponse = {
+  checked_at: string;
+  frontend: {
+    status: "online" | "stale" | "offline" | "unknown";
+    connected: boolean;
+    client_id: string | null;
+    project_id: string | null;
+    client_version: string | null;
+    last_event: string | null;
+    last_seen_at: string | null;
+    age_seconds: number | null;
+  };
+  backendai: {
+    status: "online" | "degraded" | "offline";
+    connected: boolean;
+    model_id: string;
+    model: string;
+    model_available: boolean;
+    latency_ms: number;
+    error: string | null;
+  };
+};
+
+type NetworkEndpointSettings = {
+  ip: string;
+  port: number;
+};
+
+type NetworkSettingsResponse = {
+  frontend: NetworkEndpointSettings;
+  backendai: NetworkEndpointSettings;
+  updated_at: string | null;
+  frontend_reachable: boolean;
+  frontend_latency_ms: number;
+  frontend_error: string | null;
+};
+
+type FrontendClientRecord = {
+  client_id: string;
+  instance_id: string | null;
+  name: string;
+  ip: string;
+  port: number;
+  enabled: boolean;
+  registration_type: "admin" | "auto";
+  last_seen_ip: string | null;
+  last_seen_at: string | null;
+  reachable: boolean;
+  latency_ms: number;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type FrontendClientListResponse = {
+  clients: FrontendClientRecord[];
+  total: number;
+  enabled: number;
+  reachable: number;
+};
+
+type ModelInfo = {
+  model_id: string;
+  model_name: string;
+  display_name: string;
+  provider: string;
+  location: "internal" | "cloud" | "local";
+  deployment_type?: "cloud" | "local" | "remote_server";
+  endpoint?: string | null;
+  enabled: boolean;
+  available: boolean;
+  is_default: boolean;
+};
+
+type ModelListResponse = {
+  default_model_id: string;
+  checked_at: string;
+  models: ModelInfo[];
+};
+
+type AIProviderRecord = {
+  provider_id: string;
+  name: string;
+  protocol: "ollama" | "openai";
+  base_url: string;
+  auth_type: "none" | "bearer" | "x-api-key";
+  api_key_configured: boolean;
+  api_key_hint: string | null;
+  enabled: boolean;
+  deployment_type: "cloud" | "local" | "remote_server";
+  status: "unknown" | "online" | "degraded" | "offline" | "disabled";
+  error: string | null;
+  latency_ms: number;
+  model_count: number;
+  models: string[];
+  last_checked_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type AIProviderListResponse = {
+  providers: AIProviderRecord[];
+  total: number;
+};
+
+type OllamaScanResponse = {
+  checked_at: string;
+  targets: {
+    source: string;
+    base_url: string;
+    status: "online" | "degraded" | "offline";
+    models: string[];
+    skipped_non_chat_models: string[];
+    latency_ms: number;
+    error: string | null;
+    registered: boolean;
+    provider_id: string | null;
+  }[];
+  discovered_servers: number;
+  registered_providers: number;
+  chat_models: number;
+};
+
+type RuntimeServiceSettingsResponse = {
+  groq: {
+    enabled: boolean;
+    base_url: string;
+    model: string;
+    public_model_id: string;
+    api_key_configured: boolean;
+  };
+  default_model_id: string;
+  vector: {
+    provider: string;
+    host: string;
+    port: number;
+    collection: string;
+    embedding_deployment: "api" | "local";
+    embedding_provider: "ollama" | "nvidia";
+    embedding_base_url: string;
+    embedding_model: string;
+    embedding_model_id: string;
+    embedding_dimension: number;
+    embedding_batch_size: number;
+    index_version: string;
+    active_host: string;
+    active_port: number;
+    active_collection: string;
+    active_embedding_deployment: "api" | "local";
+    active_embedding_provider: string;
+    active_embedding_base_url: string;
+    active_embedding_model: string;
+    active_embedding_model_id: string;
+    active_embedding_dimension: number;
+    active_embedding_batch_size: number;
+    active_index_version: string;
+    restart_required: boolean;
+    reindex_required: boolean;
+  };
+  updated_at: string | null;
+};
+
+type RepositorySource = {
+  source_id: string;
+  project_id: string;
+  enabled: boolean;
+};
+
+type RepositorySourceListResponse = {
+  sources: RepositorySource[];
+  total: number;
+};
+
+type IndexingJobSummary = {
+  job_id: string;
+  job_kind: "repository" | "upload";
+  project_id: string;
+  source_id: string | null;
+  state: string;
+  stage: string;
+  active: boolean;
+  stalled: boolean;
+  progress_percent: number;
+  processed: number;
+  total: number;
+  files_processed: number;
+  files_total: number;
+  chunks_stored: number;
+  updated_at: string;
+  error: string | null;
+};
+
+type IndexingJobListResponse = {
+  checked_at: string;
+  jobs: IndexingJobSummary[];
+  total: number;
+  active: number;
+};
+
+type OfflineEmbeddingArtifact = {
+  artifact_id: string;
+  project_id: string;
+  snapshot_id: string;
+  generation_id: string;
+  model_id: string;
+  model_name: string;
+  embedding_dimension: number;
+  index_version: string;
+  chunk_count: number;
+  shard_count: number;
+  relative_path: string;
+  compatible: boolean;
+  contract_errors: string[];
+  imported: boolean;
+  completed_at: string | null;
+  error: string | null;
+};
+
+type OfflineEmbeddingArtifactListResponse = {
+  checked_at: string;
+  root_available: boolean;
+  artifacts: OfflineEmbeddingArtifact[];
+  total: number;
+  ready: number;
+  imported: number;
 };
 
 const apiBaseUrl = (
   import.meta.env.VITE_API_BASE_URL || "https://api.blakeedenparker.cloud"
 ).replace(/\/$/, "");
+const adminApiBaseUrl = (
+  import.meta.env.VITE_ADMIN_API_BASE_URL || "/admin-api"
+).replace(/\/$/, "");
+const isPlayground = window.location.pathname.startsWith("/playground");
+const isSystemStatus = window.location.pathname.startsWith(SYSTEM_STATUS_ROUTE);
+const isOverview = !isPlayground && !isSystemStatus;
 
 const icon = (path: string, className = "size-5") => `
   <svg class="${className}" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -37,176 +340,341 @@ const icons = {
   refresh: icon("M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"),
   arrow: icon("M5 12h14m-5-5 5 5-5 5", "size-4"),
   external: icon("M14 4h6v6M20 4l-9 9M18 13v6H5V6h6", "size-4"),
+  sidebarLeft: `
+    <svg class="size-5" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <path d="M14.5 1h-13l-.5.5v13l.5.5h13l.5-.5v-13l-.5-.5ZM2 2h3v12H2V2Zm12 12H6V2h8v12Z" />
+    </svg>`,
 };
 
-function navItem(label: string, svg: string, active = false): string {
+function navItem(label: string, svg: string, href: string, active = false): string {
   const tone = active
     ? "bg-mint-400/10 text-mint-300"
     : "text-white/42 hover:bg-white/4 hover:text-white/75";
   const marker = active
     ? '<span class="ml-auto size-1.5 rounded-full bg-mint-300"></span>'
     : "";
-  return `<button class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${tone}">${svg}<span>${label}</span>${marker}</button>`;
+  return `<a href="${href}" class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${tone}">${svg}<span>${label}</span>${marker}</a>`;
 }
 
-function metricCard(label: string, unit: string, caption: string, id: string): string {
-  return `<article class="panel rounded-2xl p-5"><p class="text-xs font-medium text-white/42">${label}</p><div class="mt-5 flex items-end gap-2"><strong id="${id}" class="max-w-full truncate text-3xl font-semibold tracking-[-0.04em] text-white">--</strong>${unit ? `<span class="mb-1 font-mono text-[10px] text-white/30">${unit}</span>` : ""}</div><p class="mt-2 text-[11px] text-white/28">${caption}</p></article>`;
-}
-
-function sectionHeading(title: string, subtitle: string): string {
-  return `<div class="flex items-start justify-between gap-4"><div><h2 class="text-base font-semibold text-white/90">${title}</h2><p class="mt-1 text-xs text-white/35">${subtitle}</p></div><span class="mt-1 size-1.5 rounded-full bg-mint-300/75"></span></div>`;
-}
-
-function serviceRow(
-  name: string,
-  meta: string,
-  status: string,
-  tone: "ready" | "checking" | "idle",
-  svg: string,
-  id = "",
+function endpointInput(
+  label: string,
+  id: string,
+  kind: "ip" | "port",
 ): string {
-  const toneClass = tone === "ready"
-    ? "text-mint-300 bg-mint-400/8"
-    : tone === "checking"
-      ? "text-amber-300 bg-amber-300/7"
-      : "text-white/38 bg-white/4";
-  return `<div class="flex items-center gap-3 rounded-2xl border border-white/6 bg-black/10 p-3.5"><div class="grid size-10 shrink-0 place-items-center rounded-xl ${toneClass}">${svg}</div><div class="min-w-0"><p class="truncate text-sm font-medium text-white/78">${name}</p><p class="mt-0.5 truncate font-mono text-[10px] text-white/30">${meta}</p></div><span id="${id}" class="ml-auto shrink-0 rounded-full border border-white/7 px-2.5 py-1 text-[10px] text-white/40">${status}</span></div>`;
+  const isPort = kind === "port";
+  return `<label class="block"><span class="mb-1 block text-[10px] font-medium text-white/42">${label}</span><input id="${id}" name="${id}" class="playground-control w-full" type="${isPort ? "number" : "text"}" ${isPort ? 'min="1" max="65535" step="1"' : 'inputmode="decimal" autocomplete="off" spellcheck="false"'} required placeholder="${isPort ? "1-65535" : "192.168.0.12"}" /></label>`;
 }
 
-function detailRow(label: string, id: string): string {
-  return `<div class="flex items-center justify-between gap-5 py-3.5 first:pt-0 last:pb-0"><dt class="text-xs text-white/38">${label}</dt><dd id="${id}" class="max-w-[64%] truncate text-right font-mono text-[11px] text-white/70">확인 중</dd></div>`;
+const SIDEBAR_STORAGE_KEY = "vision-admin-sidebar-open";
+
+function readSidebarOpen(): boolean {
+  try {
+    const stored = window.localStorage.getItem(SIDEBAR_STORAGE_KEY);
+    if (stored === "true" || stored === "false") return stored === "true";
+  } catch {
+    // Storage 차단 환경에서는 화면 너비에 맞는 기본값을 사용한다.
+  }
+  return window.matchMedia("(min-width: 1024px)").matches;
 }
 
-function endpointRow(method: string, path: string, label: string): string {
-  return `<div class="flex items-center gap-3 rounded-xl border border-white/6 bg-black/10 px-3 py-3"><span class="w-9 text-[10px] font-bold text-mint-300">${method}</span><span class="min-w-0 flex-1 truncate text-white/62">${path}</span><span class="text-[10px] text-white/25">${label}</span></div>`;
-}
-
-function activityRow(title: string, description: string, time: string): string {
-  return `<div class="flex gap-3"><span class="mt-1.5 size-2 shrink-0 rounded-full bg-mint-300/80"></span><div class="min-w-0 flex-1 border-b border-white/6 pb-4 last:border-0 last:pb-0"><div class="flex items-start justify-between gap-4"><p class="text-sm text-white/72">${title}</p><time class="shrink-0 font-mono text-[10px] text-white/25">${time}</time></div><p class="mt-1 text-xs text-white/32">${description}</p></div></div>`;
-}
+let sidebarOpen = readSidebarOpen();
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
-  <div class="grid-surface min-h-screen lg:grid lg:grid-cols-[248px_1fr]">
-    <aside class="hidden border-r border-white/7 bg-ink-950/75 px-5 py-7 backdrop-blur-xl lg:flex lg:flex-col">
+  <canvas id="ambient-orb-canvas" aria-hidden="true"></canvas>
+  <div id="dashboard-shell" class="dashboard-content dashboard-shell grid-surface min-h-screen" data-sidebar-open="${sidebarOpen}">
+    <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" tabindex="-1" aria-label="사이드바 닫기"></button>
+    <aside id="dashboard-sidebar" class="app-chrome dashboard-sidebar border-r border-white/7 px-5 py-7 backdrop-blur-xl" aria-label="관리자 사이드바">
       <div class="flex items-center gap-3 px-2">
         <div class="grid size-10 place-items-center rounded-xl border border-mint-300/25 bg-mint-400/10 text-mint-300"><span class="font-mono text-sm font-bold">V//</span></div>
         <div><p class="text-sm font-semibold tracking-[0.08em] text-white">VISION</p><p class="text-[10px] tracking-[0.24em] text-mint-300/70">CONTROL CENTER</p></div>
       </div>
       <nav class="mt-12 space-y-1" aria-label="관리자 메뉴">
-        ${navItem("개요", icons.grid, true)}
-        ${navItem("API 상태", icons.pulse)}
-        ${navItem("AI 모델", icons.cube)}
-        ${navItem("데이터 저장소", icons.database)}
-        ${navItem("인프라", icons.cloud)}
+        ${navItem("개요", icons.grid, "/", isOverview)}
+        ${navItem("시스템 상태", icons.pulse, SYSTEM_STATUS_ROUTE, isSystemStatus)}
+        ${navItem("sLLM Playground", icons.cube, "/playground", isPlayground)}
+        ${navItem("API 문서", icons.pulse, `${apiBaseUrl}/docs`)}
       </nav>
-      <div class="mt-auto rounded-2xl border border-amber-300/15 bg-amber-300/5 p-4">
-        <div class="flex items-center gap-2 text-amber-300">${icons.shield}<span class="text-xs font-semibold">읽기 전용 콘솔</span></div>
-        <p class="mt-2 text-xs leading-5 text-white/45">운영 변경 기능은 인증·감사 정책 연결 후 활성화됩니다.</p>
+      <div class="mt-auto rounded-2xl border border-mint-300/15 bg-mint-400/5 p-4">
+        <div class="flex items-center gap-2 text-mint-300">${icons.shield}<span class="text-xs font-semibold">개발자 콘솔</span></div>
+        <p class="mt-2 text-xs leading-5 text-white/45">Playground는 공개 model_id만 사용하며 provider 인증정보를 노출하지 않습니다.</p>
       </div>
     </aside>
 
     <main class="min-w-0">
-      <header class="sticky top-0 z-20 border-b border-white/7 bg-ink-950/75 px-4 py-4 backdrop-blur-xl sm:px-7 lg:px-10">
+      <header class="app-chrome sticky top-0 z-20 border-b border-white/7 px-4 py-4 backdrop-blur-xl sm:px-7 lg:px-10">
         <div class="mx-auto flex max-w-[1440px] items-center justify-between gap-4">
-          <div class="flex items-center gap-3 lg:hidden"><div class="grid size-9 place-items-center rounded-xl bg-mint-400/10 font-mono text-xs font-bold text-mint-300">V//</div><div><p class="text-sm font-semibold">Vision Control</p><p class="text-[10px] text-white/40">관리자 콘솔</p></div></div>
-          <div class="hidden items-center gap-3 lg:flex"><span class="rounded-full border border-white/8 bg-white/4 px-3 py-1.5 font-mono text-[10px] tracking-widest text-white/50">PRODUCTION</span><span class="text-xs text-white/35" id="last-updated">마지막 동기화 준비 중</span></div>
+          <div class="flex min-w-0 items-center gap-3">
+            <button id="sidebar-toggle" class="grid size-9 shrink-0 place-items-center rounded-lg border border-white/10 text-white/55 transition hover:border-white/20 hover:bg-white/5 hover:text-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint-300/35" type="button" aria-controls="dashboard-sidebar" aria-expanded="${sidebarOpen}" title="${sidebarOpen ? "기본 사이드바 숨기기" : "기본 사이드바 표시"}">${icons.sidebarLeft}</button>
+            <div class="flex items-center gap-3 lg:hidden"><div class="grid size-9 place-items-center rounded-xl bg-mint-400/10 font-mono text-xs font-bold text-mint-300">V//</div><div class="hidden sm:block"><p class="text-sm font-semibold">Vision Control</p><p class="text-[10px] text-white/40">관리자 콘솔</p></div></div>
+            <div class="hidden min-w-0 items-center gap-3 lg:flex"><span class="rounded-full border border-white/8 bg-white/4 px-3 py-1.5 font-mono text-[10px] tracking-widest text-white/50">PRODUCTION</span><span class="truncate text-xs text-white/35" id="last-updated">마지막 동기화 준비 중</span></div>
+          </div>
           <div class="flex items-center gap-2">
+            <label class="theme-picker">
+              <span class="theme-picker-label hidden xl:inline">Theme</span>
+              <select id="theme-mode" class="theme-select" aria-label="색상 테마">
+                <option value="system">시스템 설정</option>
+                <option value="dark">다크 모드</option>
+                <option value="light">라이트 모드</option>
+              </select>
+            </label>
+            <a href="${isPlayground ? "/" : "/playground"}" class="flex items-center gap-2 rounded-xl border border-white/10 px-3.5 py-2 text-xs font-medium text-white/65 transition hover:border-white/20 hover:bg-white/5">${isPlayground ? "개요" : "Playground"}</a>
             <a href="${apiBaseUrl}/docs" target="_blank" rel="noreferrer" class="hidden items-center gap-2 rounded-xl border border-white/10 px-3.5 py-2 text-xs font-medium text-white/65 transition hover:border-white/20 hover:bg-white/5 sm:flex">API 문서 ${icons.external}</a>
-            <button id="refresh-button" class="flex items-center gap-2 rounded-xl bg-mint-400 px-3.5 py-2 text-xs font-bold text-ink-950 transition hover:bg-mint-300 disabled:cursor-wait disabled:opacity-60">${icons.refresh}<span class="hidden sm:inline">새로고침</span></button>
+            ${isPlayground ? "" : `<button id="refresh-button" class="flex items-center gap-2 rounded-xl bg-mint-400 px-3.5 py-2 text-xs font-bold text-ink-950 transition hover:bg-mint-300 disabled:cursor-wait disabled:opacity-60">${icons.refresh}<span class="hidden sm:inline">새로고침</span></button>`}
           </div>
         </div>
+
       </header>
 
-      <div class="mx-auto max-w-[1440px] px-4 py-7 sm:px-7 lg:px-10 lg:py-10">
-        <section class="enter flex flex-col gap-6 border-b border-white/7 pb-8 xl:flex-row xl:items-end xl:justify-between">
-          <div><div class="mb-3 flex items-center gap-2 text-xs font-semibold tracking-[0.18em] text-mint-300/75"><span class="h-px w-8 bg-mint-300/50"></span> SYSTEM OVERVIEW</div><h1 class="text-3xl font-semibold tracking-[-0.04em] text-white sm:text-4xl">운영 현황을 한눈에.</h1><p class="mt-3 max-w-2xl text-sm leading-6 text-white/45">Cloudflare Edge부터 FastAPI와 Vector Store까지, 현재 배포 상태를 실시간으로 확인합니다.</p></div>
-          <div id="global-status" class="flex w-fit items-center gap-3 rounded-2xl border border-white/8 bg-white/4 px-4 py-3"><span class="status-dot size-2 rounded-full bg-white/30"></span><div><p class="text-xs font-semibold text-white/75">상태 확인 중</p><p class="mt-0.5 font-mono text-[10px] text-white/35">${apiBaseUrl}</p></div></div>
-        </section>
+      <div class="${isOverview ? "" : "hidden"} mx-auto max-w-[1280px] px-4 py-5 sm:px-6 lg:px-8">
+        <section class="enter grid gap-3 md:grid-cols-2 xl:grid-cols-3" aria-label="접근 제어 및 Backend 인프라">
+          <article class="panel rounded-2xl p-4">
+            <div>
+              <div class="flex flex-wrap items-center gap-2">
+                <h2 class="text-sm font-semibold text-white/90">Frontend Client</h2>
+                <span class="rounded-md border border-mint-300/20 bg-mint-400/7 px-2 py-1 font-mono text-[9px] font-bold tracking-wider text-mint-300">POSTGRESQL</span>
+              </div>
+              <p class="mt-1 text-[11px] text-white/35">첫 Chat 자동 등록·관리자 차단</p>
+            </div>
 
-        <section class="enter enter-delay-1 mt-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="핵심 지표">
-          ${metricCard("API 응답시간", "ms", "실시간 상태 확인", "latency-value")}
-          ${metricCard("인덱싱 청크", "chunks", "Vector Store 누적", "chunks-value")}
-          ${metricCard("프로젝트", "projects", "분리된 검색 범위", "projects-value")}
-          ${metricCard("AI Provider", "", "응답 생성 모델", "provider-value")}
-        </section>
+            <form id="frontend-client-form" class="mt-3" autocomplete="off">
+              <input id="frontend-client-id" type="hidden" />
+              <div class="grid gap-2 sm:grid-cols-2">
+                <label class="block sm:col-span-2">
+                  <span class="mb-1 block text-[10px] font-medium text-white/42">Client 이름</span>
+                  <input id="frontend-client-name" class="playground-control w-full" maxlength="80" required placeholder="Frontend 개발 PC" />
+                </label>
+                ${endpointInput("IP 주소", "frontend-client-ip", "ip")}
+                ${endpointInput("Port", "frontend-client-port", "port")}
+                <button id="frontend-client-submit" type="submit" class="h-9 rounded-lg bg-mint-400 px-3 text-xs font-bold text-ink-950 transition hover:bg-mint-300 disabled:opacity-50 sm:col-span-2">Client 추가</button>
+              </div>
+              <div class="mt-2 flex min-h-5 items-center justify-between gap-2">
+                <p id="frontend-client-message" class="text-[10px] text-white/32" role="status" aria-live="polite">Client는 첫 Chat에서 자동 등록되며 False 이후 요청은 403으로 차단됩니다.</p>
+                <button id="frontend-client-cancel-edit" type="button" class="hidden rounded-lg border border-white/10 px-3 py-1.5 text-[10px] font-semibold text-white/55 transition hover:bg-white/5">수정 취소</button>
+              </div>
+            </form>
+          </article>
 
-        <section class="enter enter-delay-2 mt-5 grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
-          <article class="panel rounded-3xl p-5 sm:p-6">
-            ${sectionHeading("서비스 토폴로지", "요청 경로와 내부 구성 요소")}
-            <div class="mt-6 space-y-3">
-              ${serviceRow("Cloudflare Tunnel", "Edge connector", "외부 연결", "ready", icons.cloud)}
-              ${serviceRow("Granian + FastAPI", "ASGI · port 8000", "확인 중", "checking", icons.pulse, "api-service-status")}
-              ${serviceRow("NVIDIA AI", "Chat completions", "확인 중", "checking", icons.cube, "ai-service-status")}
-              ${serviceRow("Vector Store", "Project scoped", "확인 중", "checking", icons.database, "vector-service-status")}
-              ${serviceRow("PostgreSQL · Qdrant · Redis", "Docker internal network", "어댑터 연결 준비", "idle", icons.database)}
+          <article class="panel rounded-2xl p-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <h2 class="text-sm font-semibold text-white/90">AI Model · <span id="selected-ai-model-name" class="text-mint-300">조회 중</span></h2>
+              <span id="network-settings-updated" class="font-mono text-[9px] text-white/28">설정 불러오는 중</span>
+            </div>
+            <form id="network-settings-form" class="mt-3" autocomplete="off">
+              <div class="grid gap-2 sm:grid-cols-[1fr_100px]">
+                ${endpointInput("AI Model Server IP", "backendai-ip", "ip")}
+                ${endpointInput("Port", "backendai-port", "port")}
+              </div>
+              <button id="network-settings-save" type="submit" class="mt-2 w-full rounded-lg border border-white/10 px-3 py-2 text-[11px] font-semibold text-white/65 hover:bg-white/5">AI Model Server 저장</button>
+              <p id="network-settings-message" class="mt-2 text-[10px] text-white/35" role="status" aria-live="polite">Runtime Setting</p>
+            </form>
+
+            <form id="groq-settings-form" class="mt-3 border-t border-white/7 pt-3" autocomplete="off">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] font-semibold text-white/70">Cloud AI Model 설정</span>
+                <label class="flex items-center gap-2 text-[10px] text-white/45"><input id="groq-enabled" type="checkbox" class="size-4 accent-emerald-400" /> 사용</label>
+              </div>
+              <div class="mt-2 grid gap-2">
+                <label><span class="mb-1 block text-[10px] text-white/42">Base URL</span><input id="groq-base-url" class="playground-control w-full" type="url" required /></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">Model</span><input id="groq-model" class="playground-control w-full" required /></label>
+                <label>
+                  <span class="mb-1 block text-[10px] text-white/42">관리자 기본 AI 모델</span>
+                  <select id="default-model-id" class="playground-control w-full"><option value="">모델 목록 조회 중</option></select>
+                  <span id="default-model-deployment" class="mt-1 block text-[9px] text-white/30">실행 위치 확인 중</span>
+                </label>
+              </div>
+              <button id="groq-settings-save" type="submit" class="mt-2 w-full rounded-lg bg-mint-400 px-3 py-2 text-[11px] font-bold text-ink-950 hover:bg-mint-300">AI Model 기본값 저장</button>
+              <p id="groq-settings-message" class="mt-2 text-[10px] text-white/35" role="status" aria-live="polite">API key는 .env에서만 관리합니다.</p>
+            </form>
+
+            <details class="mt-3 border-t border-white/7 pt-3">
+              <summary class="flex cursor-pointer items-center justify-between text-[11px] font-semibold text-white/55">공개 모델 상태 <span id="model-discovery-checked-at" class="font-mono text-[9px] text-white/25">조회 중</span></summary>
+              <div id="model-discovery-list" class="mt-2 space-y-1.5" aria-live="polite"><p class="text-[10px] text-white/30">GET /v1/models 조회 중</p></div>
+            </details>
+
+            <details class="mt-3 border-t border-white/7 pt-3">
+              <summary class="cursor-pointer text-[11px] font-semibold text-white/55">AI Provider CRUD · 자동 감지</summary>
+              <button id="ollama-scan-button" type="button" class="mt-3 w-full rounded-lg border border-mint-300/20 bg-mint-400/5 px-3 py-2 text-[11px] font-semibold text-mint-300 hover:bg-mint-400/10">등록 PC의 Ollama 자동 탐색</button>
+              <div id="ollama-scan-result" class="mt-2 text-[9px] text-white/35">API Server host, 설정된 AI Server, 활성 Frontend Client의 11434 포트를 확인합니다.</div>
+              <form id="ai-provider-form" class="mt-3 space-y-2" autocomplete="off">
+                <input id="ai-provider-id" type="hidden" />
+                <div class="grid gap-2 sm:grid-cols-2">
+                  <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">Provider 이름</span><input id="ai-provider-name" class="playground-control w-full" maxlength="100" required placeholder="사내 sLLM 또는 Groq" /></label>
+                  <label><span class="mb-1 block text-[10px] text-white/42">API 규격</span><select id="ai-provider-protocol" class="playground-control w-full"><option value="auto">자동 감지</option><option value="ollama">Ollama</option><option value="openai">OpenAI Compatible</option></select></label>
+                  <label><span class="mb-1 block text-[10px] text-white/42">배포 위치</span><select id="ai-provider-deployment" class="playground-control w-full"><option value="remote_server">특정 서버</option><option value="local">API Server Local</option><option value="cloud">Cloud</option></select></label>
+                  <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">연결 입력 방식</span><select id="ai-provider-connection-mode" class="playground-control w-full"><option value="host">IP / Host + Port</option><option value="url">Provider Base URL</option></select></label>
+                  <div id="ai-provider-host-fields" class="grid gap-2 sm:col-span-2 sm:grid-cols-[1fr_92px_auto]">
+                    <label><span class="mb-1 block text-[10px] text-white/42">IP / Host</span><input id="ai-provider-host" class="playground-control w-full" placeholder="192.168.0.12" /></label>
+                    <label><span class="mb-1 block text-[10px] text-white/42">Port</span><input id="ai-provider-port" class="playground-control w-full" type="number" min="1" max="65535" value="11434" /></label>
+                    <label class="flex items-end gap-1.5 pb-2 text-[10px] text-white/45"><input id="ai-provider-tls" type="checkbox" class="size-4 accent-emerald-400" /> HTTPS</label>
+                  </div>
+                  <label id="ai-provider-url-field" class="hidden sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">Base URL</span><input id="ai-provider-base-url" class="playground-control w-full" type="url" placeholder="https://api.provider.com/v1" /></label>
+                  <label><span class="mb-1 block text-[10px] text-white/42">인증</span><select id="ai-provider-auth" class="playground-control w-full"><option value="none">없음</option><option value="bearer">Bearer API Key</option><option value="x-api-key">X-API-Key</option></select></label>
+                  <label><span class="mb-1 block text-[10px] text-white/42">API Key</span><input id="ai-provider-key" class="playground-control w-full" type="password" maxlength="4096" placeholder="수정 시 공란이면 기존 키 유지" /></label>
+                </div>
+                <label class="flex items-center gap-2 text-[10px] text-white/45"><input id="ai-provider-enabled" type="checkbox" class="size-4 accent-emerald-400" checked /> 모델 자동 감지 및 Chat 사용</label>
+                <div class="grid grid-cols-2 gap-2">
+                  <button id="ai-provider-save" type="submit" class="rounded-lg bg-mint-400 px-3 py-2 text-[11px] font-bold text-ink-950 hover:bg-mint-300">Provider 추가</button>
+                  <button id="ai-provider-cancel" type="button" class="rounded-lg border border-white/10 px-3 py-2 text-[11px] font-semibold text-white/55 hover:bg-white/5">입력 초기화</button>
+                </div>
+                <p id="ai-provider-message" class="text-[10px] text-white/35" role="status" aria-live="polite">저장하면 모델 목록을 즉시 자동 감지합니다.</p>
+              </form>
+              <div id="ai-provider-list" class="mt-3 max-h-72 space-y-2 overflow-y-auto" aria-live="polite"><p class="text-[10px] text-white/30">Provider를 조회하고 있습니다.</p></div>
+            </details>
+          </article>
+
+          <article class="panel rounded-2xl p-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <h2 class="text-sm font-semibold text-white/90">Vector Store · Index</h2>
+              <span id="vector-runtime-badge" class="rounded-md border border-mint-300/20 bg-mint-400/7 px-2 py-1 font-mono text-[9px] font-bold text-mint-300">QDRANT</span>
+            </div>
+            <form id="vector-settings-form" class="mt-3" autocomplete="off">
+              <div class="grid gap-2 sm:grid-cols-[1fr_100px]">
+                <label><span class="mb-1 block text-[10px] text-white/42">Qdrant Host</span><input id="vector-host" class="playground-control w-full" required /></label>
+                ${endpointInput("Port", "vector-port", "port")}
+              </div>
+              <div class="mt-2 grid gap-2 sm:grid-cols-2">
+                <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">Collection</span><input id="vector-collection" class="playground-control w-full" required /></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">Embedding 실행 위치</span><select id="embedding-deployment" class="playground-control w-full"><option value="api">외부/내부 API</option><option value="local">API Server Local</option></select></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">Embedding Provider</span><select id="embedding-provider" class="playground-control w-full"><option value="ollama">Ollama API</option><option value="nvidia">NVIDIA Compatible API</option></select></label>
+                <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">Embedding Base URL</span><input id="embedding-base-url" class="playground-control w-full" type="url" required placeholder="https://... 또는 http://host.docker.internal:11434" /></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">Embedding model</span><input id="embedding-model" class="playground-control w-full" required placeholder="bge-m3:latest" /></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">Embedding Model ID</span><input id="embedding-model-id" class="playground-control w-full" required placeholder="bge-m3-1024-v1" /></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">Vector Dimension</span><input id="embedding-dimension" class="playground-control w-full" type="number" min="1" max="65536" required /></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">Embedding Batch</span><input id="embedding-batch-size" class="playground-control w-full" type="number" min="1" max="256" required /></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">Index version</span><input id="index-version" class="playground-control w-full" required /></label>
+              </div>
+              <button id="vector-settings-save" type="submit" class="mt-2 w-full rounded-lg border border-white/10 px-3 py-2 text-[11px] font-semibold text-white/65 hover:bg-white/5">Vector 설정 저장</button>
+              <p id="vector-settings-message" class="mt-2 text-[10px] text-white/35" role="status" aria-live="polite">설정 조회 중</p>
+            </form>
+            <div class="mt-3 border-t border-white/7 pt-3">
+              <button id="reembed-button" type="button" class="w-full rounded-lg bg-amber-300 px-3 py-2 text-[11px] font-bold text-ink-950 hover:brightness-105 disabled:opacity-50">등록 Source 전체 재임베딩</button>
+              <p id="reembed-status" class="mt-2 min-h-4 text-[10px] text-white/35" role="status" aria-live="polite">실제 Repository Index Job을 생성합니다.</p>
+            </div>
+            <div class="mt-3 border-t border-white/7 pt-3">
+              <div class="flex items-center justify-between gap-2">
+                <div>
+                  <h3 class="text-[11px] font-semibold text-white/65">Colab T4 결과 Import</h3>
+                  <p class="mt-0.5 text-[9px] text-white/30">Drive COMPLETE.json → PostgreSQL + Qdrant</p>
+                </div>
+                <button id="embedding-artifact-refresh" type="button" class="rounded-md border border-white/10 px-2 py-1 text-[9px] text-white/50 hover:bg-white/5">새로고침</button>
+              </div>
+              <div id="embedding-artifact-list" class="mt-2 max-h-48 space-y-2 overflow-y-auto" aria-live="polite">
+                <p class="text-[10px] text-white/30">동기화된 Package를 조회하고 있습니다.</p>
+              </div>
+            </div>
+            <div class="mt-3 border-t border-white/7 pt-3">
+              <div class="flex items-center justify-between gap-2">
+                <h3 class="text-[11px] font-semibold text-white/65">DB Vectorization &amp; Indexing</h3>
+                <span id="indexing-job-count" class="font-mono text-[9px] text-white/30">조회 중</span>
+              </div>
+              <div id="indexing-job-list" class="mt-2 max-h-56 space-y-2 overflow-y-auto" aria-live="polite">
+                <p class="text-[10px] text-white/30">Indexing Job을 조회하고 있습니다.</p>
+              </div>
             </div>
           </article>
-          <article class="panel rounded-3xl p-5 sm:p-6">
-            ${sectionHeading("Provider 구성", "API가 공개한 안전한 설정 정보")}
-            <dl class="mt-6 divide-y divide-white/7">
-              ${detailRow("AI model", "ai-model")}${detailRow("Embedding", "embedding-model")}${detailRow("Vector DB", "vector-provider")}${detailRow("Backend version", "backend-version")}
-            </dl>
+
+          <article class="panel rounded-2xl p-4 md:col-span-2 xl:col-span-3">
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h2 class="text-base font-semibold text-white/90">Frontend Client 연결 제어</h2>
+                <p class="mt-1 text-xs leading-5 text-white/35">등록된 Client를 확인하고 체크박스로 Backend API 연결을 허용하거나 차단합니다.</p>
+              </div>
+              <span id="frontend-client-count" class="shrink-0 font-mono text-[10px] text-white/32">불러오는 중</span>
+            </div>
+            <div class="mt-3 overflow-hidden rounded-xl border border-white/7">
+              <div class="mock-client-table-head">
+                <span>Client</span><span>Endpoint</span><span>Backend 연결</span><span class="text-right">관리</span>
+              </div>
+              <div id="frontend-client-list" aria-live="polite"></div>
+              <p id="frontend-client-empty" class="hidden px-4 py-8 text-center text-xs text-white/30">등록된 Frontend Client가 없습니다.</p>
+            </div>
           </article>
         </section>
 
-        <section class="mt-5 grid gap-5 xl:grid-cols-[0.8fr_1.2fr]">
-          <article class="panel rounded-3xl p-5 sm:p-6">
-            ${sectionHeading("API Endpoint", "Frontend 팀 공개 계약")}
-            <div class="mt-6 space-y-2 font-mono text-xs">${endpointRow("GET", "/v1/health", "상태")}${endpointRow("POST", "/v1/documents/ingest", "인덱싱")}${endpointRow("POST", "/v1/chat", "채팅")}</div>
-            <a href="${apiBaseUrl}/docs" target="_blank" rel="noreferrer" class="mt-5 flex items-center justify-between rounded-2xl border border-mint-300/15 bg-mint-400/5 px-4 py-3 text-xs font-semibold text-mint-300 transition hover:bg-mint-400/10"><span>OpenAPI 명세 열기</span>${icons.arrow}</a>
-          </article>
-          <article class="panel rounded-3xl p-5 sm:p-6">
-            ${sectionHeading("상태 이벤트", "이 브라우저에서 확인한 최근 기록")}
-            <div class="mt-6 space-y-4" id="activity-list" aria-live="polite">${activityRow("대시보드가 시작되었습니다", "API 상태 확인을 준비합니다", "방금")}</div>
-          </article>
-        </section>
       </div>
+      <div class="${isSystemStatus ? "" : "hidden"}">${systemStatusMarkup(apiBaseUrl, icons)}</div>
+      <div class="${isPlayground ? "" : "hidden"}">${playgroundMarkup()}</div>
     </main>
   </div>
 `;
+
+const themeModeSelect = document.querySelector<HTMLSelectElement>("#theme-mode");
+if (themeModeSelect) {
+  themeModeSelect.value = themePreference;
+  themeModeSelect.addEventListener("change", () => {
+    if (isThemePreference(themeModeSelect.value)) {
+      setThemePreference(themeModeSelect.value);
+    }
+  });
+}
+
+const sidebarShell = document.querySelector<HTMLElement>("#dashboard-shell");
+const sidebar = document.querySelector<HTMLElement>("#dashboard-sidebar");
+const sidebarToggle = document.querySelector<HTMLButtonElement>("#sidebar-toggle");
+const sidebarBackdrop = document.querySelector<HTMLButtonElement>("#sidebar-backdrop");
+
+function syncSidebarPresentation(): void {
+  if (!sidebarShell || !sidebar || !sidebarToggle) return;
+  const isOverlay = !window.matchMedia("(min-width: 1024px)").matches;
+  sidebarShell.dataset.sidebarOpen = String(sidebarOpen);
+  sidebarToggle.setAttribute("aria-expanded", String(sidebarOpen));
+  sidebarToggle.title = sidebarOpen
+    ? "기본 사이드바 숨기기"
+    : "기본 사이드바 표시";
+  sidebar.inert = !sidebarOpen;
+  sidebar.setAttribute("aria-hidden", String(!sidebarOpen));
+  document.body.classList.toggle("sidebar-overlay-open", sidebarOpen && isOverlay);
+}
+
+function setSidebarOpen(value: boolean): void {
+  sidebarOpen = value;
+  try {
+    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(value));
+  } catch {
+    // Storage 차단 환경에서도 현재 페이지의 토글 상태는 유지한다.
+  }
+  syncSidebarPresentation();
+}
+
+sidebarToggle?.addEventListener("click", () => setSidebarOpen(!sidebarOpen));
+sidebarBackdrop?.addEventListener("click", () => setSidebarOpen(false));
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && sidebarOpen) setSidebarOpen(false);
+});
+window.addEventListener("resize", syncSidebarPresentation);
+syncSidebarPresentation();
+
+const orbCanvas = document.querySelector<HTMLCanvasElement>("#ambient-orb-canvas");
+if (orbCanvas) startOrbBackground(orbCanvas);
 
 const setText = (id: string, value: string) => {
   const element = document.getElementById(id);
   if (element) element.textContent = value;
 };
 
-function updateGlobalStatus(ok: boolean, message: string): void {
-  const container = document.getElementById("global-status");
-  if (!container) return;
-  const dot = container.querySelector("span");
-  const title = container.querySelector("p");
-  dot?.classList.toggle("bg-mint-400", ok);
-  dot?.classList.toggle("bg-danger-300", !ok);
-  dot?.classList.remove("bg-white/30");
-  if (title) {
-    title.textContent = message;
-    title.className = `text-xs font-semibold ${ok ? "text-mint-300" : "text-danger-300"}`;
-  }
-}
-
-function setServiceStatus(id: string, message: string, ok: boolean): void {
+function setConnectionStatus(id: string, state: ConnectionState, message: string): void {
   const element = document.getElementById(id);
   if (!element) return;
+  const classes: Record<ConnectionState, string> = {
+    online: "border-mint-300/15 bg-mint-400/5 text-mint-300",
+    stale: "border-amber-300/15 bg-amber-300/5 text-amber-300",
+    degraded: "border-amber-300/15 bg-amber-300/5 text-amber-300",
+    offline: "border-danger-300/15 bg-danger-300/5 text-danger-300",
+    unknown: "border-white/10 bg-white/4 text-white/45",
+  };
   element.textContent = message;
-  element.className = `ml-auto shrink-0 rounded-full border px-2.5 py-1 text-[10px] ${ok ? "border-mint-300/15 bg-mint-400/5 text-mint-300" : "border-danger-300/15 bg-danger-300/5 text-danger-300"}`;
-}
-
-function addActivity(title: string, description: string): void {
-  const list = document.getElementById("activity-list");
-  if (!list) return;
-  const time = new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
-  list.insertAdjacentHTML("afterbegin", activityRow(title, description, time));
-  while (list.children.length > 4) list.lastElementChild?.remove();
+  element.className = `ml-auto shrink-0 rounded-full border px-2.5 py-1 text-[10px] ${classes[state]}`;
 }
 
 async function loadHealth(): Promise<void> {
-  const refreshButton = document.querySelector<HTMLButtonElement>("#refresh-button");
-  if (refreshButton) refreshButton.disabled = true;
   const startedAt = performance.now();
 
   try {
     const response = await fetch(`${apiBaseUrl}/v1/health`, {
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        "X-Client-Type": "admin-dashboard",
+      },
       cache: "no-store",
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -216,28 +684,1418 @@ async function loadHealth(): Promise<void> {
     setText("latency-value", String(latency));
     setText("chunks-value", health.vector_store.chunks.toLocaleString("ko-KR"));
     setText("projects-value", health.vector_store.projects.toLocaleString("ko-KR"));
-    setText("provider-value", health.configuration.ai_provider.toUpperCase());
-    setText("ai-model", health.configuration.ai_model);
-    setText("embedding-model", health.configuration.embedding_model);
-    setText("vector-provider", health.configuration.vector_db_provider.toUpperCase());
-    setText("backend-version", `v${health.version}`);
+    setText("provider-value", health.configuration.default_model_id);
+    setProviderDetails({
+      aiModel: discoveredModels.find(
+        (model) => model.model_id === health.configuration.default_model_id,
+      )?.model_name || health.configuration.ai_model,
+      embeddingModel: health.configuration.embedding_model,
+      vectorProvider: health.configuration.vector_db_provider.toUpperCase(),
+      backendVersion: `v${health.version}`,
+    });
     setText("last-updated", `마지막 동기화 ${new Date().toLocaleString("ko-KR")}`);
-    updateGlobalStatus(health.status === "ok", "모든 공개 API 정상");
     setServiceStatus("api-service-status", `정상 · ${latency}ms`, true);
-    setServiceStatus("ai-service-status", health.configuration.ai_configured ? "설정 완료" : "키 미설정", health.configuration.ai_configured);
-    setServiceStatus("vector-service-status", `${health.configuration.vector_db_provider} · 정상`, true);
+    const vectorAvailable = health.vector_store.status !== "unavailable";
+    const vectorProvider = (
+      health.vector_store.provider || health.configuration.vector_db_provider
+    ).toUpperCase();
+    setServiceStatus(
+      "vector-service-status",
+      vectorAvailable ? `${vectorProvider} · 정상` : `${vectorProvider} · 응답 없음`,
+      vectorAvailable,
+    );
+    setConnectionStatus(
+      "vector-connection-status",
+      vectorAvailable ? "online" : "offline",
+      vectorAvailable ? "연결됨" : "응답 없음",
+    );
+    setText(
+      "vector-header-detail",
+      vectorAvailable
+        ? `${vectorProvider} · ${health.vector_store.chunks.toLocaleString("ko-KR")} chunks`
+        : health.vector_store.error || `${vectorProvider} unavailable`,
+    );
     addActivity("API 상태 동기화 완료", `${health.service} · ${latency}ms`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "알 수 없는 오류";
-    updateGlobalStatus(false, "API 연결 확인 필요");
     setServiceStatus("api-service-status", "응답 없음", false);
+    setConnectionStatus("vector-connection-status", "unknown", "확인 실패");
+    setText("vector-header-detail", "API 상태 조회 실패");
     setText("latency-value", "ERR");
     setText("last-updated", `동기화 실패 · ${new Date().toLocaleTimeString("ko-KR")}`);
     addActivity("API 상태 확인 실패", message);
+  }
+}
+
+let previousConnectivityState = "";
+
+async function loadConnectivity(): Promise<void> {
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/connectivity`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const connectivity = (await response.json()) as ConnectivityResponse;
+    const frontend = connectivity.frontend;
+    const backendai = connectivity.backendai;
+
+    const frontendLabel = {
+      online: "연결됨",
+      stale: "응답 지연",
+      offline: "연결 끊김",
+      unknown: "heartbeat 대기",
+    }[frontend.status];
+    setConnectionStatus("frontend-connection-status", frontend.status, frontendLabel);
+    setText(
+      "frontend-header-detail",
+      frontend.last_seen_at
+        ? `${frontend.client_id || frontend.project_id || "client"} · ${frontend.age_seconds ?? 0}s 전`
+        : "heartbeat 대기",
+    );
+
+    const backendLabel = backendai.status === "online"
+      ? "연결됨"
+      : backendai.status === "degraded"
+        ? "모델 확인 필요"
+        : "응답 없음";
+    setConnectionStatus("ai-model-connection-status", backendai.status, backendLabel);
+    setText(
+      "ai-model-header-detail",
+      backendai.model_available
+        ? `${backendai.model} · ${backendai.latency_ms}ms`
+        : `상태: ${backendai.error || "model unavailable"}`,
+    );
+
+    const snapshot = `${frontend.status}:${backendai.status}`;
+    if (snapshot !== previousConnectivityState) {
+      addActivity(
+        "팀 연결 상태 갱신",
+        `Frontend ${frontendLabel} · AI Model ${backendLabel}`,
+      );
+      previousConnectivityState = snapshot;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setConnectionStatus("frontend-connection-status", "unknown", "확인 실패");
+    setConnectionStatus("ai-model-connection-status", "unknown", "확인 실패");
+    setText("frontend-header-detail", `상태 API 오류: ${message}`);
+    setText("ai-model-header-detail", `상태 API 오류: ${message}`);
+  }
+}
+
+const inputValue = (id: string): string => {
+  const input = document.getElementById(id) as HTMLInputElement | null;
+  return input?.value.trim() || "";
+};
+
+const setInputValue = (id: string, value: string | number): void => {
+  const input = document.getElementById(id) as HTMLInputElement | null;
+  if (input) input.value = String(value);
+};
+
+const escapeHtml = (value: string): string =>
+  value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;",
+  })[character] ?? character);
+
+let discoveredModels: ModelInfo[] = [];
+
+const modelProviderLabel = (provider: ModelInfo["provider"]): string => ({
+  backendai: "OLLAMA",
+  nvidia: "NVIDIA",
+  groq: "GROQ",
+  local: "LOCAL",
+  custom: "CUSTOM",
+})[provider] ?? provider.toUpperCase();
+
+function modelDeploymentType(
+  model: ModelInfo,
+): "cloud" | "local" | "remote_server" {
+  if (model.deployment_type) return model.deployment_type;
+  if (model.location === "cloud") return "cloud";
+  if (model.location === "local") return "local";
+  return "remote_server";
+}
+
+const modelDeploymentLabel = (model: ModelInfo): string => ({
+  cloud: "Cloud",
+  local: "Local",
+  remote_server: "특정 서버",
+})[modelDeploymentType(model)];
+
+function updateDefaultModelPresentation(modelId: string): void {
+  const model = discoveredModels.find((item) => item.model_id === modelId);
+  setText("selected-ai-model-name", model?.model_name || modelId || "미지정");
+  setText("provider-value", model?.model_name || modelId || "미지정");
+  setText(
+    "default-model-deployment",
+    model
+      ? `${modelDeploymentLabel(model)} · ${modelProviderLabel(model.provider)}${model.endpoint ? ` · ${model.endpoint}` : ""}`
+      : "모델 실행 위치를 확인할 수 없습니다.",
+  );
+  if (model) {
+    setText("ai-model", model.model_name);
+    setConnectionStatus(
+      "ai-service-status",
+      model.available ? "online" : "offline",
+      model.available ? `${modelDeploymentLabel(model)} · 사용 가능` : "응답 없음",
+    );
+  }
+}
+
+function renderDefaultModelOptions(selectedModelId: string): void {
+  const select = document.getElementById("default-model-id") as HTMLSelectElement | null;
+  if (!select) return;
+  const currentExists = discoveredModels.some(
+    (model) => model.enabled && model.model_id === selectedModelId,
+  );
+  const options = discoveredModels.filter((model) => model.enabled).map((model) => {
+    const option = document.createElement("option");
+    option.value = model.model_id;
+    option.textContent = `${model.model_name} · ${modelDeploymentLabel(model)}${model.available ? "" : " · 응답 없음"}`;
+    option.disabled = !model.available && model.model_id !== selectedModelId;
+    return option;
+  });
+  if (selectedModelId && !currentExists) {
+    const current = document.createElement("option");
+    current.value = selectedModelId;
+    current.textContent = `${selectedModelId} · 현재 저장값`;
+    options.unshift(current);
+  }
+  select.replaceChildren(...options);
+  if (selectedModelId) select.value = selectedModelId;
+  updateDefaultModelPresentation(select.value);
+}
+
+async function loadModels(): Promise<void> {
+  const list = document.getElementById("model-discovery-list");
+  if (!list) return;
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/models`, {
+      headers: {
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = (await response.json()) as ModelListResponse;
+    discoveredModels = value.models;
+    const selectedModelId = loadedServiceSettings?.default_model_id
+      || value.default_model_id;
+    renderDefaultModelOptions(selectedModelId);
+    list.innerHTML = value.models.map((model) => `
+      <div class="flex items-start gap-3 rounded-xl border border-white/6 bg-white/2 px-3 py-2.5">
+        <span class="mt-1.5 size-1.5 shrink-0 rounded-full ${model.available ? "bg-mint-300" : "bg-danger-300"}"></span>
+        <div class="min-w-0 flex-1">
+          <p class="break-all font-mono text-[11px] text-white/72">${escapeHtml(model.model_name)}</p>
+          <p class="mt-1 break-all font-mono text-[9px] text-white/28">${modelProviderLabel(model.provider)} · ${modelDeploymentLabel(model)}${model.endpoint ? ` · ${escapeHtml(model.endpoint)}` : ""}</p>
+          <p class="mt-0.5 break-all font-mono text-[9px] text-white/22">model_id: ${escapeHtml(model.model_id)}</p>
+        </div>
+        <div class="shrink-0 text-right">
+          <label class="flex items-center justify-end gap-1.5 text-[9px] font-semibold ${model.enabled ? "text-mint-300" : "text-white/35"}">
+            <span>API ${model.enabled ? "T" : "F"}</span>
+            <input type="checkbox" class="size-4 accent-emerald-400" data-model-access="${escapeHtml(model.model_id)}" ${model.enabled ? "checked" : ""} ${model.is_default ? "disabled title=\"기본 모델은 먼저 다른 모델로 변경해야 합니다.\"" : ""} />
+          </label>
+          <span class="mt-1 block text-[8px] font-semibold uppercase ${model.available ? "text-mint-300" : "text-danger-300"}">${model.available ? "AVAILABLE" : "OFFLINE"}${model.is_default ? " · DEFAULT" : ""}</span>
+        </div>
+      </div>
+    `).join("") || '<p class="text-[11px] text-danger-300">공개 가능한 모델이 없습니다.</p>';
+    setText(
+      "model-discovery-checked-at",
+      new Date(value.checked_at).toLocaleTimeString("ko-KR"),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    list.innerHTML = `<p class="text-[11px] text-danger-300">모델 조회 실패: ${escapeHtml(message)}</p>`;
+    setText("model-discovery-checked-at", "조회 실패");
+  }
+}
+
+let aiProviders: AIProviderRecord[] = [];
+
+function setAIProviderMessage(message: string, ok = true): void {
+  const element = document.getElementById("ai-provider-message");
+  if (!element) return;
+  element.textContent = message;
+  element.className = `text-[10px] ${ok ? "text-mint-300/75" : "text-danger-300"}`;
+}
+
+function syncAIProviderConnectionFields(): void {
+  const mode = (
+    document.getElementById("ai-provider-connection-mode") as HTMLSelectElement | null
+  )?.value || "host";
+  document.getElementById("ai-provider-host-fields")?.classList.toggle("hidden", mode !== "host");
+  document.getElementById("ai-provider-url-field")?.classList.toggle("hidden", mode !== "url");
+  const host = document.getElementById("ai-provider-host") as HTMLInputElement | null;
+  const port = document.getElementById("ai-provider-port") as HTMLInputElement | null;
+  const baseUrl = document.getElementById("ai-provider-base-url") as HTMLInputElement | null;
+  if (host) host.required = mode === "host";
+  if (port) port.required = mode === "host";
+  if (baseUrl) baseUrl.required = mode === "url";
+}
+
+function syncAIProviderAuthFields(): void {
+  const auth = (
+    document.getElementById("ai-provider-auth") as HTMLSelectElement | null
+  )?.value || "none";
+  const key = document.getElementById("ai-provider-key") as HTMLInputElement | null;
+  if (!key) return;
+  key.disabled = auth === "none";
+  if (auth === "none") key.value = "";
+}
+
+function resetAIProviderForm(): void {
+  setInputValue("ai-provider-id", "");
+  setInputValue("ai-provider-name", "");
+  setInputValue("ai-provider-protocol", "auto");
+  setInputValue("ai-provider-deployment", "remote_server");
+  setInputValue("ai-provider-connection-mode", "host");
+  setInputValue("ai-provider-host", "");
+  setInputValue("ai-provider-port", 11434);
+  setInputValue("ai-provider-base-url", "");
+  setInputValue("ai-provider-auth", "none");
+  setInputValue("ai-provider-key", "");
+  const tls = document.getElementById("ai-provider-tls") as HTMLInputElement | null;
+  const enabled = document.getElementById("ai-provider-enabled") as HTMLInputElement | null;
+  if (tls) tls.checked = false;
+  if (enabled) enabled.checked = true;
+  setText("ai-provider-save", "Provider 추가");
+  syncAIProviderConnectionFields();
+  syncAIProviderAuthFields();
+}
+
+function renderAIProviders(): void {
+  const target = document.getElementById("ai-provider-list");
+  if (!target) return;
+  target.innerHTML = aiProviders.map((provider) => {
+    const statusClass = provider.status === "online"
+      ? "text-mint-300"
+      : provider.status === "degraded"
+        ? "text-amber-300"
+        : "text-danger-300";
+    const auth = provider.auth_type === "none"
+      ? "NO KEY"
+      : `${provider.auth_type.toUpperCase()} ${provider.api_key_hint || "KEY"}`;
+    return `
+      <div class="rounded-xl border border-white/7 bg-white/2 p-3">
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <p class="truncate text-[11px] font-semibold text-white/75">${escapeHtml(provider.name)}</p>
+            <p class="mt-0.5 break-all font-mono text-[9px] text-white/30">${escapeHtml(provider.base_url)}</p>
+          </div>
+          <span class="shrink-0 font-mono text-[9px] font-bold ${statusClass}">${provider.status.toUpperCase()}</span>
+        </div>
+        <p class="mt-1 text-[9px] text-white/35">${provider.protocol.toUpperCase()} · ${provider.deployment_type} · ${auth} · ${provider.model_count} models · ${provider.latency_ms}ms</p>
+        ${provider.models.length ? `<p class="mt-1 break-all font-mono text-[9px] text-white/28">${provider.models.map(escapeHtml).join(", ")}</p>` : ""}
+        ${provider.error ? `<p class="mt-1 text-[9px] text-danger-300">${escapeHtml(provider.error)}</p>` : ""}
+        <div class="mt-2 grid grid-cols-3 gap-1.5">
+          <button type="button" data-provider-action="discover" data-provider-id="${escapeHtml(provider.provider_id)}" class="rounded-md border border-white/10 px-2 py-1.5 text-[9px] text-white/55 hover:bg-white/5">자동 감지</button>
+          <button type="button" data-provider-action="edit" data-provider-id="${escapeHtml(provider.provider_id)}" class="rounded-md border border-white/10 px-2 py-1.5 text-[9px] text-white/55 hover:bg-white/5">수정</button>
+          <button type="button" data-provider-action="delete" data-provider-id="${escapeHtml(provider.provider_id)}" class="rounded-md border border-danger-300/20 px-2 py-1.5 text-[9px] text-danger-300 hover:bg-danger-300/5">삭제</button>
+        </div>
+      </div>
+    `;
+  }).join("") || '<p class="text-[10px] text-white/30">등록된 추가 Provider가 없습니다.</p>';
+}
+
+async function scanKnownOllamaServers(): Promise<void> {
+  const button = document.getElementById("ollama-scan-button") as HTMLButtonElement | null;
+  const target = document.getElementById("ollama-scan-result");
+  if (!button || !target) return;
+  button.disabled = true;
+  button.textContent = "알려진 PC를 탐색하는 중";
+  target.innerHTML = '<p class="text-white/35">Ollama /api/tags와 모델 capability를 확인합니다.</p>';
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/ai-providers/scan-ollama`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new Error(body?.detail || `HTTP ${response.status}`);
+    }
+    const value = (await response.json()) as OllamaScanResponse;
+    target.innerHTML = `
+      <p class="font-semibold text-mint-300">${value.discovered_servers}개 서버 응답 · Chat 모델 ${value.chat_models}개 · 연결 ${value.registered_providers}개</p>
+      <div class="mt-1.5 space-y-1">
+        ${value.targets.map((item) => `
+          <p class="${item.status === "offline" ? "text-white/25" : item.models.length ? "text-white/55" : "text-amber-300"}">
+            ${escapeHtml(item.source)} · ${escapeHtml(item.base_url)} ·
+            ${item.models.length ? `Chat: ${item.models.map(escapeHtml).join(", ")}` : item.skipped_non_chat_models.length ? `Chat 불가: ${item.skipped_non_chat_models.map(escapeHtml).join(", ")}` : item.error || item.status}
+          </p>
+        `).join("")}
+      </div>
+    `;
+    await Promise.all([loadAIProviders(), loadModels()]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    target.innerHTML = `<p class="text-danger-300">Ollama 자동 탐색 실패: ${escapeHtml(message)}</p>`;
   } finally {
+    button.disabled = false;
+    button.textContent = "등록 PC의 Ollama 자동 탐색";
+  }
+}
+
+async function loadAIProviders(refresh = false): Promise<void> {
+  const target = document.getElementById("ai-provider-list");
+  if (!target) return;
+  try {
+    const response = await fetch(
+      `${adminApiBaseUrl}/ai-providers${refresh ? "?refresh=true" : ""}`,
+      { headers: { Accept: "application/json" }, cache: "no-store" },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = (await response.json()) as AIProviderListResponse;
+    aiProviders = value.providers;
+    renderAIProviders();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    target.innerHTML = `<p class="text-[10px] text-danger-300">Provider 조회 실패: ${escapeHtml(message)}</p>`;
+  }
+}
+
+function aiProviderPayload(): Record<string, unknown> {
+  const mode = (
+    document.getElementById("ai-provider-connection-mode") as HTMLSelectElement | null
+  )?.value || "host";
+  const authType = (
+    document.getElementById("ai-provider-auth") as HTMLSelectElement | null
+  )?.value || "none";
+  const apiKey = inputValue("ai-provider-key");
+  return {
+    name: inputValue("ai-provider-name"),
+    protocol: inputValue("ai-provider-protocol"),
+    base_url: mode === "url" ? inputValue("ai-provider-base-url") : null,
+    host: mode === "host" ? inputValue("ai-provider-host") : null,
+    port: mode === "host" ? Number(inputValue("ai-provider-port")) : null,
+    use_tls: (
+      document.getElementById("ai-provider-tls") as HTMLInputElement | null
+    )?.checked ?? false,
+    auth_type: authType,
+    api_key: authType !== "none" && apiKey ? apiKey : null,
+    clear_api_key: authType === "none",
+    enabled: (
+      document.getElementById("ai-provider-enabled") as HTMLInputElement | null
+    )?.checked ?? true,
+    deployment_type: inputValue("ai-provider-deployment"),
+  };
+}
+
+async function saveAIProvider(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  const form = event.currentTarget as HTMLFormElement;
+  if (!form.reportValidity()) return;
+  const providerId = inputValue("ai-provider-id");
+  const button = document.getElementById("ai-provider-save") as HTMLButtonElement | null;
+  if (button) button.disabled = true;
+  setAIProviderMessage("저장 후 모델을 자동 감지하고 있습니다.");
+  try {
+    const response = await fetch(
+      providerId
+        ? `${adminApiBaseUrl}/ai-providers/${encodeURIComponent(providerId)}`
+        : `${adminApiBaseUrl}/ai-providers`,
+      {
+        method: providerId ? "PUT" : "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify(aiProviderPayload()),
+      },
+    );
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { detail?: unknown } | null;
+      throw new Error(typeof body?.detail === "string" ? body.detail : `HTTP ${response.status}`);
+    }
+    const provider = (await response.json()) as AIProviderRecord;
+    setAIProviderMessage(
+      `${provider.name} 저장 완료 · ${provider.model_count}개 모델 · ${provider.status}`,
+      provider.status === "online" || provider.status === "degraded",
+    );
+    resetAIProviderForm();
+    await Promise.all([loadAIProviders(), loadModels()]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setAIProviderMessage(`Provider 저장 실패: ${message}`, false);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function editAIProvider(provider: AIProviderRecord): void {
+  setInputValue("ai-provider-id", provider.provider_id);
+  setInputValue("ai-provider-name", provider.name);
+  setInputValue("ai-provider-protocol", provider.protocol);
+  setInputValue("ai-provider-deployment", provider.deployment_type);
+  setInputValue("ai-provider-auth", provider.auth_type);
+  setInputValue("ai-provider-key", "");
+  const enabled = document.getElementById("ai-provider-enabled") as HTMLInputElement | null;
+  if (enabled) enabled.checked = provider.enabled;
+  try {
+    const parsed = new URL(provider.base_url);
+    const rootOnly = parsed.pathname === "/" && !parsed.search;
+    setInputValue("ai-provider-connection-mode", rootOnly ? "host" : "url");
+    if (rootOnly) {
+      setInputValue("ai-provider-host", parsed.hostname);
+      setInputValue("ai-provider-port", parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+      const tls = document.getElementById("ai-provider-tls") as HTMLInputElement | null;
+      if (tls) tls.checked = parsed.protocol === "https:";
+    } else {
+      setInputValue("ai-provider-base-url", provider.base_url);
+    }
+  } catch {
+    setInputValue("ai-provider-connection-mode", "url");
+    setInputValue("ai-provider-base-url", provider.base_url);
+  }
+  setText("ai-provider-save", "Provider 수정");
+  syncAIProviderConnectionFields();
+  syncAIProviderAuthFields();
+  setAIProviderMessage(
+    provider.api_key_configured
+      ? `저장된 키 ${provider.api_key_hint || ""}는 공란으로 두면 유지됩니다.`
+      : "이 Provider에는 저장된 API Key가 없습니다.",
+  );
+  document.getElementById("ai-provider-form")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function handleAIProviderClick(event: Event): Promise<void> {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
+    "button[data-provider-action]",
+  );
+  const providerId = button?.dataset.providerId;
+  const action = button?.dataset.providerAction;
+  if (!button || !providerId || !action) return;
+  const provider = aiProviders.find((item) => item.provider_id === providerId);
+  if (!provider) return;
+  if (action === "edit") {
+    editAIProvider(provider);
+    return;
+  }
+  if (action === "delete" && !window.confirm(`${provider.name} Provider를 삭제할까요?`)) return;
+  button.disabled = true;
+  try {
+    const response = await fetch(
+      action === "discover"
+        ? `${adminApiBaseUrl}/ai-providers/${encodeURIComponent(providerId)}/discover`
+        : `${adminApiBaseUrl}/ai-providers/${encodeURIComponent(providerId)}`,
+      { method: action === "discover" ? "POST" : "DELETE", headers: { Accept: "application/json" } },
+    );
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new Error(body?.detail || `HTTP ${response.status}`);
+    }
+    setAIProviderMessage(
+      action === "discover" ? `${provider.name} 모델 자동 감지를 완료했습니다.` : `${provider.name}을 삭제했습니다.`,
+    );
+    await Promise.all([loadAIProviders(), loadModels()]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setAIProviderMessage(`${action === "discover" ? "자동 감지" : "삭제"} 실패: ${message}`, false);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function updateModelAccess(input: HTMLInputElement): Promise<void> {
+  const modelId = input.dataset.modelAccess;
+  if (!modelId) return;
+  input.disabled = true;
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/models/access`, {
+      method: "PUT",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model_id: modelId,
+        enabled: input.checked,
+      }),
+    });
+    const body = await response.json().catch(() => null) as
+      | { model?: ModelInfo; detail?: string }
+      | null;
+    if (!response.ok) {
+      throw new Error(body?.detail || `HTTP ${response.status}`);
+    }
+    addActivity(
+      "AI Model API 접근 변경",
+      `${modelId} · ${input.checked ? "True" : "False"}`,
+    );
+  } catch (error) {
+    input.checked = !input.checked;
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setServiceMessage(
+      "groq-settings-message",
+      `모델 API 설정 실패: ${message}`,
+      false,
+    );
+  } finally {
+    await loadModels();
+  }
+}
+
+const indexingStageLabel = (stage: string): string => ({
+  queued: "대기",
+  git_inspection: "Source 확인",
+  inspecting: "Source 확인",
+  manifest_build: "Manifest 생성",
+  snapshotting: "Snapshot 저장",
+  chunking: "Chunking",
+  bge_m3_embedding: "Embedding · Vector화",
+  embedding: "Embedding · Vector화",
+  artifact_contract_validation: "Colab Package 검증",
+  offline_snapshot_registration: "Snapshot 등록",
+  offline_shard_import: "Colab Vector Import",
+  offline_index_validation: "Import 개수 검증",
+  offline_import_failed: "Colab Import 실패",
+  active_generation_switch: "검증 · Index 전환",
+  publishing: "검증 · Index 전환",
+  uploading: "원본 업로드",
+  indexing: "Vector화 · Indexing",
+  completed: "완료",
+  failed: "실패",
+  cancelled: "취소",
+})[stage] || stage;
+
+function indexingJobMarkup(job: IndexingJobSummary): string {
+  const progress = Math.max(0, Math.min(100, job.progress_percent));
+  const tone = job.state === "failed" || job.stalled
+    ? "bg-danger-300"
+    : job.active ? "bg-amber-300" : "bg-mint-300";
+  const stateTone = job.state === "failed" || job.stalled
+    ? "text-danger-300"
+    : job.active ? "text-amber-300" : "text-mint-300";
+  const count = job.total > 0
+    ? `${job.processed.toLocaleString("ko-KR")}/${job.total.toLocaleString("ko-KR")} files`
+    : `${job.chunks_stored.toLocaleString("ko-KR")} chunks`;
+  return `
+    <article class="rounded-lg border border-white/7 bg-black/10 px-2.5 py-2">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <p class="truncate text-[10px] font-semibold text-white/70">${escapeHtml(job.project_id)}</p>
+          <p class="mt-0.5 truncate font-mono text-[8px] text-white/25">${job.job_kind.toUpperCase()} · ${escapeHtml(job.job_id)}</p>
+        </div>
+        <span class="shrink-0 text-[9px] font-semibold ${stateTone}">${job.stalled ? "중단 감지" : escapeHtml(indexingStageLabel(job.stage))}</span>
+      </div>
+      <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-white/7">
+        <div class="h-full rounded-full ${tone} transition-[width] duration-500" style="width:${progress}%"></div>
+      </div>
+      <div class="mt-1.5 flex items-center justify-between gap-2 font-mono text-[8px] text-white/30">
+        <span>${progress.toFixed(1)}% · ${count}</span>
+        <span>${job.chunks_stored.toLocaleString("ko-KR")} chunks</span>
+      </div>
+      ${job.stalled ? '<p class="mt-1.5 text-[9px] text-danger-300">15분 이상 진행 갱신 없음 · 재인덱싱 필요</p>' : job.error ? `<p class="mt-1.5 line-clamp-2 text-[9px] text-danger-300">${escapeHtml(job.error)}</p>` : ""}
+    </article>`;
+}
+
+async function loadIndexingJobs(): Promise<void> {
+  const list = document.getElementById("indexing-job-list");
+  if (!list) return;
+  try {
+    const response = await fetch(
+      `${apiBaseUrl}/v1/indexing-jobs?active_only=false&limit=20`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Client-Type": "admin-dashboard",
+        },
+        cache: "no-store",
+      },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = (await response.json()) as IndexingJobListResponse;
+    const ordered = [...value.jobs].sort(
+      (left, right) => Number(right.active) - Number(left.active)
+        || Date.parse(right.updated_at) - Date.parse(left.updated_at),
+    );
+    list.innerHTML = ordered.slice(0, 12).map(indexingJobMarkup).join("")
+      || '<p class="rounded-lg border border-white/7 bg-black/10 px-3 py-4 text-center text-[10px] text-white/30">진행 중이거나 최근 실행된 Indexing Job이 없습니다.</p>';
+    setText(
+      "indexing-job-count",
+      value.active > 0
+        ? `${value.active}개 작업 중 · ${new Date(value.checked_at).toLocaleTimeString("ko-KR")}`
+        : `대기 작업 없음 · ${new Date(value.checked_at).toLocaleTimeString("ko-KR")}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    list.innerHTML = `<p class="text-[10px] text-danger-300">Job 조회 실패: ${escapeHtml(message)}</p>`;
+    setText("indexing-job-count", "조회 실패");
+  }
+}
+
+function embeddingArtifactMarkup(artifact: OfflineEmbeddingArtifact): string {
+  const failed = Boolean(artifact.error);
+  const ready = artifact.compatible && !artifact.imported && !failed;
+  const status = artifact.imported
+    ? "반영 완료"
+    : failed
+      ? "Package 오류"
+      : artifact.compatible
+        ? "Import 가능"
+        : "계약 불일치";
+  const tone = artifact.imported
+    ? "text-mint-300"
+    : ready
+      ? "text-amber-300"
+      : "text-danger-300";
+  const reason = artifact.error
+    || (artifact.contract_errors.length
+      ? `불일치: ${artifact.contract_errors.join(", ")}`
+      : `${artifact.shard_count.toLocaleString("ko-KR")} shards`);
+  return `
+    <article class="rounded-lg border border-white/7 bg-black/10 px-2.5 py-2">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <p class="truncate text-[10px] font-semibold text-white/70">${escapeHtml(artifact.project_id)}</p>
+          <p class="mt-0.5 truncate font-mono text-[8px] text-white/25">${escapeHtml(artifact.model_id)} · ${artifact.embedding_dimension}D</p>
+        </div>
+        <span class="shrink-0 text-[9px] font-semibold ${tone}">${status}</span>
+      </div>
+      <div class="mt-1.5 flex items-center justify-between gap-2 text-[9px] text-white/35">
+        <span>${artifact.chunk_count.toLocaleString("ko-KR")} chunks</span>
+        <span class="truncate">${escapeHtml(reason)}</span>
+      </div>
+      <button
+        type="button"
+        data-import-artifact="${escapeHtml(artifact.artifact_id)}"
+        class="mt-2 w-full rounded-md border border-amber-300/20 px-2 py-1.5 text-[9px] font-semibold text-amber-300 hover:bg-amber-300/5 disabled:cursor-not-allowed disabled:opacity-35"
+        ${ready ? "" : "disabled"}
+      >${artifact.imported ? "이미 반영됨" : "PostgreSQL · Qdrant Import"}</button>
+    </article>`;
+}
+
+async function loadEmbeddingArtifacts(): Promise<void> {
+  const list = document.getElementById("embedding-artifact-list");
+  if (!list) return;
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/embedding-artifacts`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = (await response.json()) as OfflineEmbeddingArtifactListResponse;
+    if (!value.root_available) {
+      list.innerHTML = '<p class="text-[10px] text-amber-300">embedding-results 동기화 폴더를 기다리고 있습니다.</p>';
+      return;
+    }
+    list.innerHTML = value.artifacts.map(embeddingArtifactMarkup).join("")
+      || '<p class="text-[10px] text-white/30">COMPLETE.json Package가 없습니다.</p>';
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    list.innerHTML = `<p class="text-[10px] text-danger-300">Package 조회 실패: ${escapeHtml(message)}</p>`;
+  }
+}
+
+async function importEmbeddingArtifact(button: HTMLButtonElement): Promise<void> {
+  const artifactId = button.dataset.importArtifact;
+  if (!artifactId || button.disabled) return;
+  button.disabled = true;
+  button.textContent = "Import Job 생성 중";
+  try {
+    const response = await fetch(
+      `${adminApiBaseUrl}/embedding-artifacts/${encodeURIComponent(artifactId)}/import`,
+      {
+        method: "POST",
+        headers: { Accept: "application/json" },
+      },
+    );
+    const body = await response.json().catch(() => ({})) as {
+      job_id?: string;
+      detail?: string;
+    };
+    if (!response.ok) {
+      throw new Error(body.detail || `HTTP ${response.status}`);
+    }
+    addActivity(
+      "Colab Embedding Import 시작",
+      `${artifactId} · ${body.job_id || "job 생성"}`,
+    );
+    await Promise.all([loadEmbeddingArtifacts(), loadIndexingJobs()]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    button.textContent = `실패: ${message}`;
+    button.disabled = false;
+  }
+}
+
+let frontendClients: FrontendClientRecord[] = [];
+let editingFrontendClientId: string | null = null;
+
+function setFrontendClientMessage(message: string, ok = true): void {
+  const element = document.getElementById("frontend-client-message");
+  if (!element) return;
+  element.textContent = message;
+  element.className = `text-[11px] ${ok ? "text-mint-300/75" : "text-danger-300"}`;
+}
+
+function frontendClientRow(client: FrontendClientRecord): string {
+  const stateLabel = client.enabled ? "True" : "False";
+  const stateClass = client.enabled ? "text-mint-300" : "text-white/35";
+  const endpointState = client.reachable
+    ? `<span class="text-mint-300">최근 요청 확인</span>`
+    : `<span class="text-danger-300">${client.last_seen_at ? "180초 이상 신호 없음" : "아직 요청 없음"}</span>`;
+  const registrationLabel = client.registration_type === "auto" ? "AUTO" : "ADMIN";
+  return `
+    <div class="mock-client-row" data-client-id="${escapeHtml(client.client_id)}">
+      <div class="min-w-0">
+        <p class="truncate text-xs font-semibold text-white/78">${escapeHtml(client.name)}</p>
+        <p class="mt-1 font-mono text-[9px] text-white/28">${escapeHtml(client.client_id)} · ${registrationLabel}</p>
+        ${client.instance_id ? `<p class="mt-1 truncate font-mono text-[9px] text-white/22">${escapeHtml(client.instance_id)}</p>` : ""}
+      </div>
+      <div class="min-w-0">
+        <p class="truncate font-mono text-[11px] text-white/55">${escapeHtml(client.ip)}:${client.port}</p>
+        <p class="mt-1 text-[9px]">${endpointState}</p>
+      </div>
+      <label class="flex w-fit cursor-pointer items-center gap-2">
+        <input class="square-checkbox" type="checkbox" data-client-toggle="${escapeHtml(client.client_id)}" ${client.enabled ? "checked" : ""} aria-label="${escapeHtml(client.name)} Backend 연결 허용" />
+        <span class="font-mono text-[10px] font-bold ${stateClass}" data-client-state="${escapeHtml(client.client_id)}">${stateLabel}</span>
+      </label>
+      <div class="flex justify-end gap-1.5">
+        <button type="button" data-client-action="edit" data-client-id="${escapeHtml(client.client_id)}" class="rounded-lg border border-white/10 px-2.5 py-1.5 text-[10px] text-white/55 transition hover:bg-white/5">수정</button>
+        <button type="button" data-client-action="delete" data-client-id="${escapeHtml(client.client_id)}" class="rounded-lg border border-danger-300/15 px-2.5 py-1.5 text-[10px] text-danger-300 transition hover:bg-danger-300/5">삭제</button>
+      </div>
+    </div>`;
+}
+
+function renderFrontendClients(summary?: FrontendClientListResponse): void {
+  const list = document.getElementById("frontend-client-list");
+  const empty = document.getElementById("frontend-client-empty");
+  if (!list || !empty) return;
+  list.innerHTML = frontendClients.map(frontendClientRow).join("");
+  empty.classList.toggle("hidden", frontendClients.length > 0);
+  setText(
+    "frontend-client-count",
+    `${summary?.total ?? frontendClients.length} clients · ${summary?.enabled ?? frontendClients.filter((client) => client.enabled).length} active · ${summary?.reachable ?? frontendClients.filter((client) => client.reachable).length} reachable`,
+  );
+}
+
+async function loadFrontendClients(): Promise<void> {
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/frontend-clients`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = (await response.json()) as FrontendClientListResponse;
+    frontendClients = value.clients;
+    renderFrontendClients(value);
+    setFrontendClientMessage(
+      `${value.enabled}개 Client 연결 허용 · ${value.reachable}개 최근 요청 확인`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setFrontendClientMessage(`Client Registry를 불러오지 못했습니다: ${message}`, false);
+  }
+}
+
+function resetFrontendClientForm(): void {
+  editingFrontendClientId = null;
+  setInputValue("frontend-client-id", "");
+  setInputValue("frontend-client-name", "");
+  setInputValue("frontend-client-ip", "");
+  setInputValue("frontend-client-port", 8888);
+  setText("frontend-client-submit", "Client 추가");
+  document.getElementById("frontend-client-cancel-edit")?.classList.add("hidden");
+}
+
+function editFrontendClient(clientId: string): void {
+  const client = frontendClients.find((item) => item.client_id === clientId);
+  if (!client) return;
+  editingFrontendClientId = client.client_id;
+  setInputValue("frontend-client-id", client.client_id);
+  setInputValue("frontend-client-name", client.name);
+  setInputValue("frontend-client-ip", client.ip);
+  setInputValue("frontend-client-port", client.port);
+  setText("frontend-client-submit", "변경 저장");
+  document.getElementById("frontend-client-cancel-edit")?.classList.remove("hidden");
+  document.getElementById("frontend-client-name")?.focus();
+  setFrontendClientMessage(`${client.name} 항목을 수정 중입니다.`);
+}
+
+async function saveFrontendClient(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  const form = event.currentTarget as HTMLFormElement;
+  if (!form.reportValidity()) return;
+  const name = inputValue("frontend-client-name");
+  const ip = inputValue("frontend-client-ip");
+  const port = Number(inputValue("frontend-client-port"));
+  if (!name || !ip || !Number.isInteger(port) || port < 1 || port > 65535) {
+    setFrontendClientMessage("Client 이름, IP와 1~65535 Port를 확인해 주세요.", false);
+    return;
+  }
+  const existing = editingFrontendClientId
+    ? frontendClients.find((client) => client.client_id === editingFrontendClientId)
+    : null;
+  const button = document.getElementById("frontend-client-submit") as HTMLButtonElement | null;
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch(
+      editingFrontendClientId
+        ? `${adminApiBaseUrl}/frontend-clients/${encodeURIComponent(editingFrontendClientId)}`
+        : `${adminApiBaseUrl}/frontend-clients`,
+      {
+        method: editingFrontendClientId ? "PUT" : "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name,
+          ip,
+          port,
+          enabled: existing?.enabled ?? true,
+        }),
+      },
+    );
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new Error(body?.detail || `HTTP ${response.status}`);
+    }
+    setFrontendClientMessage(
+      editingFrontendClientId
+        ? `${name} Client 정보를 변경했습니다.`
+        : `${name} Client를 True 상태로 등록했습니다.`,
+    );
+    addActivity(
+      editingFrontendClientId ? "Frontend Client 변경" : "Frontend Client 등록",
+      `${name} · ${ip}:${port}`,
+    );
+    resetFrontendClientForm();
+    await loadFrontendClients();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setFrontendClientMessage(`저장 실패: ${message}`, false);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function handleFrontendClientClick(event: MouseEvent): Promise<void> {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
+    "button[data-client-action]",
+  );
+  if (!button) return;
+  const clientId = button.dataset.clientId;
+  if (!clientId) return;
+  if (button.dataset.clientAction === "edit") {
+    editFrontendClient(clientId);
+    return;
+  }
+  const client = frontendClients.find((item) => item.client_id === clientId);
+  if (!client || !window.confirm(`${client.name} Client를 Registry에서 삭제할까요?`)) {
+    return;
+  }
+  try {
+    const response = await fetch(
+      `${adminApiBaseUrl}/frontend-clients/${encodeURIComponent(clientId)}`,
+      { method: "DELETE", headers: { Accept: "application/json" } },
+    );
+    if (!response.ok && response.status !== 204) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    if (editingFrontendClientId === clientId) resetFrontendClientForm();
+    setFrontendClientMessage(`${client.name} Client를 삭제했습니다.`);
+    addActivity("Frontend Client 삭제", `${client.name} · ${client.ip}:${client.port}`);
+    await loadFrontendClients();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setFrontendClientMessage(`삭제 실패: ${message}`, false);
+  }
+}
+
+async function handleFrontendClientToggle(event: Event): Promise<void> {
+  const checkbox = (event.target as HTMLElement).closest<HTMLInputElement>(
+    "input[data-client-toggle]",
+  );
+  const clientId = checkbox?.dataset.clientToggle;
+  if (!checkbox || !clientId) return;
+  const client = frontendClients.find((item) => item.client_id === clientId);
+  if (!client) return;
+  checkbox.disabled = true;
+  try {
+    const response = await fetch(
+      `${adminApiBaseUrl}/frontend-clients/${encodeURIComponent(clientId)}`,
+      {
+        method: "PUT",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: client.name,
+          ip: client.ip,
+          port: client.port,
+          enabled: checkbox.checked,
+        }),
+      },
+    );
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new Error(body?.detail || `HTTP ${response.status}`);
+    }
+    setFrontendClientMessage(
+      `${client.name}의 Backend 연결을 ${checkbox.checked ? "True" : "False"}로 변경했습니다.`,
+    );
+    addActivity(
+      "Frontend 연결 제어 변경",
+      `${client.name} · ${checkbox.checked ? "허용" : "차단"}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setFrontendClientMessage(`상태 변경 실패: ${message}`, false);
+  } finally {
+    await loadFrontendClients();
+  }
+}
+
+let loadedServiceSettings: RuntimeServiceSettingsResponse | null = null;
+
+function setServiceMessage(
+  targetId: "groq-settings-message" | "vector-settings-message" | "reembed-status",
+  message: string,
+  ok = true,
+): void {
+  const element = document.getElementById(targetId);
+  if (!element) return;
+  element.textContent = message;
+  element.className = `mt-2 text-[10px] ${ok ? "text-mint-300/75" : "text-danger-300"}`;
+}
+
+function serviceSettingsPayload(): object | null {
+  if (!loadedServiceSettings) return null;
+  const groqEnabled = (
+    document.getElementById("groq-enabled") as HTMLInputElement | null
+  )?.checked ?? false;
+  return {
+    groq: {
+      enabled: groqEnabled,
+      base_url: inputValue("groq-base-url"),
+      model: inputValue("groq-model"),
+    },
+    default_model_id: (
+      document.getElementById("default-model-id") as HTMLSelectElement | null
+    )?.value || loadedServiceSettings.default_model_id,
+    vector: {
+      host: inputValue("vector-host"),
+      port: Number(inputValue("vector-port")),
+      collection: inputValue("vector-collection"),
+      embedding_deployment: (
+        document.getElementById("embedding-deployment") as HTMLSelectElement | null
+      )?.value || loadedServiceSettings.vector.embedding_deployment,
+      embedding_provider: (
+        document.getElementById("embedding-provider") as HTMLSelectElement | null
+      )?.value || loadedServiceSettings.vector.embedding_provider,
+      embedding_base_url: inputValue("embedding-base-url"),
+      embedding_model: inputValue("embedding-model"),
+      embedding_model_id: inputValue("embedding-model-id"),
+      embedding_dimension: Number(inputValue("embedding-dimension")),
+      embedding_batch_size: Number(inputValue("embedding-batch-size")),
+      index_version: inputValue("index-version"),
+    },
+  };
+}
+
+function renderServiceSettings(value: RuntimeServiceSettingsResponse): void {
+  loadedServiceSettings = value;
+  const groqEnabled = document.getElementById("groq-enabled") as HTMLInputElement | null;
+  if (groqEnabled) groqEnabled.checked = value.groq.enabled;
+  setInputValue("groq-base-url", value.groq.base_url);
+  setInputValue("groq-model", value.groq.model);
+  renderDefaultModelOptions(value.default_model_id);
+  setInputValue("vector-host", value.vector.host);
+  setInputValue("vector-port", value.vector.port);
+  setInputValue("vector-collection", value.vector.collection);
+  setInputValue("embedding-deployment", value.vector.embedding_deployment);
+  setInputValue("embedding-provider", value.vector.embedding_provider);
+  setInputValue("embedding-base-url", value.vector.embedding_base_url);
+  setInputValue("embedding-model", value.vector.embedding_model);
+  setInputValue("embedding-model-id", value.vector.embedding_model_id);
+  setInputValue("embedding-dimension", value.vector.embedding_dimension);
+  setInputValue("embedding-batch-size", value.vector.embedding_batch_size);
+  setInputValue("index-version", value.vector.index_version);
+  setText(
+    "vector-runtime-badge",
+    `${value.vector.provider.toUpperCase()} · ${value.vector.embedding_provider.toUpperCase()}/${value.vector.embedding_deployment.toUpperCase()}`,
+  );
+
+    setServiceMessage(
+      "groq-settings-message",
+      value.groq.api_key_configured
+      ? `${value.groq.model} · ${value.groq.enabled ? "사용" : "중지"} · 기본 AI 모델 즉시 적용`
+      : "GROQ_API_KEY가 없어 모델을 사용할 수 없습니다.",
+    value.groq.api_key_configured || !value.groq.enabled,
+  );
+  setServiceMessage(
+    "vector-settings-message",
+    value.vector.restart_required
+      ? value.vector.reindex_required
+        ? `저장됨 · API 재시작 후 재인덱싱 필요 · 현재 ${value.vector.active_embedding_model_id}/${value.vector.active_embedding_model} (${value.vector.active_embedding_dimension}D)`
+        : `저장됨 · 동일 임베딩 모델 · API 재시작 필요 · 기존 인덱스 호환 (${value.vector.embedding_model_id})`
+      : `적용 중 · ${value.vector.embedding_deployment}/${value.vector.embedding_model_id}/${value.vector.embedding_model} (${value.vector.embedding_dimension}D)`,
+    !value.vector.restart_required,
+  );
+}
+
+async function loadServiceSettings(): Promise<void> {
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/service-settings`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    renderServiceSettings(
+      (await response.json()) as RuntimeServiceSettingsResponse,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setServiceMessage("groq-settings-message", `설정 조회 실패: ${message}`, false);
+    setServiceMessage("vector-settings-message", `설정 조회 실패: ${message}`, false);
+  }
+}
+
+async function saveServiceSettings(
+  event: SubmitEvent,
+  section: "groq" | "vector",
+): Promise<void> {
+  event.preventDefault();
+  const form = event.currentTarget as HTMLFormElement;
+  if (!form.reportValidity()) return;
+  const payload = serviceSettingsPayload();
+  if (!payload) {
+    setServiceMessage(
+      section === "groq" ? "groq-settings-message" : "vector-settings-message",
+      "설정을 먼저 불러와 주세요.",
+      false,
+    );
+    return;
+  }
+  const buttonId = section === "groq" ? "groq-settings-save" : "vector-settings-save";
+  const button = document.getElementById(buttonId) as HTMLButtonElement | null;
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/service-settings`, {
+      method: "PUT",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json().catch(() => null) as
+      | RuntimeServiceSettingsResponse
+      | { detail?: string }
+      | null;
+    if (!response.ok) {
+      throw new Error(
+        body && "detail" in body && typeof body.detail === "string"
+          ? body.detail
+          : `HTTP ${response.status}`,
+      );
+    }
+    const value = body as RuntimeServiceSettingsResponse;
+    renderServiceSettings(value);
+    addActivity(
+      section === "groq" ? "AI Model 설정 변경" : "Vector 설정 변경",
+      section === "groq"
+        ? `${value.default_model_id} · 기본 AI 모델`
+        : `${value.vector.host}:${value.vector.port}/${value.vector.collection}`,
+    );
+    await loadModels();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setServiceMessage(
+      section === "groq" ? "groq-settings-message" : "vector-settings-message",
+      `저장 실패: ${message}`,
+      false,
+    );
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function runReembedding(): Promise<void> {
+  const button = document.getElementById("reembed-button") as HTMLButtonElement | null;
+  if (!button || button.disabled) return;
+  if (loadedServiceSettings?.vector.restart_required) {
+    setServiceMessage(
+      "reembed-status",
+      "Vector 설정을 적용하도록 API를 재시작한 뒤 재임베딩해 주세요.",
+      false,
+    );
+    return;
+  }
+  if (!window.confirm("중단된 작업은 이어서 실행하고, 나머지 활성 Repository Source는 강제 재인덱싱할까요?")) {
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "재개·생성 중…";
+  setServiceMessage("reembed-status", "Repository Source와 중단 작업 조회 중");
+  try {
+    const [sourceResponse, jobResponse] = await Promise.all([
+      fetch(`${adminApiBaseUrl}/repository-sources`, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      }),
+      fetch(`${apiBaseUrl}/v1/indexing-jobs?active_only=false&limit=200`, {
+        headers: {
+          Accept: "application/json",
+          "X-Client-Type": "admin-dashboard",
+        },
+        cache: "no-store",
+      }),
+    ]);
+    if (!sourceResponse.ok) throw new Error(`Source HTTP ${sourceResponse.status}`);
+    if (!jobResponse.ok) throw new Error(`Job HTTP ${jobResponse.status}`);
+    const sourceList = (await sourceResponse.json()) as RepositorySourceListResponse;
+    const jobList = (await jobResponse.json()) as IndexingJobListResponse;
+    const enabledSources = sourceList.sources.filter((source) => source.enabled);
+    if (enabledSources.length === 0) {
+      throw new Error("활성 Repository Source가 없습니다.");
+    }
+    const pausedBySource = new Map<string, IndexingJobSummary>();
+    [...jobList.jobs]
+      .filter((job) =>
+        job.job_kind === "repository"
+        && job.state === "paused"
+        && Boolean(job.source_id)
+      )
+      .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
+      .forEach((job) => {
+        if (job.source_id && !pausedBySource.has(job.source_id)) {
+          pausedBySource.set(job.source_id, job);
+        }
+      });
+    const results = await Promise.allSettled(enabledSources.map(async (source) => {
+      const pausedJob = pausedBySource.get(source.source_id);
+      const endpoint = pausedJob
+        ? `${adminApiBaseUrl}/indexing-jobs/${encodeURIComponent(pausedJob.job_id)}/resume`
+        : `${adminApiBaseUrl}/repository-sources/${encodeURIComponent(source.source_id)}/index`;
+      const response = await fetch(
+        endpoint,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          ...(pausedJob ? {} : { body: JSON.stringify({ force: true }) }),
+        },
+      );
+      const body = await response.json().catch(() => null) as
+        | { job_id?: string; detail?: string }
+        | null;
+      if (!response.ok) {
+        throw new Error(`${source.project_id}: ${body?.detail || `HTTP ${response.status}`}`);
+      }
+      return `${source.project_id} (${pausedJob ? "재개" : "신규"} · ${body?.job_id || "queued"})`;
+    }));
+    const queued = results
+      .filter((result): result is PromiseFulfilledResult<string> => result.status === "fulfilled")
+      .map((result) => result.value);
+    const failed = results.filter((result) => result.status === "rejected").length;
+    setServiceMessage(
+      "reembed-status",
+      `Job ${queued.length}개 재개/생성${failed ? ` · ${failed}개 실패/이미 실행 중` : ""}`,
+      queued.length > 0,
+    );
+    addActivity("Repository 재임베딩 요청", queued.join(", ") || "생성 실패");
+    await loadIndexingJobs();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setServiceMessage("reembed-status", `Job 생성 실패: ${message}`, false);
+  } finally {
+    button.disabled = false;
+    button.textContent = "등록 Source 전체 재임베딩";
+  }
+}
+
+function initializeAdminControls(): void {
+  resetFrontendClientForm();
+  resetAIProviderForm();
+  document.getElementById("frontend-client-form")
+    ?.addEventListener("submit", (event) => void saveFrontendClient(event as SubmitEvent));
+  document.getElementById("frontend-client-cancel-edit")
+    ?.addEventListener("click", () => {
+      resetFrontendClientForm();
+      setFrontendClientMessage("수정을 취소했습니다.");
+    });
+  document.getElementById("frontend-client-list")
+    ?.addEventListener("click", (event) => void handleFrontendClientClick(event));
+  document.getElementById("frontend-client-list")
+    ?.addEventListener("change", (event) => void handleFrontendClientToggle(event));
+  document.getElementById("groq-settings-form")
+    ?.addEventListener("submit", (event) => void saveServiceSettings(event as SubmitEvent, "groq"));
+  document.getElementById("model-discovery-list")
+    ?.addEventListener("change", (event) => {
+      const input = (event.target as HTMLElement).closest<HTMLInputElement>(
+        "input[data-model-access]",
+      );
+      if (input) void updateModelAccess(input);
+    });
+  document.getElementById("ai-provider-form")
+    ?.addEventListener("submit", (event) => void saveAIProvider(event as SubmitEvent));
+  document.getElementById("ollama-scan-button")
+    ?.addEventListener("click", () => void scanKnownOllamaServers());
+  document.getElementById("ai-provider-cancel")
+    ?.addEventListener("click", () => {
+      resetAIProviderForm();
+      setAIProviderMessage("입력을 초기화했습니다.");
+    });
+  document.getElementById("ai-provider-connection-mode")
+    ?.addEventListener("change", syncAIProviderConnectionFields);
+  document.getElementById("ai-provider-auth")
+    ?.addEventListener("change", syncAIProviderAuthFields);
+  document.getElementById("ai-provider-list")
+    ?.addEventListener("click", (event) => void handleAIProviderClick(event));
+  document.getElementById("default-model-id")
+    ?.addEventListener("change", (event) => {
+      updateDefaultModelPresentation((event.currentTarget as HTMLSelectElement).value);
+    });
+  document.getElementById("vector-settings-form")
+    ?.addEventListener("submit", (event) => void saveServiceSettings(event as SubmitEvent, "vector"));
+  document.getElementById("reembed-button")
+    ?.addEventListener("click", () => void runReembedding());
+  document.getElementById("embedding-artifact-refresh")
+    ?.addEventListener("click", () => void loadEmbeddingArtifacts());
+  document.getElementById("embedding-artifact-list")
+    ?.addEventListener("click", (event) => {
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
+        "button[data-import-artifact]",
+      );
+      if (button) void importEmbeddingArtifact(button);
+    });
+}
+
+function setNetworkSettingsMessage(message: string, ok = true): void {
+  const element = document.getElementById("network-settings-message");
+  if (!element) return;
+  element.textContent = message;
+  element.className = `text-xs ${ok ? "text-mint-300/75" : "text-danger-300"}`;
+}
+
+let loadedNetworkSettings: NetworkSettingsResponse | null = null;
+
+async function loadNetworkSettings(): Promise<void> {
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/network-settings`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = (await response.json()) as NetworkSettingsResponse;
+    loadedNetworkSettings = value;
+    setInputValue("backendai-ip", value.backendai.ip);
+    setInputValue("backendai-port", value.backendai.port);
+    setText(
+      "network-settings-updated",
+      value.updated_at
+        ? `최근 저장 ${new Date(value.updated_at).toLocaleString("ko-KR")}`
+        : "환경변수 기본값",
+    );
+    setNetworkSettingsMessage(
+      `현재 적용 중 · ${value.backendai.ip}:${value.backendai.port}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setNetworkSettingsMessage(`설정을 불러오지 못했습니다: ${message}`, false);
+  }
+}
+
+async function saveNetworkSettings(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  const form = event.currentTarget as HTMLFormElement;
+  if (!form.reportValidity()) return;
+  const button = document.getElementById("network-settings-save") as HTMLButtonElement | null;
+  if (button) button.disabled = true;
+  setNetworkSettingsMessage("주소를 검증하고 저장하는 중입니다.");
+  try {
+    const payload = {
+      frontend: loadedNetworkSettings?.frontend ?? {
+        ip: frontendClients[0]?.ip || "192.168.0.7",
+        port: frontendClients[0]?.port || 8888,
+      },
+      backendai: {
+        ip: inputValue("backendai-ip"),
+        port: Number(inputValue("backendai-port")),
+      },
+    };
+    const response = await fetch(`${adminApiBaseUrl}/network-settings`, {
+      method: "PUT",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new Error(errorBody?.detail || `HTTP ${response.status}`);
+    }
+    const value = (await response.json()) as NetworkSettingsResponse;
+    loadedNetworkSettings = value;
+    setText("network-settings-updated", `최근 저장 ${new Date(value.updated_at || Date.now()).toLocaleString("ko-KR")}`);
+    setNetworkSettingsMessage("저장 완료. AI Model Server 요청 대상이 즉시 변경되었습니다.");
+    addActivity(
+      "AI Model Server 설정 변경",
+      `${value.backendai.ip}:${value.backendai.port}`,
+    );
+    await loadConnectivity();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setNetworkSettingsMessage(`저장 실패: ${message}`, false);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+let refreshInProgress = false;
+
+async function refreshDashboard(): Promise<void> {
+  if (refreshInProgress) return;
+  refreshInProgress = true;
+  const refreshButton = document.querySelector<HTMLButtonElement>("#refresh-button");
+  if (refreshButton) refreshButton.disabled = true;
+  try {
+    const tasks: Promise<unknown>[] = [loadHealth(), loadConnectivity()];
+    if (isOverview) {
+      tasks.push(
+        loadFrontendClients(),
+        loadModels(),
+        loadAIProviders(),
+        loadServiceSettings(),
+        loadIndexingJobs(),
+        loadEmbeddingArtifacts(),
+      );
+    }
+    if (isSystemStatus) {
+      tasks.push(
+        loadSystemEndpointActivity(adminApiBaseUrl),
+        loadSystemCommunicationLogs(adminApiBaseUrl),
+      );
+    }
+    await Promise.allSettled(tasks);
+  } finally {
+    refreshInProgress = false;
     if (refreshButton) refreshButton.disabled = false;
   }
 }
 
-document.getElementById("refresh-button")?.addEventListener("click", () => void loadHealth());
-void loadHealth();
+if (isPlayground) {
+  startPlayground(apiBaseUrl);
+} else {
+  document.getElementById("refresh-button")?.addEventListener("click", () => void refreshDashboard());
+  if (isOverview) {
+    document.getElementById("network-settings-form")?.addEventListener("submit", (event) => void saveNetworkSettings(event as SubmitEvent));
+    initializeAdminControls();
+    void Promise.allSettled([refreshDashboard(), loadNetworkSettings()]);
+    window.setInterval(() => void loadIndexingJobs(), 5_000);
+    window.setInterval(() => void loadEmbeddingArtifacts(), 15_000);
+  } else {
+    if (isSystemStatus) initializeSystemStatus(adminApiBaseUrl);
+    void refreshDashboard();
+  }
+  window.setInterval(() => void refreshDashboard(), 30_000);
+}

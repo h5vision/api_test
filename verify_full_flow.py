@@ -131,18 +131,20 @@ def main() -> None:
         chat = request_json(
             f"{base_url}/v1/chat",
             {
+                "project_id": "verification-project",
                 "message": "결제 실패 재시도 횟수와 함수를 알려줘",
                 "session_id": "verification-project",
                 "top_k": 3,
+                "history": [],
             },
             method="POST",
         )
 
         assert ingest["chunks_stored"] >= 1
         assert search["results"] and search["results"][0]["document_id"] == "payment.py"
-        assert chat["answer"] and chat["sources"]
-        assert chat["session_id"] == "verification-project"
-        assert chat["project_id"] == "verification-project"
+        assert chat["answer"] and chat["source"]
+        assert chat["metadata"]["session_id"] == "verification-project"
+        assert chat["metadata"]["project_id"] == "verification-project"
         print(
             json.dumps(
                 {
@@ -150,7 +152,7 @@ def main() -> None:
                     "mode": "nvidia-live" if args.live else "local",
                     "chunks_stored": ingest["chunks_stored"],
                     "search_results": len(search["results"]),
-                    "chat_sources": len(chat["sources"]),
+                    "chat_sources": len(chat["source"]),
                     "providers": chat["metadata"],
                 },
                 ensure_ascii=False,

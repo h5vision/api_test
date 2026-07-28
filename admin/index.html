@@ -6,6 +6,19 @@
     <meta name="robots" content="noindex,nofollow,noarchive" />
     <meta name="theme-color" content="#06100e" />
     <title>Vision Control Center</title>
+    <script>
+      (() => {
+        try {
+          const stored = localStorage.getItem("vision-admin-theme");
+          document.documentElement.dataset.theme =
+            stored === "dark" || stored === "light" || stored === "system"
+              ? stored
+              : "system";
+        } catch {
+          document.documentElement.dataset.theme = "system";
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

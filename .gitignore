@@ -16,3 +16,5 @@ admin/dist/
 deploy/traefik/acme.json
 deploy/traefik/certs/*.key
 .
+docs
+.gitignore

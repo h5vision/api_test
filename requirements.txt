@@ -3,3 +3,17 @@ uvicorn[standard]>=0.30,<1
 pydantic>=2.9,<3
 python-dotenv>=1.0,<2
 psycopg[binary]>=3.2,<4
+dulwich>=0.22,<1
+cryptography>=45,<47
+redis>=5.2,<7
+# Python 3.10+
+
+# Backend API
+fastapi>=0.139.2,<1.0.0
+pydantic-settings>=2.14.2,<3.0.0
+
+# ASGI server (Windows event loop and development reload support)
+granian[reload,winloop]>=2.7.9,<3.0.0
+
+# Asynchronous communication with the sLLM service
+httpx>=0.28.1,<1.0.0

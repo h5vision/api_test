@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+chromadb
+pydantic
+requests
+ollama
