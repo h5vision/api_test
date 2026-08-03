@@ -60,10 +60,11 @@ class PostgresModelAccessPolicyStore:
                 ) from exc
 
     def _default_enabled(self, model_id: str) -> bool:
-        if model_id.startswith("provider:"):
-            # A Provider is already protected by the administrator-only CRUD
-            # API and its own enabled switch. Newly discovered models should
-            # therefore be chat-ready without a second manual access step.
+        if model_id.startswith(
+            ("provider:", "backendai:", "nvidia:", "groq:")
+        ):
+            # Discovered models inherit the Provider's access state. They can
+            # still be disabled individually by creating an explicit policy.
             return True
         return model_id in {
             self._settings.backendai_public_model_id,

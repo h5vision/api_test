@@ -239,7 +239,7 @@ python main.py
 
 ## 3. VS Code 확장 연결
 
-확장 프로그램은 별도 프로젝트에서 관리합니다. API 주소는 내부망에서 `http://192.168.0.7:8000`, Cloudflare 경로에서 `https://api.blakeedenparker.cloud`를 사용합니다. 프로젝트 폴더명을 `project_id`와 `session_id`로 전송하고, 생성 모델은 `GET /v1/models`에서 받은 공개 `model_id`만 전송합니다. provider URL이나 API key는 확장에 넣지 않습니다.
+확장 프로그램은 별도 프로젝트에서 관리합니다. API 주소는 내부망의 `http://192.168.0.7:8000`을 사용합니다. 프로젝트 폴더명을 `project_id`와 `session_id`로 전송하고, 생성 모델은 `GET /v1/models`에서 받은 공개 `model_id`만 전송합니다. provider URL이나 API key는 확장에 넣지 않습니다.
 
 Extension 최초 실행과 Sidebar의 `목록 새로고침`은
 `GET /v1/IngestResponse`를 사용합니다. 이 API는 PostgreSQL Project Registry의
@@ -406,7 +406,7 @@ Content-Type: application/json
 }
 ```
 
-`scope`은 `project`, `session`, `document`, `custom` 중 하나입니다. `project`와 `session`은 `entity_id`를 생략할 수 있고, `document`와 `custom`은 대상 식별자인 `entity_id`가 필수입니다. metadata는 JSON 객체이며 최대 500,000,000바이트(500MB), 최상위 키 200개까지 허용합니다. Cloudflare의 업로드 제한은 metadata가 아닌 전체 HTTP 요청 크기에 적용되므로 실제 공개 도메인 요청은 JSON 구조 오버헤드를 포함해 이보다 작아야 합니다.
+`scope`은 `project`, `session`, `document`, `custom` 중 하나입니다. `project`와 `session`은 `entity_id`를 생략할 수 있고, `document`와 `custom`은 대상 식별자인 `entity_id`가 필수입니다. metadata는 JSON 객체이며 최대 500,000,000바이트(500MB), 최상위 키 200개까지 허용합니다. 실제 요청 크기는 JSON 구조 오버헤드와 클라이언트 메모리를 포함하므로 대용량 프로젝트는 분할 업로드를 사용합니다.
 
 같은 `project_id + scope + entity_id`를 다시 보내면 기존 행의 JSONB payload를 교체하고 `updated_at`을 갱신합니다. 생성과 갱신 모두 `201 Created`로 저장된 전체 레코드를 반환합니다.
 
@@ -606,13 +606,9 @@ filter에 자동으로 추가하므로 빌드 중 세대나 폐기 세대가 검
 Windows 11의 Docker Desktop(WSL2 Linux 컨테이너)에서 다음 구조로 실행합니다.
 
 ```text
-Cloudflare DNS / Access
+LAN client
         |
-Cloudflare Tunnel
-        |
-cloudflared (Docker connector)
-        |
-Traefik :8080 (Docker 내부 entrypoint)
+Traefik :80 / :8000
         |
 Traefik load balancer
         |
@@ -637,37 +633,47 @@ notepad .\compose.env
 
 `PROJECT_PATH`와 `PROJECT_DB_LOCAL_ROOT`는 Docker Desktop이 접근 가능한 Windows 절대 경로를 `/` 구분자로 입력합니다. Compose의 `type: bind`는 `docker run --mount type=bind`와 같은 기능입니다. Docker의 `-m` 옵션은 마운트가 아니라 메모리 제한입니다.
 
-Cloudflare Zero Trust에서 Tunnel을 만든 뒤 connector 환경은 **Docker**로 선택합니다. 발급된 원격 관리형 Tunnel 토큰만 `compose.env`의 `CLOUDFLARE_TUNNEL_TOKEN`에 저장합니다. Public Hostname 세 개는 모두 다음 origin으로 지정합니다.
-
-Cloudflare에서 내려받은 Docker 명령이 `cloudflared 커넥터 설치.txt`에 있다면 토큰을 복사하지 않고 다음 스크립트로 Traefik과 connector만 시작할 수 있습니다. 파일은 Tunnel 토큰을 포함하므로 `.gitignore`에 등록되어 있습니다.
+`compose.env`의 Qdrant와 Redis 비밀값을 교체한 뒤 전체 스택을 시작합니다. PostgreSQL 비밀번호는 `runtime_secrets` Docker 볼륨에 최초 실행 시 안전한 난수로 자동 생성되며 Compose 환경 파일에 기록되지 않습니다.
 
 ```powershell
-.\start_cloudflare_connector.ps1
+docker compose --env-file .\compose.env up -d --scale api=2
 ```
 
-`compose.env`의 Cloudflare, Qdrant, Redis 비밀값을 교체한 뒤 전체 스택을 시작할 때는 다음을 사용합니다. PostgreSQL 비밀번호는 `runtime_secrets` Docker 볼륨에 최초 실행 시 안전한 난수로 자동 생성되며 Compose 환경 파일에 기록되지 않습니다.
+| 접속 주소 | Traefik 대상 |
+|---|---|
+| `http://192.168.0.7:8000` | 모든 FastAPI 경로 |
+| `http://192.168.0.7/v1/*`, `/docs`, `/openapi.json`, `/redoc` | FastAPI |
+| `http://192.168.0.7/` | 관리자 Nginx |
 
-```powershell
-.\start_cloudflare_connector.ps1 -FullStack
-```
-
-| Public hostname | Origin service | Traefik 대상 |
-|---|---|---|
-| `api.blakeedenparker.cloud` | `http://web:80` | FastAPI |
-| `dashboard.blakeedenparker.cloud` | `http://web:80` | Access 적용 전에는 404 |
-| `index.blakeedenparker.cloud` | `http://web:80` | 현재 FastAPI, 추후 웹 서비스로 교체 |
-
-`web`은 Traefik 컨테이너의 Docker 네트워크 alias이며 Cloudflare에 이미 저장된 origin 설정과 호환됩니다. 별도 컨테이너가 아닙니다. `dashboard.blakeedenparker.cloud`는 Cloudflare Access의 SSO/MFA 정책으로 보호한 뒤 Tunnel 라우터를 활성화해야 합니다. Access 적용 전에는 LAN의 443 라우터만 존재합니다. VS Code 확장 API에 Access를 적용할 때는 브라우저 로그인이 아니라 Service Token 또는 애플리케이션 인증을 사용합니다.
-
-Tailwind CSS 관리자 화면은 `https://dashboard.blakeedenparker.cloud`에 연결됩니다. 로컬에서는 `http://127.0.0.1:4173`으로도 확인할 수 있으며 포트는 `ADMIN_PREVIEW_PORT`로 변경할 수 있습니다. 공개 운영 시 Cloudflare Access의 SSO/MFA 정책을 반드시 적용합니다.
+Tailwind CSS 관리자 화면은 `http://192.168.0.7`에 연결됩니다. 서버 PC에서는 `http://127.0.0.1:4173`으로도 확인할 수 있으며 포트는 `ADMIN_PREVIEW_PORT`로 변경할 수 있습니다.
 
 개발자용 sLLM Playground는
-`https://dashboard.blakeedenparker.cloud/playground`에서 사용합니다. 모델 dropdown은
+`http://192.168.0.7/playground`에서 사용합니다. 모델 dropdown은
 `GET /v1/models`의 공개 `model_id`를 사용하며 BackendAI, NVIDIA와 Groq를 선택할 수
 있습니다. 실행 요청은 실제 frontend와 동일한 `POST /v1/chat`을 사용하고,
 답변의 provider, 실제 사용 모델, request ID, 소요시간과 RAG `sources[]`를
 표시합니다. Playground 요청은 `X-Client-Type: admin-playground`로 구분되어
 VS Code frontend heartbeat 상태에는 포함되지 않습니다.
+
+관리자 `System Status` 화면은 일반 요청·응답 메타데이터 로그와 별도로
+`Frontend Chat 감사 로그`를 제공합니다. `POST /v1/chat`의 질문, 최종 AI 답변,
+프로젝트·세션·Client ID, 선택 모델, RAG Source 수, 처리시간과 오류를
+PostgreSQL에 기록하며 최근 7일 동안 항목별 최대 20,000자만 보관합니다.
+Frontend가 전달한 `context`와 `history`는 민감한 코드·대화가 중복 저장되지
+않도록 본문 대신 각각 글자 수와 항목 수만 기록합니다. 조회 경로
+`GET /v1/admin/chat-audit-logs`는 공개 OpenAPI 계약에서 숨겨져 있고
+`admin-web` 내부 프록시를 통과한 요청만 허용합니다.
+
+Client ID가 없는 Extension이 처음 `POST /v1/chat`을 보내면 별도
+`Frontend 최초 연결 · ID 등록 로그`에 등록 시도와 처리 결과를 같은
+`request_id`로 기록합니다. 신규 등록이면 서버가 발급한 `fcli_*` ID,
+최초 연결 시각, Client 이름, 설치별 Instance ID, Extension 버전, 접속 IP와
+식별 방법이 남습니다. Frontend가 사람을 구분할 표시 이름을 제공하려면
+선택 Header `X-Client-User`를 함께 보내야 하며, 서버는 OS 사용자명을 임의로
+추측하지 않습니다. 한글 표시 이름은 HTTP Header 제약 때문에
+`encodeURIComponent(userName)` 값으로 보내면 서버가 복원합니다.
+`GET /v1/admin/frontend-registration-logs` 역시
+`admin-web` 내부 프록시 전용입니다.
 
 관리자 개요 화면의 AI/Vector 설정은 PostgreSQL
 `runtime_service_settings`에 저장됩니다. Groq 사용 여부, Base URL, 실제 모델명과
@@ -690,13 +696,6 @@ docker compose --env-file .\compose.env up --force-recreate admin-build
 docker compose --env-file .\compose.env up -d --force-recreate admin-web
 ```
 
-내부 DNS로 직접 접근해야 한다면 프론트엔드 팀 PC의 관리자 PowerShell에서 hosts 파일에 도메인을 등록할 수 있습니다.
-
-```powershell
-Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" `
-  -Value "`n192.168.0.7 api.blakeedenparker.cloud dashboard.blakeedenparker.cloud index.blakeedenparker.cloud"
-```
-
 구성 검사와 실행:
 
 ```powershell
@@ -705,7 +704,7 @@ docker compose --env-file .\compose.env up -d
 docker compose --env-file .\compose.env ps
 ```
 
-확인 주소는 `https://api.blakeedenparker.cloud/v1/health`입니다. Cloudflare 경로에서는 TLS가 Cloudflare Edge에서 종료되고 Tunnel 내부에서는 `cloudflared`가 Traefik의 전용 HTTP entrypoint로 전달합니다. LAN의 80/443 직접 접근도 유지되며, 이 경로는 별도 인증서를 설치하기 전까지 Traefik 기본 인증서를 사용합니다.
+확인 주소는 `http://192.168.0.7:8000/v1/health`입니다. Traefik은 `api` 컨테이너의 Docker label을 자동 감지하고 같은 서비스의 여러 replica에 요청을 분산합니다. `X-Backend-Instance` 응답 헤더로 실제 응답한 replica를 확인할 수 있습니다.
 
 내부망 클라이언트는 `http://192.168.0.7:8000`으로도 같은 API를 호출할 수 있습니다. 호스트 8000 포트는 Python 프로세스에 직접 연결하지 않고 Traefik의 `direct-api` entrypoint가 받아 `vision-api` 서비스로 프록시합니다. `/v1/health`, `/v1/documents/ingest`, `/v1/documents/ingest-with-metadata`, `/v1/metadata`, `/v1/projects/{project_id}/metadata`, `/v1/search`, `/v1/chat` 요청·응답 형식은 도메인 경로와 동일합니다.
 

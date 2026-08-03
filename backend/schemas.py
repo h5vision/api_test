@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -18,6 +19,7 @@ from pydantic import (
 
 MAX_METADATA_BYTES = 500_000_000
 MAX_CHAT_CONTEXT_BYTES = 5_000_000
+MAX_CHAT_REQUEST_BYTES = 10_000_000
 API_SCHEMA_VERSION = "1.0"
 
 
@@ -412,18 +414,103 @@ class ChatContextItem(BaseModel):
     value: Any = None
 
 
+def _vscode_text(value: Any, *, depth: int = 0) -> str:
+    """Extract readable text from serialized VS Code Chat response parts."""
+
+    if depth > 5 or value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "\n".join(
+            part
+            for item in value
+            if (part := _vscode_text(item, depth=depth + 1))
+        ).strip()
+    if not isinstance(value, dict):
+        return ""
+    for key in ("content", "text", "markdown", "value"):
+        if key in value:
+            extracted = _vscode_text(value[key], depth=depth + 1)
+            if extracted:
+                return extracted
+    return ""
+
+
+def _normalize_vscode_history(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role in {"user", "assistant", "system"}:
+            content = _vscode_text(item.get("content"))
+            if content:
+                normalized.append({"role": role, "content": content})
+            continue
+
+        # vscode.ChatRequestTurn serializes its user input as prompt.
+        prompt = _vscode_text(item.get("prompt"))
+        if prompt:
+            normalized.append({"role": "user", "content": prompt})
+
+        # vscode.ChatResponseTurn contains an array of ChatResponsePart values.
+        response = _vscode_text(item.get("response"))
+        if response:
+            normalized.append({"role": "assistant", "content": response})
+    return normalized[-20:]
+
+
+def _context_item(value: Any, *, index: int, prefix: str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        item = dict(value)
+        item_id = str(item.get("id") or item.get("uri") or "").strip()
+        name = str(item.get("name") or item.get("label") or "").strip()
+        item_value = item.get("value", item)
+    else:
+        item_id = ""
+        name = ""
+        item_value = value
+    return {
+        "id": item_id[:4096] or f"{prefix}.{index}",
+        "name": name[:512] or f"{prefix} {index}",
+        "value": item_value,
+    }
+
+
+def _fallback_session_id(
+    project_id: str,
+    message: str,
+    history: list[dict[str, str]],
+) -> str:
+    first_user = next(
+        (
+            item["content"]
+            for item in history
+            if item.get("role") == "user" and item.get("content")
+        ),
+        message,
+    )
+    digest = hashlib.sha256(
+        f"{project_id}\n{first_user}".encode("utf-8")
+    ).hexdigest()[:24]
+    return f"vscode-{digest}"
+
+
 class ChatRequest(BaseModel):
     """Request accepted from vision/vision/src/types/chat.ts."""
 
     model_config = ConfigDict(
-        extra="forbid",
+        extra="allow",
         json_schema_extra={
             "examples": [
                 {
                     "project_id": "h5vision/fest-api",
                     "message": "이 프로젝트의 실행 구조를 설명해줘",
                     "session_id": "9efda536-b502-49e4-926d-53343a428df0",
-                    "top_k": 5,
+                    "reasoning_mode": "balanced",
                     "history": [],
                     "context": (
                         "파일: README.md\n\n"
@@ -434,15 +521,40 @@ class ChatRequest(BaseModel):
         },
     )
 
-    project_id: str = Field(..., min_length=1, max_length=255)
+    project_id: str = Field(
+        default="__auto__",
+        min_length=1,
+        max_length=255,
+        description=(
+            "Indexed project ID or workspace name. If omitted, the Backend may "
+            "resolve the sole indexed non-default project; ambiguous projects return 409."
+        ),
+    )
     message: str = Field(
         ...,
         min_length=1,
         max_length=100_000,
         validation_alias=AliasChoices("message", "prompt"),
     )
-    session_id: str = Field(..., min_length=1, max_length=255)
-    top_k: int | None = Field(default=None, ge=1, le=20)
+    session_id: str = Field(
+        default="vscode-stateless",
+        min_length=1,
+        max_length=255,
+        description=(
+            "Stable conversation ID is recommended. If omitted, the Backend derives "
+            "a deterministic fallback from the project and first user turn."
+        ),
+    )
+    top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=20,
+        deprecated=True,
+        description=(
+            "Deprecated compatibility field. /v1/chat ignores client top_k and "
+            "uses the Backend adaptive retrieval policy."
+        ),
+    )
     history: list[HistoryMessage] = Field(default_factory=list, max_length=20)
     context: str | list[ChatContextItem] = ""
 
@@ -456,6 +568,205 @@ class ChatRequest(BaseModel):
     )
     model_id: str | None = Field(default=None, max_length=512)
     stream: Literal[False] | None = None
+    reasoning_mode: Literal["auto", "fast", "balanced", "deep"] | None = Field(
+        default=None,
+        description=(
+            "Optional Agentic RAG budget. Omit to use the Backend default. "
+            "auto=Backend complexity routing, fast=one retrieval, "
+            "balanced=context-aware bounded retry, deep=multi-query evidence exploration."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_vscode_chat_envelope(cls, value: Any) -> Any:
+        """Accept both the frozen API payload and serialized VS Code tutorial data."""
+
+        if not isinstance(value, dict):
+            return value
+        try:
+            encoded_request = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            encoded_request = b""
+        if len(encoded_request) > MAX_CHAT_REQUEST_BYTES:
+            raise ValueError("chat request must not exceed 10 MB")
+        raw = dict(value)
+        request_envelope = (
+            dict(raw.get("request"))
+            if isinstance(raw.get("request"), dict)
+            else {}
+        )
+        context_envelope = (
+            dict(raw.get("chat_context"))
+            if isinstance(raw.get("chat_context"), dict)
+            else dict(raw.get("context"))
+            if isinstance(raw.get("context"), dict)
+            else {}
+        )
+
+        message = next(
+            (
+                str(candidate).strip()
+                for candidate in (
+                    raw.get("message"),
+                    raw.get("prompt"),
+                    request_envelope.get("prompt"),
+                )
+                if isinstance(candidate, str) and candidate.strip()
+            ),
+            "",
+        )
+        if message:
+            raw["message"] = message
+
+        workspace = raw.get("workspace")
+        workspace_name = (
+            str(workspace.get("name") or workspace.get("project_id") or "").strip()
+            if isinstance(workspace, dict)
+            else str(workspace or "").strip()
+        )
+        project_id = next(
+            (
+                str(candidate).strip()
+                for candidate in (
+                    raw.get("project_id"),
+                    raw.get("workspace_name"),
+                    workspace_name,
+                )
+                if candidate is not None and str(candidate).strip()
+            ),
+            "__auto__",
+        )
+        raw["project_id"] = project_id
+
+        history_input = raw.get("history")
+        if history_input is None:
+            history_input = context_envelope.get("history")
+        history = _normalize_vscode_history(history_input)
+        raw["history"] = history
+
+        session_id = next(
+            (
+                str(candidate).strip()
+                for candidate in (
+                    raw.get("session_id"),
+                    raw.get("conversation_id"),
+                    raw.get("chat_session_id"),
+                )
+                if candidate is not None and str(candidate).strip()
+            ),
+            "",
+        )
+        raw["session_id"] = session_id or _fallback_session_id(
+            project_id,
+            message,
+            history,
+        )
+
+        existing_context = raw.get("context")
+        context_items: list[Any] = []
+        if isinstance(existing_context, list):
+            context_items.extend(existing_context)
+        elif isinstance(existing_context, str) and existing_context.strip():
+            context_items.append(
+                {
+                    "id": "vscode.context",
+                    "name": "VS Code context",
+                    "value": {"content": existing_context},
+                }
+            )
+
+        references: list[Any] = []
+        for candidate in (
+            raw.get("references"),
+            request_envelope.get("references"),
+            context_envelope.get("references"),
+        ):
+            if isinstance(candidate, list):
+                references.extend(candidate)
+        for index, reference in enumerate(references, start=1):
+            context_items.append(
+                _context_item(reference, index=index, prefix="vscode.reference")
+            )
+
+        command = request_envelope.get("command", raw.get("command"))
+        if isinstance(command, str) and command.strip():
+            context_items.append(
+                {
+                    "id": "vscode.command",
+                    "name": "VS Code chat command",
+                    "value": {"content": command.strip()},
+                }
+            )
+        if workspace:
+            context_items.append(
+                {
+                    "id": "vscode.workspace",
+                    "name": "VS Code workspace",
+                    "value": workspace,
+                }
+            )
+
+        canonical_keys = {
+            "project_id",
+            "message",
+            "prompt",
+            "session_id",
+            "conversation_id",
+            "chat_session_id",
+            "top_k",
+            "history",
+            "context",
+            "schema_version",
+            "client_request_id",
+            "model_id",
+            "stream",
+            "reasoning_mode",
+            "request",
+            "chat_context",
+            "workspace",
+            "workspace_name",
+            "references",
+            "command",
+        }
+        future_data = {
+            key: item
+            for key, item in raw.items()
+            if key not in canonical_keys
+        }
+        request_metadata = {
+            key: item
+            for key, item in request_envelope.items()
+            if key not in {"prompt", "references", "command"}
+        }
+        if future_data or request_metadata:
+            serialized = json.dumps(
+                {
+                    "future_fields": future_data,
+                    "request_metadata": request_metadata,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+            context_items.append(
+                {
+                    "id": "vscode.extra",
+                    "name": "VS Code request metadata",
+                    "value": {"content": serialized[:50_000]},
+                }
+            )
+        raw["context"] = context_items[:100] if context_items else ""
+
+        # Consumed wrapper fields are normalized into the canonical fields above.
+        raw.pop("request", None)
+        raw.pop("chat_context", None)
+        return raw
 
     @field_validator("client_request_id", "model_id", mode="before")
     @classmethod
@@ -892,6 +1203,60 @@ class CommunicationEventListResponse(BaseModel):
     checked_at: datetime
     retention_days: int = 7
     events: list[CommunicationEvent]
+
+
+class ChatAuditLog(BaseModel):
+    request_id: str
+    received_at: datetime
+    completed_at: datetime | None = None
+    client_id: str | None = None
+    project_id: str
+    session_id: str
+    requested_model_id: str | None = None
+    message: str | None = None
+    message_truncated: bool = False
+    history_count: int = 0
+    context_chars: int = 0
+    status: str
+    status_code: int | None = None
+    answer: str | None = None
+    answer_truncated: bool = False
+    used_model_id: str | None = None
+    provider: str | None = None
+    source_count: int | None = None
+    duration_ms: int | None = None
+    error: str | None = None
+
+
+class ChatAuditLogListResponse(BaseModel):
+    checked_at: datetime
+    retention_days: int = 7
+    content_limit_chars: int = 20_000
+    logs: list[ChatAuditLog]
+
+
+class FrontendRegistrationEvent(BaseModel):
+    event_id: int
+    occurred_at: datetime
+    request_id: str
+    event_type: str
+    status: str
+    client_id: str | None = None
+    instance_id: str | None = None
+    client_name: str | None = None
+    declared_user: str | None = None
+    client_version: str | None = None
+    source_ip: str | None = None
+    registration_type: str | None = None
+    identification_method: str | None = None
+    is_first_connection: bool = False
+    reason: str | None = None
+
+
+class FrontendRegistrationEventListResponse(BaseModel):
+    checked_at: datetime
+    retention_policy: Literal["registry_lifetime"] = "registry_lifetime"
+    events: list[FrontendRegistrationEvent]
 
 
 class AICommunicationProbeRequest(BaseModel):

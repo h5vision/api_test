@@ -60,6 +60,12 @@ def _embedding_deployment_default(base_url: str) -> str:
     return "local" if host in local_hosts else "api"
 
 
+def _project_id_aliases() -> tuple[tuple[str, str], ...]:
+    from .project_resolution import parse_project_id_aliases
+
+    return parse_project_id_aliases(os.getenv("PROJECT_ID_ALIASES", ""))
+
+
 @dataclass(frozen=True)
 class Settings:
     backend_host: str
@@ -73,12 +79,28 @@ class Settings:
     allow_local_fallback: bool
     chunk_size: int
     chunk_overlap: int
+    rag_candidate_k: int
+    rag_min_sources: int
+    rag_max_sources: int
+    rag_context_max_chars: int
+    rag_min_score: float
+    rag_score_window: float
+    agentic_rag_default_mode: str
+    agentic_rag_balanced_steps: int
+    agentic_rag_deep_steps: int
+    agentic_rag_min_coverage: float
+    agentic_rag_min_novelty_ratio: float
+    project_id_aliases: tuple[tuple[str, str], ...]
     ai_provider: str
     ai_base_url: str
     ai_model: str
     ai_api_key: str
     ai_max_tokens: int
     ai_temperature: float
+    ai_context_window_tokens: int
+    ai_question_max_chars: int
+    ai_history_max_chars: int
+    ai_frontend_context_max_chars: int
     embedding_deployment: str
     embedding_provider: str
     embedding_base_url: str
@@ -157,6 +179,15 @@ class Settings:
         embedding_model = os.getenv(
             "EMBEDDING_MODEL", "bge-m3:latest"
         ).strip()
+        rag_candidate_k = max(4, min(50, _as_int("RAG_CANDIDATE_K", 12)))
+        rag_max_sources = max(
+            1,
+            min(rag_candidate_k, _as_int("RAG_MAX_SOURCES", 8)),
+        )
+        rag_min_sources = max(
+            1,
+            min(rag_max_sources, _as_int("RAG_MIN_SOURCES", 3)),
+        )
         return cls(
             backend_host=os.getenv("BACKEND_HOST", "127.0.0.1").strip(),
             backend_port=_as_int("BACKEND_PORT", 8000),
@@ -169,6 +200,44 @@ class Settings:
             allow_local_fallback=_as_bool("ALLOW_LOCAL_FALLBACK", True),
             chunk_size=max(200, _as_int("CHUNK_SIZE", 1600)),
             chunk_overlap=max(0, _as_int("CHUNK_OVERLAP", 200)),
+            rag_candidate_k=rag_candidate_k,
+            rag_min_sources=rag_min_sources,
+            rag_max_sources=rag_max_sources,
+            rag_context_max_chars=max(
+                2_000,
+                _as_int("RAG_CONTEXT_MAX_CHARS", 12_000),
+            ),
+            rag_min_score=min(
+                1.0,
+                max(-1.0, _as_float("RAG_MIN_SCORE", 0.30)),
+            ),
+            rag_score_window=min(
+                1.0,
+                max(0.0, _as_float("RAG_SCORE_WINDOW", 0.20)),
+            ),
+            agentic_rag_default_mode=(
+                os.getenv("AGENTIC_RAG_DEFAULT_MODE", "auto").strip().lower()
+                if os.getenv("AGENTIC_RAG_DEFAULT_MODE", "auto").strip().lower()
+                in {"auto", "fast", "balanced", "deep"}
+                else "auto"
+            ),
+            agentic_rag_balanced_steps=max(
+                1,
+                min(4, _as_int("AGENTIC_RAG_BALANCED_STEPS", 2)),
+            ),
+            agentic_rag_deep_steps=max(
+                2,
+                min(6, _as_int("AGENTIC_RAG_DEEP_STEPS", 3)),
+            ),
+            agentic_rag_min_coverage=min(
+                1.0,
+                max(0.0, _as_float("AGENTIC_RAG_MIN_COVERAGE", 0.55)),
+            ),
+            agentic_rag_min_novelty_ratio=min(
+                1.0,
+                max(0.0, _as_float("AGENTIC_RAG_MIN_NOVELTY_RATIO", 0.10)),
+            ),
+            project_id_aliases=_project_id_aliases(),
             ai_provider=os.getenv("AI_PROVIDER", "nvidia").strip().lower(),
             ai_base_url=os.getenv(
                 "AI_BASE_URL", "https://integrate.api.nvidia.com/v1"
@@ -179,6 +248,22 @@ class Settings:
             ai_api_key=os.getenv("AI_API_KEY", nvidia_key).strip(),
             ai_max_tokens=max(32, _as_int("AI_MAX_TOKENS", 1024)),
             ai_temperature=min(2.0, max(0.0, _as_float("AI_TEMPERATURE", 0.2))),
+            ai_context_window_tokens=max(
+                4_096,
+                min(131_072, _as_int("AI_CONTEXT_WINDOW_TOKENS", 32_768)),
+            ),
+            ai_question_max_chars=max(
+                2_000,
+                _as_int("AI_QUESTION_MAX_CHARS", 20_000),
+            ),
+            ai_history_max_chars=max(
+                2_000,
+                _as_int("AI_HISTORY_MAX_CHARS", 12_000),
+            ),
+            ai_frontend_context_max_chars=max(
+                2_000,
+                _as_int("AI_FRONTEND_CONTEXT_MAX_CHARS", 24_000),
+            ),
             embedding_deployment=os.getenv(
                 "EMBEDDING_DEPLOYMENT",
                 _embedding_deployment_default(embedding_base_url),
@@ -292,6 +377,7 @@ class Settings:
         return {
             "ai_provider": self.ai_provider,
             "ai_model": self.ai_model,
+            "ai_context_window_tokens": self.ai_context_window_tokens,
             "ai_configured": bool(self.ai_api_key) or self.ai_provider == "local",
             "embedding_deployment": self.embedding_deployment,
             "embedding_provider": self.embedding_provider,
@@ -305,6 +391,7 @@ class Settings:
             if self.vector_db_provider == "qdrant"
             else None,
             "index_version": self.index_version,
+            "agentic_rag_default_mode": self.agentic_rag_default_mode,
             "metadata_db_provider": "postgresql",
             "metadata_db_configured": bool(self.postgres_password),
             "default_model_id": self.default_model_id,

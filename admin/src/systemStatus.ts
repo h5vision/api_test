@@ -85,6 +85,60 @@ type CommunicationEventListResponse = {
   events: CommunicationEvent[];
 };
 
+type ChatAuditLog = {
+  request_id: string;
+  received_at: string;
+  completed_at: string | null;
+  client_id: string | null;
+  project_id: string;
+  session_id: string;
+  requested_model_id: string | null;
+  message: string | null;
+  message_truncated: boolean;
+  history_count: number;
+  context_chars: number;
+  status: string;
+  status_code: number | null;
+  answer: string | null;
+  answer_truncated: boolean;
+  used_model_id: string | null;
+  provider: string | null;
+  source_count: number | null;
+  duration_ms: number | null;
+  error: string | null;
+};
+
+type ChatAuditLogListResponse = {
+  checked_at: string;
+  retention_days: number;
+  content_limit_chars: number;
+  logs: ChatAuditLog[];
+};
+
+type FrontendRegistrationEvent = {
+  event_id: number;
+  occurred_at: string;
+  request_id: string;
+  event_type: string;
+  status: string;
+  client_id: string | null;
+  instance_id: string | null;
+  client_name: string | null;
+  declared_user: string | null;
+  client_version: string | null;
+  source_ip: string | null;
+  registration_type: string | null;
+  identification_method: string | null;
+  is_first_connection: boolean;
+  reason: string | null;
+};
+
+type FrontendRegistrationEventListResponse = {
+  checked_at: string;
+  retention_policy: "registry_lifetime";
+  events: FrontendRegistrationEvent[];
+};
+
 type AIProbeResponse = {
   status: "ok" | "unexpected_answer";
   request_id: string;
@@ -268,7 +322,7 @@ export function systemStatusMarkup(
           <article class="panel rounded-2xl p-4">
             ${sectionHeading("서비스 토폴로지", "요청 경로와 내부 구성 요소")}
             <div class="mt-3 space-y-2">
-              ${serviceRow("Cloudflare Tunnel", "Edge connector", "외부 연결", "ready", icons.cloud)}
+              ${serviceRow("Traefik", "LAN reverse proxy · :80/:8000", "상태 수집", "checking", icons.cloud)}
               ${serviceRow("Granian + FastAPI", "ASGI · port 8000", "확인 중", "checking", icons.pulse, "api-service-status")}
               ${serviceRow("AI Model", "Model routing · /v1/chat", "확인 중", "checking", icons.cube, "ai-service-status")}
               ${serviceRow("Vector Store", "Project scoped", "확인 중", "checking", icons.database, "vector-service-status")}
@@ -283,7 +337,7 @@ export function systemStatusMarkup(
               ${detailRow("Vector DB", "vector-provider")}
               ${detailRow("Backend version", "backend-version")}
             </dl>
-            <p class="mt-3 text-[9px] leading-4 text-white/25">질문, 코드, 답변 본문, API Key는 통신 로그에 저장하지 않습니다.</p>
+            <p class="mt-3 text-[9px] leading-4 text-white/25">일반 통신 로그에는 본문을 저장하지 않습니다. 별도 Chat 감사 로그에는 질문·답변만 제한적으로 보관하며 Context, History 본문과 API Key는 저장하지 않습니다.</p>
           </article>
           <article class="panel rounded-2xl p-4">
             ${sectionHeading("API Endpoint", "Frontend 팀 공개 계약")}
@@ -322,6 +376,50 @@ export function systemStatusMarkup(
             </table>
           </div>
           <p class="mt-2 text-[9px] text-white/23">최근 7일 로그를 PostgreSQL에 보관하며 화면에는 최근 60개를 표시합니다.</p>
+        </article>
+
+        <article class="panel rounded-2xl p-4">
+          ${sectionHeading("Frontend 최초 연결 · ID 등록 로그", "첫 Chat에서 Client를 식별하고 서버 ID를 발급한 과정을 추적합니다.")}
+          <div class="mt-3 overflow-x-auto rounded-xl border border-white/6">
+            <table class="w-full min-w-[1080px] border-collapse text-left">
+              <thead class="bg-black/15 text-[9px] uppercase tracking-wider text-white/28">
+                <tr>
+                  <th class="px-3 py-2.5 font-medium">시각 · 단계</th>
+                  <th class="px-3 py-2.5 font-medium">사용자 · Client</th>
+                  <th class="px-3 py-2.5 font-medium">발급 ID · Instance</th>
+                  <th class="px-3 py-2.5 font-medium">접속 정보</th>
+                  <th class="px-3 py-2.5 font-medium">식별 결과</th>
+                  <th class="px-3 py-2.5 font-medium">request_id</th>
+                </tr>
+              </thead>
+              <tbody id="frontend-registration-log-list" class="divide-y divide-white/6">
+                <tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">Frontend 등록 로그를 불러오고 있습니다.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="mt-2 text-[9px] text-white/23">X-Client-User가 없으면 Client 이름, 설치별 Instance ID와 최초 접속 IP로 구분합니다. 등록 이력은 Client Registry 감사 기록으로 유지됩니다.</p>
+        </article>
+
+        <article class="panel rounded-2xl p-4">
+          ${sectionHeading("Frontend Chat 감사 로그", "Frontend 질문과 AI 답변을 관리자 전용으로 확인합니다.")}
+          <div class="mt-3 overflow-x-auto rounded-xl border border-white/6">
+            <table class="w-full min-w-[1120px] border-collapse text-left">
+              <thead class="bg-black/15 text-[9px] uppercase tracking-wider text-white/28">
+                <tr>
+                  <th class="px-3 py-2.5 font-medium">시각 · 상태</th>
+                  <th class="px-3 py-2.5 font-medium">Frontend 질문</th>
+                  <th class="px-3 py-2.5 font-medium">AI 답변 · 오류</th>
+                  <th class="px-3 py-2.5 font-medium">Project · Session · Client</th>
+                  <th class="px-3 py-2.5 font-medium">Model · RAG</th>
+                  <th class="px-3 py-2.5 font-medium">request_id</th>
+                </tr>
+              </thead>
+              <tbody id="chat-audit-log-list" class="divide-y divide-white/6">
+                <tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">Chat 감사 로그를 불러오고 있습니다.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p id="chat-audit-log-policy" class="mt-2 text-[9px] text-white/23">질문·답변은 최근 7일, 항목별 최대 20,000자로 보관합니다. Context와 History는 크기·개수만 기록합니다.</p>
         </article>
 
         <article class="panel rounded-2xl p-4">
@@ -479,6 +577,141 @@ function renderCommunicationLogs(events: CommunicationEvent[]): void {
     : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">아직 기록된 통신 로그가 없습니다.</td></tr>';
 }
 
+function chatAuditContent(
+  value: string | null,
+  truncated: boolean,
+  emptyLabel: string,
+): string {
+  if (!value) return `<p class="text-[10px] text-white/25">${escapeHtml(emptyLabel)}</p>`;
+  const preview = value.length > 110 ? `${value.slice(0, 110)}…` : value;
+  const suffix = truncated ? " · 저장 한도에서 잘림" : "";
+  return `<details class="group max-w-[360px]">
+    <summary class="cursor-pointer list-none text-[10px] leading-4 text-white/62" title="전체 내용 펼치기">${escapeHtml(preview)}</summary>
+    <pre class="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-white/6 bg-black/20 p-2 text-[9px] leading-4 text-white/48">${escapeHtml(value)}</pre>
+    ${suffix ? `<p class="mt-1 text-[9px] text-amber-300/70">${escapeHtml(suffix)}</p>` : ""}
+  </details>`;
+}
+
+function chatAuditLogRow(log: ChatAuditLog): string {
+  const tone = log.status === "completed"
+    ? "ok"
+    : log.status === "received"
+      ? "warning"
+      : "error";
+  const statusText = log.status_code === null
+    ? log.status.toUpperCase()
+    : `${log.status.toUpperCase()} · HTTP ${log.status_code}`;
+  const answerOrError = log.answer
+    ? chatAuditContent(log.answer, log.answer_truncated, "답변 없음")
+    : log.error
+      ? `<p class="max-w-[360px] whitespace-pre-wrap break-words text-[10px] leading-4 text-danger-300">${escapeHtml(log.error)}</p>`
+      : chatAuditContent(null, false, log.status === "received" ? "응답 대기 중" : "답변 없음");
+  const identity = [
+    log.project_id,
+    log.session_id,
+    log.client_id,
+  ].filter(Boolean);
+  const model = [
+    log.provider,
+    log.used_model_id || log.requested_model_id,
+  ].filter(Boolean).join(" · ") || "--";
+  const rag = [
+    log.source_count !== null ? `sources ${log.source_count}` : null,
+    log.duration_ms !== null ? formatDuration(log.duration_ms) : null,
+    `context ${log.context_chars.toLocaleString("ko-KR")}자`,
+    `history ${log.history_count}개`,
+  ].filter(Boolean).join(" · ");
+  return `<tr class="bg-black/5 align-top transition hover:bg-white/[0.025]">
+    <td class="px-3 py-2.5">
+      <span class="rounded-md border px-2 py-1 text-[9px] ${badgeClasses[tone]}">${escapeHtml(statusText)}</span>
+      <p class="mt-2 font-mono text-[9px] text-white/28">${escapeHtml(formatDateTime(log.received_at))}</p>
+    </td>
+    <td class="px-3 py-2.5">${chatAuditContent(log.message, log.message_truncated, "질문 없음")}</td>
+    <td class="px-3 py-2.5">${answerOrError}</td>
+    <td class="max-w-[240px] px-3 py-2.5">
+      ${identity.map((value) => `<p class="truncate text-[9px] text-white/42" title="${escapeHtml(value)}">${escapeHtml(value)}</p>`).join("")}
+    </td>
+    <td class="max-w-[260px] px-3 py-2.5">
+      <p class="truncate text-[10px] text-white/52" title="${escapeHtml(model)}">${escapeHtml(model)}</p>
+      <p class="mt-1 text-[9px] leading-4 text-white/28">${escapeHtml(rag)}</p>
+    </td>
+    <td class="max-w-[220px] px-3 py-2.5"><p class="truncate font-mono text-[9px] text-white/30" title="${escapeHtml(log.request_id)}">${escapeHtml(log.request_id)}</p></td>
+  </tr>`;
+}
+
+function renderChatAuditLogs(logs: ChatAuditLog[], error?: string): void {
+  const list = document.getElementById("chat-audit-log-list");
+  if (!list) return;
+  if (error) {
+    list.innerHTML = `<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-danger-300">Chat 감사 로그 조회 실패 · ${escapeHtml(error)}</td></tr>`;
+    return;
+  }
+  list.innerHTML = logs.length > 0
+    ? logs.map(chatAuditLogRow).join("")
+    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">아직 기록된 Chat 요청이 없습니다.</td></tr>';
+}
+
+const registrationEventLabels: Record<string, string> = {
+  registration_attempt: "등록 시도",
+  client_id_issued: "ID 발급 완료",
+  client_recognized: "기존 Client 확인",
+  registration_denied: "등록·접속 거부",
+  registration_failed: "등록 처리 실패",
+};
+
+function frontendRegistrationLogRow(event: FrontendRegistrationEvent): string {
+  const tone: BadgeTone = event.status === "success"
+    ? "ok"
+    : event.status === "started"
+      ? "checking"
+      : "error";
+  const identity = event.declared_user || "사용자명 미제공";
+  const clientName = event.client_name || "Client 이름 미제공";
+  const result = event.is_first_connection
+    ? "최초 연결 · 신규 ID"
+    : event.event_type === "client_recognized"
+      ? "기존 등록 확인"
+      : event.reason || "--";
+  return `<tr class="bg-black/5 align-top transition hover:bg-white/[0.025]">
+    <td class="px-3 py-2.5">
+      <span class="rounded-md border px-2 py-1 text-[9px] ${badgeClasses[tone]}">${escapeHtml(registrationEventLabels[event.event_type] || event.event_type)}</span>
+      <p class="mt-2 font-mono text-[9px] text-white/28">${escapeHtml(formatDateTime(event.occurred_at))}</p>
+    </td>
+    <td class="max-w-[220px] px-3 py-2.5">
+      <p class="truncate text-[10px] ${event.declared_user ? "text-mint-300/80" : "text-white/30"}" title="${escapeHtml(identity)}">${escapeHtml(identity)}</p>
+      <p class="mt-1 truncate text-[9px] text-white/42" title="${escapeHtml(clientName)}">${escapeHtml(clientName)}</p>
+    </td>
+    <td class="max-w-[250px] px-3 py-2.5">
+      <p class="truncate font-mono text-[9px] text-white/55" title="${escapeHtml(event.client_id || "--")}">${escapeHtml(event.client_id || "ID 발급 전")}</p>
+      <p class="mt-1 truncate font-mono text-[9px] text-white/25" title="${escapeHtml(event.instance_id || "--")}">${escapeHtml(event.instance_id || "Instance ID 없음")}</p>
+    </td>
+    <td class="px-3 py-2.5">
+      <p class="font-mono text-[10px] text-white/52">${escapeHtml(event.source_ip || "--")}</p>
+      <p class="mt-1 text-[9px] text-white/28">${escapeHtml(event.client_version || "버전 미제공")}</p>
+    </td>
+    <td class="max-w-[240px] px-3 py-2.5">
+      <p class="text-[10px] ${event.is_first_connection ? "text-mint-300" : "text-white/48"}">${escapeHtml(result)}</p>
+      <p class="mt-1 text-[9px] text-white/28">${escapeHtml([event.registration_type, event.identification_method].filter(Boolean).join(" · ") || "--")}</p>
+    </td>
+    <td class="max-w-[220px] px-3 py-2.5"><p class="truncate font-mono text-[9px] text-white/30" title="${escapeHtml(event.request_id)}">${escapeHtml(event.request_id)}</p></td>
+  </tr>`;
+}
+
+function renderFrontendRegistrationLogs(
+  events: FrontendRegistrationEvent[],
+  error?: string,
+): void {
+  const list = document.getElementById("frontend-registration-log-list");
+  if (!list) return;
+  if (error) {
+    list.innerHTML = `<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-danger-300">Frontend 등록 로그 조회 실패 · ${escapeHtml(error)}</td></tr>`;
+    return;
+  }
+  list.innerHTML = events.length > 0
+    ? events.map(frontendRegistrationLogRow).join("")
+    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">아직 기록된 최초 연결 시도가 없습니다.</td></tr>';
+}
+
 function latestEvent(
   events: CommunicationEvent[],
   channel: string,
@@ -588,12 +821,25 @@ function applyFlowStatuses(
 export async function loadSystemCommunicationLogs(
   adminApiBaseUrl: string,
 ): Promise<void> {
-  const [connectivityResult, logsResult] = await Promise.allSettled([
+  const [
+    connectivityResult,
+    logsResult,
+    chatAuditResult,
+    registrationResult,
+  ] = await Promise.allSettled([
     fetch(`${adminApiBaseUrl}/connectivity`, {
       headers: { Accept: "application/json" },
       cache: "no-store",
     }),
     fetch(`${adminApiBaseUrl}/communication-logs?limit=60`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    }),
+    fetch(`${adminApiBaseUrl}/chat-audit-logs?limit=40`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    }),
+    fetch(`${adminApiBaseUrl}/frontend-registration-logs?limit=60`, {
       headers: { Accept: "application/json" },
       cache: "no-store",
     }),
@@ -611,6 +857,37 @@ export async function loadSystemCommunicationLogs(
     const logs = (await logsResult.value.json()) as CommunicationEventListResponse;
     renderCommunicationLogs(logs.events);
     applyFlowStatuses(connectivity, logs.events);
+
+    if (chatAuditResult.status === "rejected") {
+      const auditError = chatAuditResult.reason instanceof Error
+        ? chatAuditResult.reason.message
+        : "연결 실패";
+      renderChatAuditLogs([], auditError);
+    } else if (!chatAuditResult.value.ok) {
+      renderChatAuditLogs([], `HTTP ${chatAuditResult.value.status}`);
+    } else {
+      const chatAudit = (await chatAuditResult.value.json()) as ChatAuditLogListResponse;
+      renderChatAuditLogs(chatAudit.logs);
+      setText(
+        "chat-audit-log-policy",
+        `질문·답변은 최근 ${chatAudit.retention_days}일, 항목별 최대 ${chatAudit.content_limit_chars.toLocaleString("ko-KR")}자로 보관합니다. Context와 History는 크기·개수만 기록합니다.`,
+      );
+    }
+
+    if (registrationResult.status === "rejected") {
+      const registrationError = registrationResult.reason instanceof Error
+        ? registrationResult.reason.message
+        : "연결 실패";
+      renderFrontendRegistrationLogs([], registrationError);
+    } else if (!registrationResult.value.ok) {
+      renderFrontendRegistrationLogs([], `HTTP ${registrationResult.value.status}`);
+    } else {
+      const registrationLogs = (
+        await registrationResult.value.json()
+      ) as FrontendRegistrationEventListResponse;
+      renderFrontendRegistrationLogs(registrationLogs.events);
+    }
+
     setText(
       "system-log-updated",
       `통신 로그 ${formatDateTime(logs.checked_at)} · ${logs.events.length}건`,
@@ -618,6 +895,8 @@ export async function loadSystemCommunicationLogs(
   } catch (error) {
     const message = error instanceof Error ? error.message : "알 수 없는 오류";
     renderCommunicationLogs([]);
+    renderChatAuditLogs([], message);
+    renderFrontendRegistrationLogs([], message);
     setBadge("flow-frontend-status", "조회 실패", "error");
     setBadge("flow-rag-status", "조회 실패", "error");
     setBadge("flow-ai-status", "조회 실패", "error");

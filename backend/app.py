@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from ipaddress import ip_address, ip_network
 from time import perf_counter
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response, status
@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from .agentic_rag import AgenticRAGOrchestrator, ConversationAwareQueryPlanner
 from .ai_providers import (
     AIProvider,
     AIProviderRegistry,
@@ -48,6 +49,8 @@ from .local_projects import (
     fingerprint_frontend_tree,
 )
 from .project_store import PostgresProjectStore, ProjectStoreError
+from .project_resolution import resolve_project_id
+from .retrieval import AdaptiveReranker
 from .repository_indexer import RepositoryIndexer
 from .repository_store import PostgresRepositoryStore, RepositoryStoreError
 from .schemas import (
@@ -66,8 +69,12 @@ from .schemas import (
     AIProviderListResponse,
     AIProviderRecord,
     AIProviderWriteRequest,
+    ChatAuditLog,
+    ChatAuditLogListResponse,
     CommunicationEvent,
     CommunicationEventListResponse,
+    FrontendRegistrationEvent,
+    FrontendRegistrationEventListResponse,
     FrontendConnectivityStatus,
     FrontendClientListResponse,
     FrontendClientRecord,
@@ -343,6 +350,18 @@ async def request_context(request: Request, call_next: Any) -> Any:
     ) in MONITORED_FRONTEND_ENDPOINTS
     dashboard_request = client_type in {"admin-dashboard", "admin-playground"}
     source_host = _frontend_source_ip(request)
+    client_name = (
+        request.headers.get("x-client-name")
+        or request.headers.get("user-agent")
+        or ""
+    ).strip()[:80] or None
+    declared_user = unquote(
+        (request.headers.get("x-client-user") or "").strip()
+    ).strip()[:120] or None
+    client_version = (
+        request.headers.get("x-client-version") or ""
+    ).strip()[:100] or None
+    trace_initial_registration = auto_enrollment_request and not bool(client_id)
     telemetry_client_id = (
         client_id[:255]
         or (
@@ -367,6 +386,7 @@ async def request_context(request: Request, call_next: Any) -> Any:
     async def finalize_response(response: Any) -> Any:
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-API-Version"] = API_SCHEMA_VERSION
+        response.headers["X-Backend-Instance"] = settings.instance_id
         if request.state.frontend_client_id:
             response.headers["X-Client-ID"] = request.state.frontend_client_id
             response.headers["X-Client-Auto-Registered"] = (
@@ -441,6 +461,22 @@ async def request_context(request: Request, call_next: Any) -> Any:
         or path.startswith("/v1/admin/")
     )
     if managed_frontend_request and not guard_exempt:
+        if trace_initial_registration:
+            await run_in_threadpool(
+                _safe_record_frontend_registration_event,
+                request_id=request.state.request_id,
+                event_type="registration_attempt",
+                status="started",
+                instance_id=instance_id or None,
+                client_name=client_name,
+                declared_user=declared_user,
+                client_version=client_version,
+                source_ip=source_host,
+                identification_method=(
+                    "instance_id" if instance_id else "legacy_source_ip"
+                ),
+                reason="POST /v1/chat arrived without X-Client-ID",
+            )
         try:
             decision = await run_in_threadpool(
                 frontend_client_store.authorize_or_register,
@@ -448,12 +484,25 @@ async def request_context(request: Request, call_next: Any) -> Any:
                 instance_id=instance_id or None,
                 source_ip=source_host,
                 auto_register=auto_enrollment_request,
-                client_name=(
-                    request.headers.get("x-client-name")
-                    or request.headers.get("user-agent")
-                ),
+                client_name=client_name,
             )
         except FrontendClientStoreError:
+            if trace_initial_registration:
+                await run_in_threadpool(
+                    _safe_record_frontend_registration_event,
+                    request_id=request.state.request_id,
+                    event_type="registration_failed",
+                    status="error",
+                    instance_id=instance_id or None,
+                    client_name=client_name,
+                    declared_user=declared_user,
+                    client_version=client_version,
+                    source_ip=source_host,
+                    identification_method=(
+                        "instance_id" if instance_id else "legacy_source_ip"
+                    ),
+                    reason="Frontend client access registry is unavailable",
+                )
             return await finalize_response(
                 _error_response(
                     request,
@@ -462,6 +511,38 @@ async def request_context(request: Request, call_next: Any) -> Any:
                 )
             )
         if not decision.allowed:
+            if trace_initial_registration:
+                await run_in_threadpool(
+                    _safe_record_frontend_registration_event,
+                    request_id=request.state.request_id,
+                    event_type="registration_denied",
+                    status="denied",
+                    client_id=(
+                        decision.client.client_id
+                        if decision.client is not None
+                        else None
+                    ),
+                    instance_id=(
+                        decision.client.instance_id
+                        if decision.client is not None
+                        else instance_id or None
+                    ),
+                    client_name=(
+                        decision.client.name
+                        if decision.client is not None
+                        else client_name
+                    ),
+                    declared_user=declared_user,
+                    client_version=client_version,
+                    source_ip=source_host,
+                    registration_type=(
+                        decision.client.registration_type
+                        if decision.client is not None
+                        else None
+                    ),
+                    identification_method=decision.reason,
+                    reason=decision.reason,
+                )
             return await finalize_response(
                 _error_response(
                     request,
@@ -475,6 +556,47 @@ async def request_context(request: Request, call_next: Any) -> Any:
                 decision.auto_registered
             )
             telemetry_client_id = decision.client.client_id
+        if trace_initial_registration:
+            await run_in_threadpool(
+                _safe_record_frontend_registration_event,
+                request_id=request.state.request_id,
+                event_type=(
+                    "client_id_issued"
+                    if decision.auto_registered
+                    else "client_recognized"
+                ),
+                status="success",
+                client_id=(
+                    decision.client.client_id
+                    if decision.client is not None
+                    else None
+                ),
+                instance_id=(
+                    decision.client.instance_id
+                    if decision.client is not None
+                    else instance_id or None
+                ),
+                client_name=(
+                    decision.client.name
+                    if decision.client is not None
+                    else client_name
+                ),
+                declared_user=declared_user,
+                client_version=client_version,
+                source_ip=source_host,
+                registration_type=(
+                    decision.client.registration_type
+                    if decision.client is not None
+                    else None
+                ),
+                identification_method=decision.reason,
+                is_first_connection=decision.auto_registered,
+                reason=(
+                    "Server generated and returned X-Client-ID"
+                    if decision.auto_registered
+                    else "Existing Client matched before Chat processing"
+                ),
+            )
     response = await call_next(request)
     return await finalize_response(response)
 
@@ -534,6 +656,23 @@ runtime_service_store = PostgresRuntimeServiceSettingsStore(settings)
 settings = runtime_service_store.effective_settings(settings)
 embedding_service = EmbeddingService(settings)
 chat_service = ChatService(settings)
+rag_reranker = AdaptiveReranker(
+    min_sources=settings.rag_min_sources,
+    max_sources=settings.rag_max_sources,
+    max_context_chars=settings.rag_context_max_chars,
+    min_score=settings.rag_min_score,
+    score_window=settings.rag_score_window,
+)
+agentic_query_planner = ConversationAwareQueryPlanner(
+    balanced_steps=settings.agentic_rag_balanced_steps,
+    deep_steps=settings.agentic_rag_deep_steps,
+)
+agentic_rag = AgenticRAGOrchestrator(
+    rag_reranker,
+    min_evidence=settings.rag_min_sources,
+    min_coverage=settings.agentic_rag_min_coverage,
+    min_novelty_ratio=settings.agentic_rag_min_novelty_ratio,
+)
 runtime_network_store = PostgresRuntimeNetworkSettingsStore(settings)
 model_access_store = PostgresModelAccessPolicyStore(settings)
 ai_provider_store = PostgresAIProviderStore(settings)
@@ -916,6 +1055,9 @@ def _upload_error(exc: UploadError) -> HTTPException:
 
 
 def _frontend_client_id(request: Request, project_id: str) -> str | None:
+    registered = getattr(request.state, "frontend_client_id", None)
+    if isinstance(registered, str) and registered.strip():
+        return registered.strip()[:255]
     supplied = (request.headers.get("x-client-id") or "").strip()
     if supplied:
         return supplied[:255]
@@ -923,6 +1065,23 @@ def _frontend_client_id(request: Request, project_id: str) -> str | None:
     if client_type == "vscode-extension":
         return f"vscode:{project_id}"[:255]
     return None
+
+
+def _has_usable_frontend_context(
+    value: str | list[Any],
+) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    for item in value:
+        item_value = getattr(item, "value", None)
+        if isinstance(item_value, str) and item_value.strip():
+            return True
+        if isinstance(item_value, dict):
+            for key in ("content", "text", "selection", "code"):
+                candidate = item_value.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return True
+    return False
 
 
 def _record_frontend_activity(
@@ -963,6 +1122,30 @@ def _safe_record_communication_event(**values: Any) -> None:
         connectivity_store.record_communication_event(**values)
     except ConnectivityStoreError:
         # Diagnostics are best effort and must never interrupt a user request.
+        pass
+
+
+def _safe_record_frontend_registration_event(**values: Any) -> None:
+    try:
+        connectivity_store.record_frontend_registration_event(**values)
+    except ConnectivityStoreError:
+        # Registration auditing must not block Client enrollment or Chat.
+        pass
+
+
+def _safe_record_chat_audit_request(**values: Any) -> None:
+    try:
+        connectivity_store.record_chat_request(**values)
+    except ConnectivityStoreError:
+        # Audit logging must not make a user Chat request fail.
+        pass
+
+
+def _safe_complete_chat_audit(**values: Any) -> None:
+    try:
+        connectivity_store.complete_chat_audit(**values)
+    except ConnectivityStoreError:
+        # Audit logging must not replace the actual Chat result.
         pass
 
 
@@ -1150,6 +1333,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "service": "vs-code-ai-assistant-backend",
         "version": "3.0.0",
+        "instance_id": settings.instance_id,
         "configuration": settings.public_status(),
         "vector_store": vector_store.stats(),
         "metadata_store": metadata_store.status(),
@@ -1170,7 +1354,8 @@ def health() -> dict[str, Any]:
     tags=["System"],
     summary="List selectable generation models",
 )
-def list_models() -> ModelListResponse:
+def list_models(response: Response) -> ModelListResponse:
+    response.headers["Cache-Control"] = "no-store"
     models = [
         model for model in generation_router.models()
         if model.enabled
@@ -1443,6 +1628,56 @@ def communication_logs(
     return CommunicationEventListResponse(
         checked_at=datetime.now(timezone.utc),
         events=[CommunicationEvent(**row) for row in rows],
+    )
+
+
+@app.get(
+    "/v1/admin/chat-audit-logs",
+    response_model=ChatAuditLogListResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def chat_audit_logs(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ChatAuditLogListResponse:
+    _require_admin_proxy(request)
+    try:
+        rows = connectivity_store.latest_chat_audit_logs(limit=limit)
+    except ConnectivityStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL Chat audit log is unavailable",
+        ) from exc
+    return ChatAuditLogListResponse(
+        checked_at=datetime.now(timezone.utc),
+        logs=[ChatAuditLog(**row) for row in rows],
+    )
+
+
+@app.get(
+    "/v1/admin/frontend-registration-logs",
+    response_model=FrontendRegistrationEventListResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def frontend_registration_logs(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> FrontendRegistrationEventListResponse:
+    _require_admin_proxy(request)
+    try:
+        rows = connectivity_store.latest_frontend_registration_events(
+            limit=limit
+        )
+    except ConnectivityStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL Frontend registration log is unavailable",
+        ) from exc
+    return FrontendRegistrationEventListResponse(
+        checked_at=datetime.now(timezone.utc),
+        events=[FrontendRegistrationEvent(**row) for row in rows],
     )
 
 
@@ -2931,26 +3166,109 @@ def search_documents(payload: SearchRequest) -> SearchResponse:
     tags=["Chat"],
     summary="Run project-scoped RAG chat",
     description=(
-        "Searches the project with BGE-M3/Qdrant, assembles numbered sources, "
-        "calls the selected public model_id, and returns answer plus sources[]. "
+        "Resolves a Frontend project_id to the canonical indexed project, "
+        "retrieves a broad BGE-M3/Qdrant candidate set, adaptively reranks and "
+        "selects evidence within the Backend context budget, calls the selected "
+        "public model_id, and returns answer plus source[]. Client top_k is "
+        "accepted only for backward compatibility and is ignored. "
+        "reasoning_mode controls the bounded Agentic RAG budget: auto lets the "
+        "Backend choose by complexity/history/attachments, fast performs one "
+        "context-aware search, balanced may retry once, and deep explores up "
+        "to the configured multi-query limit. "
         "The canonical question field is message; prompt is a v1 compatibility alias."
     ),
     responses=ERROR_RESPONSES,
 )
 def chat(payload: ChatRequest, request: Request) -> ChatResponse:
-    # The frontend sends the workspace folder name as both project_id and
-    # session_id. Neither identifier is hard-coded by the server.
+    # project_id is the canonical Backend registry key. session_id identifies
+    # one client conversation and is independent from the retrieval scope.
     overall_started = perf_counter()
-    effective_project_id = payload.project_id
-    effective_top_k = payload.top_k if payload.top_k is not None else 5
+    try:
+        project_resolution = resolve_project_id(
+            payload.project_id,
+            project_store.list_projects(),
+            configured_aliases=settings.project_id_aliases,
+        )
+    except ProjectStoreError as exc:
+        raise _project_store_error() from exc
+    if project_resolution.resolved_project_id is None:
+        candidate_text = (
+            ", ".join(project_resolution.candidates)
+            if project_resolution.candidates
+            else "none"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "project_id를 인덱싱된 프로젝트로 결정할 수 없습니다. "
+                f"requested={payload.project_id!r}, "
+                f"candidates={candidate_text}. "
+                "GET /v1/IngestResponse에서 project_id를 확인하거나 "
+                "PROJECT_ID_ALIASES를 설정하세요."
+            ),
+        )
+    effective_project_id = project_resolution.resolved_project_id
+    logger.info(
+        "Resolved chat project requested=%r resolved=%r strategy=%s confidence=%.4f",
+        payload.project_id,
+        effective_project_id,
+        project_resolution.strategy,
+        project_resolution.confidence,
+    )
+    candidate_k = settings.rag_candidate_k
+    reasoning_mode = (
+        payload.reasoning_mode or settings.agentic_rag_default_mode
+    )
     request_id = _request_id(request)
     telemetry_client_id = _frontend_client_id(request, effective_project_id)
+    requested_model_id = payload.model_id or generation_router.default_model_id
+    context_chars = (
+        len(payload.context)
+        if isinstance(payload.context, str)
+        else len(
+            json.dumps(
+                [
+                    item.model_dump(mode="json")
+                    for item in payload.context
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+    )
+    usable_frontend_context = _has_usable_frontend_context(payload.context)
+    _safe_record_chat_audit_request(
+        request_id=request_id,
+        client_id=telemetry_client_id,
+        project_id=effective_project_id,
+        session_id=payload.session_id,
+        requested_model_id=requested_model_id,
+        message=payload.message,
+        history_count=len(payload.history),
+        context_chars=context_chars,
+    )
     _record_frontend_activity(request, effective_project_id, "chat.request")
     if payload.stream:
+        _safe_complete_chat_audit(
+            request_id=request_id,
+            status="error",
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            used_model_id=requested_model_id,
+            source_count=0,
+            duration_ms=round((perf_counter() - overall_started) * 1000),
+            error="stream=true is not supported yet; use stream=false",
+        )
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail="stream=true is not supported yet; use stream=false",
         )
+    query_plan = agentic_query_planner.plan(
+        payload.message,
+        payload.history,
+        reasoning_mode,
+        payload.context,
+    )
+    resolved_reasoning_mode = query_plan.mode
     retrieval_started = perf_counter()
     _safe_record_communication_event(
         request_id=request_id,
@@ -2962,52 +3280,116 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         project_id=effective_project_id,
         provider=settings.vector_db_provider,
         model=settings.embedding_model,
-        details={"top_k": effective_top_k},
+        details={
+            "policy": f"agentic-rag-v1/{resolved_reasoning_mode}",
+            "requested_reasoning_mode": reasoning_mode,
+            "reasoning_mode": resolved_reasoning_mode,
+            "candidate_k": candidate_k,
+            "frontend_context_available": usable_frontend_context,
+            "project_resolution": project_resolution.metadata(),
+        },
     )
+    retrieval_degraded_error: str | None = None
+    retrieval_degraded_status_code: int | None = None
     try:
-        search_response = search_documents(
-            SearchRequest(
-                project_id=effective_project_id,
-                query=payload.message,
-                top_k=effective_top_k,
-            )
+        agentic_result = agentic_rag.run(
+            query_plan,
+            lambda query: search_documents(
+                SearchRequest(
+                    project_id=effective_project_id,
+                    query=query,
+                    top_k=candidate_k,
+                )
+            ),
         )
+        retrieval_decision = agentic_result.decision
+        agentic_trace = agentic_result.trace
+        embedding_provider = agentic_result.embedding_provider
+        selected_sources = retrieval_decision.sources
     except HTTPException as exc:
-        retrieval_ms = round((perf_counter() - retrieval_started) * 1000)
-        _safe_record_communication_event(
-            request_id=request_id,
-            channel="rag",
-            direction="vectordb_to_fastapi",
-            phase="rag.response",
-            status="error",
-            client_id=telemetry_client_id,
-            project_id=effective_project_id,
-            status_code=exc.status_code,
-            duration_ms=retrieval_ms,
-            provider=settings.vector_db_provider,
-            model=settings.embedding_model,
-            error=str(exc),
-            details={"top_k": effective_top_k},
-        )
-        raise
+        if exc.status_code >= 500 and usable_frontend_context:
+            retrieval_degraded_error = str(exc.detail)
+            retrieval_degraded_status_code = exc.status_code
+            agentic_result = agentic_rag.fallback(
+                query_plan,
+                stop_reason="vector_unavailable_context_fallback",
+            )
+            retrieval_decision = agentic_result.decision
+            agentic_trace = agentic_result.trace
+            embedding_provider = agentic_result.embedding_provider
+            selected_sources = retrieval_decision.sources
+        else:
+            retrieval_ms = round((perf_counter() - retrieval_started) * 1000)
+            _safe_record_communication_event(
+                request_id=request_id,
+                channel="rag",
+                direction="vectordb_to_fastapi",
+                phase="rag.response",
+                status="error",
+                client_id=telemetry_client_id,
+                project_id=effective_project_id,
+                status_code=exc.status_code,
+                duration_ms=retrieval_ms,
+                provider=settings.vector_db_provider,
+                model=settings.embedding_model,
+                error=str(exc),
+                details={
+                    "policy": f"agentic-rag-v1/{resolved_reasoning_mode}",
+                    "requested_reasoning_mode": reasoning_mode,
+                    "reasoning_mode": resolved_reasoning_mode,
+                    "candidate_k": candidate_k,
+                    "frontend_context_available": usable_frontend_context,
+                    "project_resolution": project_resolution.metadata(),
+                },
+            )
+            _safe_complete_chat_audit(
+                request_id=request_id,
+                status="error",
+                status_code=exc.status_code,
+                used_model_id=requested_model_id,
+                source_count=0,
+                duration_ms=round((perf_counter() - overall_started) * 1000),
+                error=str(exc.detail),
+            )
+            raise
     retrieval_ms = round((perf_counter() - retrieval_started) * 1000)
     _safe_record_communication_event(
         request_id=request_id,
         channel="rag",
         direction="vectordb_to_fastapi",
         phase="rag.response",
-        status="success",
+        status=("degraded" if retrieval_degraded_error else "success"),
         client_id=telemetry_client_id,
         project_id=effective_project_id,
-        status_code=200,
+        status_code=retrieval_degraded_status_code or 200,
         duration_ms=retrieval_ms,
-        provider=search_response.embedding_provider,
+        provider=embedding_provider,
         model=settings.embedding_model,
-        source_count=len(search_response.results),
-        details={"top_k": effective_top_k},
+        source_count=len(selected_sources),
+        error=retrieval_degraded_error,
+        details={
+            "policy": retrieval_decision.policy,
+            "candidate_k": candidate_k,
+            "candidate_count": retrieval_decision.candidate_count,
+            "reranked_count": retrieval_decision.reranked_count,
+            "selected_count": retrieval_decision.selected_count,
+            "context_chars": retrieval_decision.context_chars,
+            "requested_reasoning_mode": agentic_trace.requested_mode,
+            "reasoning_mode": agentic_trace.mode,
+            "step_count": agentic_trace.step_count,
+            "max_steps": agentic_trace.max_steps,
+            "follow_up_rewritten": agentic_trace.follow_up_rewritten,
+            "context_grounded": agentic_trace.context_grounded,
+            "evidence_coverage": agentic_trace.evidence_coverage,
+            "final_novelty_ratio": agentic_trace.final_novelty_ratio,
+            "stop_reason": agentic_trace.stop_reason,
+            "degraded": retrieval_degraded_error is not None,
+            "frontend_context_available": usable_frontend_context,
+            "client_top_k_ignored": payload.top_k is not None,
+            "project_resolution": project_resolution.metadata(),
+        },
     )
     generation_started = perf_counter()
-    requested_model_id = payload.model_id or generation_router.default_model_id
     _safe_record_communication_event(
         request_id=request_id,
         channel="fastapi-ai",
@@ -3018,14 +3400,18 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         project_id=effective_project_id,
         provider="model-router",
         model=requested_model_id,
-        source_count=len(search_response.results),
-        details={"rag_sources_attached": len(search_response.results)},
+        source_count=len(selected_sources),
+        details={
+            "rag_sources_attached": len(selected_sources),
+            "rag_degraded": retrieval_degraded_error is not None,
+            "frontend_context_available": usable_frontend_context,
+        },
     )
     try:
         generation = generation_router.generate(
             payload.model_id,
             payload.message,
-            search_response.results,
+            selected_sources,
             payload.history,
             payload.context,
             effective_project_id,
@@ -3046,9 +3432,18 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
             duration_ms=generation_ms,
             provider="model-router",
             model=requested_model_id,
-            source_count=len(search_response.results),
+            source_count=len(selected_sources),
             error=str(exc),
-            details={"rag_sources_attached": len(search_response.results)},
+            details={"rag_sources_attached": len(selected_sources)},
+        )
+        _safe_complete_chat_audit(
+            request_id=request_id,
+            status="error",
+            status_code=getattr(exc, "status_code", 503),
+            used_model_id=requested_model_id,
+            source_count=len(selected_sources),
+            duration_ms=round((perf_counter() - overall_started) * 1000),
+            error=str(exc),
         )
         raise _service_error(exc) from exc
     generation_ms = round((perf_counter() - generation_started) * 1000)
@@ -3064,22 +3459,32 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         duration_ms=generation_ms,
         provider=generation.provider,
         model=generation.used_model_name,
-        source_count=len(search_response.results),
+        source_count=len(selected_sources),
         details={
             "answer_chars": len(generation.answer),
-            "rag_sources_attached": len(search_response.results),
+            "rag_sources_attached": len(selected_sources),
         },
     )
     total_ms = round((perf_counter() - overall_started) * 1000)
     chat_sources = [
         source.model_copy(update={"citation_id": index})
-        for index, source in enumerate(search_response.results, start=1)
+        for index, source in enumerate(selected_sources, start=1)
     ]
     timing = {
         "retrieval_ms": retrieval_ms,
         "generation_ms": generation_ms,
         "total_ms": total_ms,
     }
+    _safe_complete_chat_audit(
+        request_id=request_id,
+        status="completed",
+        status_code=200,
+        answer=generation.answer,
+        used_model_id=generation.used_model_id,
+        provider=generation.provider,
+        source_count=len(chat_sources),
+        duration_ms=total_ms,
+    )
     return ChatResponse(
         answer=generation.answer,
         source=[
@@ -3097,6 +3502,9 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "completed",
             "project_id": effective_project_id,
+            "requested_project_id": payload.project_id,
+            "resolved_project_id": effective_project_id,
+            "project_resolution": project_resolution.metadata(),
             "session_id": payload.session_id,
             "client": {
                 "client_id": getattr(
@@ -3122,10 +3530,49 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
             "timing": timing,
             "ai_provider": generation.provider,
             "ai_model": generation.used_model_name,
-            "embedding_provider": search_response.embedding_provider,
+            "embedding_provider": embedding_provider,
             "embedding_model": settings.embedding_model,
             "index_version": settings.index_version,
-            "top_k": effective_top_k,
+            "retrieval": {
+                "policy": retrieval_decision.policy,
+                "candidate_k": candidate_k,
+                "candidate_count": retrieval_decision.candidate_count,
+                "reranked_count": retrieval_decision.reranked_count,
+                "selected_count": retrieval_decision.selected_count,
+                "context_chars": retrieval_decision.context_chars,
+                "requested_reasoning_mode": agentic_trace.requested_mode,
+                "reasoning_mode": agentic_trace.mode,
+                "step_count": agentic_trace.step_count,
+                "max_steps": agentic_trace.max_steps,
+                "queries": list(agentic_trace.queries),
+                "standalone_query": agentic_trace.standalone_query,
+                "follow_up_rewritten": agentic_trace.follow_up_rewritten,
+                "context_grounded": agentic_trace.context_grounded,
+                "unique_candidate_count": agentic_trace.unique_candidate_count,
+                "evidence_coverage": agentic_trace.evidence_coverage,
+                "final_novelty_ratio": agentic_trace.final_novelty_ratio,
+                "stop_reason": agentic_trace.stop_reason,
+                "degraded": retrieval_degraded_error is not None,
+                "degraded_error": retrieval_degraded_error,
+                "frontend_context_available": usable_frontend_context,
+                "client_top_k_ignored": payload.top_k is not None,
+            },
+            "prompt_budget": {
+                "context_window_tokens": settings.ai_context_window_tokens,
+                "question_max_chars": settings.ai_question_max_chars,
+                "history_max_chars": settings.ai_history_max_chars,
+                "frontend_context_max_chars": (
+                    settings.ai_frontend_context_max_chars
+                ),
+                "rag_context_max_chars": settings.rag_context_max_chars,
+            },
+            "request_normalization": {
+                "auto_project_requested": payload.project_id == "__auto__",
+                "fallback_session_id": payload.session_id.startswith("vscode-"),
+                "accepted_extra_fields": sorted(
+                    (payload.model_extra or {}).keys()
+                ),
+            },
             "session_scope": effective_project_id,
             "history_messages": len(payload.history),
             "context_items": (

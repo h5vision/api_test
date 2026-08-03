@@ -316,7 +316,7 @@ type OfflineEmbeddingArtifactListResponse = {
 };
 
 const apiBaseUrl = (
-  import.meta.env.VITE_API_BASE_URL || "https://api.blakeedenparker.cloud"
+  import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:8000`
 ).replace(/\/$/, "");
 const adminApiBaseUrl = (
   import.meta.env.VITE_ADMIN_API_BASE_URL || "/admin-api"
@@ -802,6 +802,20 @@ const escapeHtml = (value: string): string =>
     '"': "&quot;",
     "'": "&#039;",
   })[character] ?? character);
+
+const formatClientDateTime = (value: string | null): string => {
+  if (!value) return "--";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? "--"
+    : parsed.toLocaleString("ko-KR", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+};
 
 let discoveredModels: ModelInfo[] = [];
 
@@ -1444,10 +1458,12 @@ function frontendClientRow(client: FrontendClientRecord): string {
         <p class="truncate text-xs font-semibold text-white/78">${escapeHtml(client.name)}</p>
         <p class="mt-1 font-mono text-[9px] text-white/28">${escapeHtml(client.client_id)} · ${registrationLabel}</p>
         ${client.instance_id ? `<p class="mt-1 truncate font-mono text-[9px] text-white/22">${escapeHtml(client.instance_id)}</p>` : ""}
+        <p class="mt-1 text-[9px] text-white/28">최초 연결 ${escapeHtml(formatClientDateTime(client.created_at))}</p>
       </div>
       <div class="min-w-0">
         <p class="truncate font-mono text-[11px] text-white/55">${escapeHtml(client.ip)}:${client.port}</p>
         <p class="mt-1 text-[9px]">${endpointState}</p>
+        <p class="mt-1 text-[9px] text-white/28">최근 ${escapeHtml(formatClientDateTime(client.last_seen_at))} · ${escapeHtml(client.last_seen_ip || client.ip)}</p>
       </div>
       <label class="flex w-fit cursor-pointer items-center gap-2">
         <input class="square-checkbox" type="checkbox" data-client-toggle="${escapeHtml(client.client_id)}" ${client.enabled ? "checked" : ""} aria-label="${escapeHtml(client.name)} Backend 연결 허용" />

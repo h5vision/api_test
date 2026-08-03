@@ -61,7 +61,6 @@ function Import-ContainerEnvironment(
     }
 }
 
-Import-ContainerEnvironment "vision-cloudflared-1" "TUNNEL_TOKEN" "CLOUDFLARE_TUNNEL_TOKEN"
 Import-ContainerEnvironment "vision-api-1" "QDRANT_API_KEY" "QDRANT_API_KEY"
 Import-ContainerEnvironment "vision-api-1" "REDIS_PASSWORD" "REDIS_PASSWORD"
 

@@ -2,7 +2,6 @@
 .env.local
 .env.example
 compose.env
-cloudflared 커넥터 설치.txt
 __pycache__/
 *.py[cod]
 .pytest_cache/
