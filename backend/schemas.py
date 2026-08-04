@@ -332,6 +332,10 @@ class ChatRequest(BaseModel):
         json_schema_extra={
             "examples": [
                 {
+                    "role": "user",
+                    "content": "prepare_release.py 코드를 설명해줘",
+                },
+                {
                     "project_id": "h5vision/fest-api",
                     "message": "이 프로젝트의 실행 구조를 설명해줘",
                     "session_id": "9efda536-b502-49e4-926d-53343a428df0",
@@ -347,6 +351,18 @@ class ChatRequest(BaseModel):
         },
     )
 
+    role: Literal["user"] = Field(
+        default="user",
+        description="Role of the current frontend chat turn.",
+    )
+    content: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100_000,
+        description=(
+            "Current frontend chat text. It is normalized to the internal message field."
+        ),
+    )
     project_id: str = Field(
         default="__auto__",
         min_length=1,
@@ -357,10 +373,12 @@ class ChatRequest(BaseModel):
         ),
     )
     message: str = Field(
-        ...,
-        min_length=1,
+        default="",
         max_length=100_000,
         validation_alias=AliasChoices("message", "prompt"),
+        description=(
+            "Legacy current-turn field. New frontend clients may send role/content."
+        ),
     )
     session_id: str = Field(
         default="vscode-stateless",
@@ -397,7 +415,8 @@ class ChatRequest(BaseModel):
         default=False,
         description=(
             "false returns the frozen JSON response. true returns Server-Sent "
-            "Events: meta, delta, done, or error."
+            "Events with display states: meta=전송중, status=추론중, "
+            "delta=생각중, done=답변중, error=답변 실패."
         ),
     )
     debug: bool = Field(
@@ -453,6 +472,7 @@ class ChatRequest(BaseModel):
                 for candidate in (
                     raw.get("message"),
                     raw.get("prompt"),
+                    raw.get("content"),
                     request_envelope.get("prompt"),
                 )
                 if isinstance(candidate, str) and candidate.strip()
@@ -551,6 +571,8 @@ class ChatRequest(BaseModel):
             )
 
         canonical_keys = {
+            "role",
+            "content",
             "project_id",
             "message",
             "prompt",
@@ -564,6 +586,7 @@ class ChatRequest(BaseModel):
             "client_request_id",
             "model_id",
             "stream",
+            "debug",
             "reasoning_mode",
             "request",
             "chat_context",
@@ -606,6 +629,12 @@ class ChatRequest(BaseModel):
         raw.pop("chat_context", None)
         return raw
 
+    @model_validator(mode="after")
+    def require_current_user_message(self) -> "ChatRequest":
+        if not self.message.strip():
+            raise ValueError("message or content must contain the current user text")
+        return self
+
     @field_validator("client_request_id", "model_id", mode="before")
     @classmethod
     def normalize_blank_optional_chat_fields(cls, value: Any) -> Any:
@@ -638,7 +667,7 @@ class ChatRequest(BaseModel):
             raise ValueError("context must not exceed 5 MB")
         return value
 
-    @field_validator("project_id", "session_id", "model_id", "message")
+    @field_validator("project_id", "session_id", "model_id", "message", "content")
     @classmethod
     def normalize_chat_text(cls, value: str | None) -> str | None:
         if value is None:

@@ -27,6 +27,7 @@ from .ai_providers import (
     PostgresAIProviderStore,
 )
 from .config import settings
+from .chat_progress import ChatStreamEvent, simulated_chat_progress
 from .connectivity import ConnectivityStoreError, PostgresConnectivityStore
 from .distributed import DistributedStateError, RedisCoordinator
 from .frontend_clients import (
@@ -957,6 +958,22 @@ def _service_error(exc: Exception) -> HTTPException:
 def _sse_event(event: str, payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event}\ndata: {encoded}\n\n"
+
+
+def _chat_stream_event(
+    event: ChatStreamEvent,
+    request_id: str,
+    payload: dict[str, Any] | None = None,
+) -> str:
+    """Attach the temporary display state to every public chat SSE event."""
+
+    return _sse_event(
+        event,
+        {
+            **(payload or {}),
+            **simulated_chat_progress(request_id, event),
+        },
+    )
 
 
 _ANSWER_CITATION_PATTERN = re.compile(r"\[(?:[1-9]|[1-9][0-9]+)\]")
@@ -3863,7 +3880,9 @@ def search_documents(payload: SearchRequest) -> SearchResponse:
         "and passes the returned messages unchanged to the selected model. "
         "rag_lab owns retrieval, evidence gating, prompt assembly, and source order. "
         "Client top_k and reasoning_mode remain accepted only for compatibility. "
-        "The canonical question field is message; prompt is a v1 compatibility alias."
+        "The current frontend turn may use role=user with content; message and prompt "
+        "remain compatibility aliases. With stream=true, SSE emits meta(sending), "
+        "status(reasoning), delta(thinking), done(answering), or error(failed)."
     ),
     responses=ERROR_RESPONSES,
 )
@@ -4079,16 +4098,20 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
         )
         if payload.stream:
             def no_evidence_stream():
-                yield _sse_event(
+                yield _chat_stream_event(
                     "meta",
+                    request_id,
                     _client_chat_metadata(payload, response_metadata),
                 )
-                yield _sse_event(
+                yield _chat_stream_event("status", request_id)
+                yield _chat_stream_event(
                     "delta",
+                    request_id,
                     {"request_id": request_id, "sequence": 1, "text": answer},
                 )
-                yield _sse_event(
+                yield _chat_stream_event(
                     "done",
+                    request_id,
                     {
                         "answer": answer,
                         "source": [],
@@ -4132,13 +4155,15 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
 
     if payload.stream:
         def event_stream():
-            yield _sse_event(
+            yield _chat_stream_event(
                 "meta",
+                request_id,
                 _client_chat_metadata(
                     payload,
                     {**response_metadata, "status": "streaming"},
                 ),
             )
+            yield _chat_stream_event("status", request_id)
             answer_parts: list[str] = []
             sequence = 0
             try:
@@ -4177,8 +4202,9 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
                         continue
                     sequence += 1
                     answer_parts.append(delta)
-                    yield _sse_event(
+                    yield _chat_stream_event(
                         "delta",
+                        request_id,
                         {
                             "request_id": request_id,
                             "sequence": sequence,
@@ -4195,8 +4221,9 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
                 if cited_answer != answer:
                     footer = cited_answer[len(answer):]
                     sequence += 1
-                    yield _sse_event(
+                    yield _chat_stream_event(
                         "delta",
+                        request_id,
                         {
                             "request_id": request_id,
                             "sequence": sequence,
@@ -4247,8 +4274,9 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
                     source_count=len(chat_sources),
                     duration_ms=total_ms,
                 )
-                yield _sse_event(
+                yield _chat_stream_event(
                     "done",
+                    request_id,
                     {
                         "answer": answer,
                         "source": [
@@ -4273,8 +4301,9 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
                     duration_ms=round((perf_counter() - overall_started) * 1000),
                     error=str(exc),
                 )
-                yield _sse_event(
+                yield _chat_stream_event(
                     "error",
+                    request_id,
                     {
                         "request_id": request_id,
                         "status_code": status_code,

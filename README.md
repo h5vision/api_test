@@ -439,25 +439,27 @@ POST /v1/chat
 Content-Type: application/json
 
 {
-  "schema_version": "1.0",
-  "client_request_id": "vscode-1710000000000-001",
-  "project_id": "my-project",
-  "message": "결제 재시도 횟수를 알려줘",
-  "session_id": "my-project",
-  "model_id": "backendai-default",
-  "history": [],
-  "stream": false
+  "role": "user",
+  "content": "결제 재시도 횟수를 알려줘"
 }
 ```
 
-Frontend는 `project_id`, `message`, `session_id`, `history`를 전송합니다. Backend는
+Frontend의 최소 채팅 계약은 `role: "user"`와 `content`입니다. Backend는
+`content`를 현재 질문인 `message`로 정규화하고, `project_id`가 없으면 현재
+인덱스 목록에서 프로젝트를 해석하며 `session_id`가 없으면 결정적 fallback ID를
+생성합니다. 프로젝트·세션·모델을 명시해야 하는 Client는 기존 `project_id`,
+`session_id`, `model_id`, `history`, `stream` 필드를 같은 객체에 추가할 수 있고
+기존 `message` 또는 `prompt` 요청도 계속 지원합니다. Backend는
 `rag_lab GET /projects`로 프로젝트를 해석하고 `POST /prompt`에서 받은
 `messages`와 `sources` 순서를 변경하지 않은 채 선택된 생성 모델에 전달합니다.
 `has_evidence=false`이면 LLM을 호출하지 않고 `NO_EVIDENCE`를 반환합니다.
+Vision FastAPI는 자체 벡터 검색, RAG 순위 결정 또는 Prompt 조립을 수행하지
+않습니다. 이 세 작업의 소유자는 외부 `rag_lab`이며, Vision은 `/prompt`의
+`messages`와 `sources` 순서를 보존해 모델 호출과 Frontend 응답 전달만 담당합니다.
 
 `GET /v1/models`가 현재 선택 가능한 공개 모델 목록과 가용 상태를 반환합니다. 기본 모델은 `backendai-default`, Cloud 대안은 `nvidia-default`와 `groq-default`입니다. 현재 VS Code Extension 호환 응답의 최상위 필드는 `answer`, `source[]`, `metadata`입니다. 일반 `/v1/chat` 응답의 `metadata`는 빈 객체이며, 진단이 필요한 요청만 `"debug": true`를 보내면 요청 ID, 프로젝트 해석, 검색·모델·처리시간 정보를 받습니다. `source[]`는 `file`, `chunk`, `score`를 제공하며, 코드 근거 표시는 이 필드를 사용합니다. backendAI 장애 시 NVIDIA로 자동 전환하려면 서버에서만 `ALLOW_CLOUD_FALLBACK=true`를 명시해야 하며 기본값은 자동 전환하지 않는 것입니다. Groq는 자동 fallback 대상이 아니며 frontend가 `groq-default`를 명시적으로 선택할 때 사용합니다.
 
-`backendai-default`는 내부적으로 `BACKENDAI_BASE_URL/api/chat`의 Ollama API를 호출하며 실제 모델은 BackendAI 모델 탐색 결과와 관리자 기본값으로 결정됩니다. frontend 호환을 위해 질문 필드는 `message`와 `prompt`를 모두 받을 수 있지만 v1 정식 필드는 `message`입니다. `top_k`와 `reasoning_mode`는 구버전 호환을 위해 받지만 `rag_lab`이 검색과 evidence gate를 소유하므로 Vision은 무시합니다. `debug`는 기본값 `false`이며, `true`일 때만 JSON 응답 및 SSE `meta`/`done`의 상세 metadata를 반환합니다. `stream: false` 또는 생략은 기존 JSON 응답을 반환하고, `stream: true`는 `meta → delta* → done` 순서의 SSE를 반환하며 도중 실패는 `error` 이벤트로 전달합니다. 모든 응답은 `X-Request-ID`와 `X-API-Version: 1.0` 헤더를 반환합니다.
+`backendai-default`는 내부적으로 `BACKENDAI_BASE_URL/api/chat`의 Ollama API를 호출하며 실제 모델은 BackendAI 모델 탐색 결과와 관리자 기본값으로 결정됩니다. v1의 신규 현재-turn 필드는 `role`과 `content`이며, 기존 `message`와 `prompt`도 호환용으로 받습니다. 최상위 `role`은 `user`만 허용하고 `assistant`·`system` 대화는 `history[]`에서만 사용합니다. `top_k`와 `reasoning_mode`는 구버전 호환을 위해 받지만 `rag_lab`이 검색과 evidence gate를 소유하므로 Vision은 무시합니다. `debug`는 기본값 `false`이며, `true`일 때만 JSON 응답 및 SSE `meta`/`done`의 상세 metadata를 반환합니다. `stream: false` 또는 생략은 기존 JSON 응답을 반환합니다. `stream: true`는 `meta(전송중) → status(추론중) → delta*(생각중) → done(답변중)` 순서의 SSE를 반환하며 도중 실패는 `error(답변 실패)` 이벤트로 전달합니다. 모든 SSE payload에는 `stage`, `label`, `simulated`, `progress_source`, `occurred_at`이 포함됩니다. `delta.text`는 화면에 이어 붙일 실제 답변 조각이고 `done.answer`는 최종 답변이므로, 상태 라벨과 답변 데이터는 함께 처리해야 합니다. 현재 진행 정보는 `simulated: true`, `progress_source: "vision-generator"`인 임시 값이고, 향후 AI Server가 실제 처리 단계를 제공하면 `simulated: false`, `progress_source: "ai-server"`로 전환합니다. 모든 응답은 `X-Request-ID`와 `X-API-Version: 1.0` 헤더를 반환합니다.
 
 관리자 페이지의 `AI Provider CRUD · 자동 감지`에서는 추가 생성 서버를
 등록할 수 있습니다. LAN Ollama는 IP/Host와 Port만 입력하면 `/api/tags`에서

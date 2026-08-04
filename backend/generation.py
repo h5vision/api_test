@@ -437,7 +437,7 @@ class GenerationRouter:
                     default_model_id
                     == self.settings.backendai_public_model_id
                 ),
-                streaming=False,
+                streaming=True,
             ),
             ModelInfo(
                 model_id=self.settings.nvidia_public_model_id,
@@ -496,7 +496,7 @@ class GenerationRouter:
                     enabled=self._model_enabled(model_id),
                     available=True,
                     is_default=default_model_id == model_id,
-                    streaming=False,
+                    streaming=True,
                 )
             )
         for provider, model_names, endpoint in (

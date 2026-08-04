@@ -8,6 +8,28 @@ from backend.schemas import ChatRequest
 
 
 class VSCodeChatCompatibilityTests(unittest.TestCase):
+    def test_role_content_payload_becomes_current_message(self) -> None:
+        payload = ChatRequest.model_validate(
+            {
+                "role": "user",
+                "content": "prepare_release.py 코드를 설명해줘",
+            }
+        )
+
+        self.assertEqual(payload.role, "user")
+        self.assertEqual(payload.content, "prepare_release.py 코드를 설명해줘")
+        self.assertEqual(payload.message, "prepare_release.py 코드를 설명해줘")
+        self.assertEqual(payload.project_id, "__auto__")
+        self.assertTrue(payload.session_id.startswith("vscode-"))
+        self.assertEqual(payload.history, [])
+        self.assertEqual(payload.context, "")
+
+    def test_non_user_current_role_is_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            ChatRequest.model_validate(
+                {"role": "assistant", "content": "잘못된 현재 turn"}
+            )
+
     def test_stream_true_is_accepted_for_sse_clients(self) -> None:
         payload = ChatRequest(
             project_id="h5vision/fest-api",
@@ -24,6 +46,7 @@ class VSCodeChatCompatibilityTests(unittest.TestCase):
 
         self.assertFalse(normal.debug)
         self.assertTrue(diagnostic.debug)
+        self.assertEqual(diagnostic.context, "")
 
     def test_frozen_chat_payload_is_preserved(self) -> None:
         payload = ChatRequest.model_validate(
