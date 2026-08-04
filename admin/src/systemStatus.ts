@@ -217,6 +217,17 @@ const setText = (id: string, value: string): void => {
   if (element) element.textContent = value;
 };
 
+let allCommunicationEvents: CommunicationEvent[] = [];
+let allChatAuditLogs: ChatAuditLog[] = [];
+let allFrontendRegistrationEvents: FrontendRegistrationEvent[] = [];
+let communicationFilterQuery = "";
+let chatAuditFilterQuery = "";
+let frontendRegistrationFilterQuery = "";
+type LogSortOrder = "newest" | "oldest";
+let communicationLogSortOrder: LogSortOrder = "newest";
+let chatAuditLogSortOrder: LogSortOrder = "newest";
+let frontendRegistrationLogSortOrder: LogSortOrder = "newest";
+
 const badgeClasses: Record<BadgeTone, string> = {
   ok: "border-mint-300/20 bg-mint-400/7 text-mint-300",
   warning: "border-amber-300/20 bg-amber-300/7 text-amber-300",
@@ -358,6 +369,16 @@ export function systemStatusMarkup(
 
         <article class="panel rounded-2xl p-4">
           ${sectionHeading("요청 · 응답 통신 로그", "request_id로 Frontend API, RAG, AI 추론 단계를 추적합니다.", logRefreshAction)}
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <label class="flex min-w-[240px] items-center gap-2 text-[10px] text-white/35">
+              <span>필터</span>
+              <input id="communication-log-filter" type="search" placeholder="경로 · 상태 · Client · 모델 · 오류 검색" class="w-full min-w-[220px] rounded-lg border border-white/8 bg-black/15 px-2.5 py-1.5 text-[10px] text-white/70 outline-none" />
+            </label>
+            <div class="flex items-center gap-2">
+              <label class="flex items-center gap-1.5 text-[10px] text-white/35"><span>정렬</span><select id="communication-log-sort" class="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5 text-[10px] text-white/70 outline-none"><option value="newest">최신순</option><option value="oldest">오래된순</option></select></label>
+              <span id="communication-log-filter-count" class="font-mono text-[9px] text-white/23">0건</span>
+            </div>
+          </div>
           <div class="mt-3 overflow-x-auto rounded-xl border border-white/6">
             <table class="w-full min-w-[920px] border-collapse text-left">
               <thead class="bg-black/15 text-[9px] uppercase tracking-wider text-white/28">
@@ -380,6 +401,16 @@ export function systemStatusMarkup(
 
         <article class="panel rounded-2xl p-4">
           ${sectionHeading("Frontend 최초 연결 · ID 등록 로그", "첫 Chat에서 Client를 식별하고 서버 ID를 발급한 과정을 추적합니다.")}
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <label class="flex min-w-[240px] items-center gap-2 text-[10px] text-white/35">
+              <span>필터</span>
+              <input id="frontend-registration-log-filter" type="search" placeholder="Client · 사용자 · IP · 등록 결과 검색" class="w-full min-w-[220px] rounded-lg border border-white/8 bg-black/15 px-2.5 py-1.5 text-[10px] text-white/70 outline-none" />
+            </label>
+            <div class="flex items-center gap-2">
+              <label class="flex items-center gap-1.5 text-[10px] text-white/35"><span>정렬</span><select id="frontend-registration-log-sort" class="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5 text-[10px] text-white/70 outline-none"><option value="newest">최신순</option><option value="oldest">오래된순</option></select></label>
+              <span id="frontend-registration-log-filter-count" class="font-mono text-[9px] text-white/23">0건</span>
+            </div>
+          </div>
           <div class="mt-3 overflow-x-auto rounded-xl border border-white/6">
             <table class="w-full min-w-[1080px] border-collapse text-left">
               <thead class="bg-black/15 text-[9px] uppercase tracking-wider text-white/28">
@@ -402,6 +433,16 @@ export function systemStatusMarkup(
 
         <article class="panel rounded-2xl p-4">
           ${sectionHeading("Frontend Chat 감사 로그", "Frontend 질문과 AI 답변을 관리자 전용으로 확인합니다.")}
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <label class="flex min-w-[240px] items-center gap-2 text-[10px] text-white/35">
+              <span>필터</span>
+              <input id="chat-audit-log-filter" type="search" placeholder="질문 · 답변 · Project · 모델 · 상태 검색" class="w-full min-w-[220px] rounded-lg border border-white/8 bg-black/15 px-2.5 py-1.5 text-[10px] text-white/70 outline-none" />
+            </label>
+            <div class="flex items-center gap-2">
+              <label class="flex items-center gap-1.5 text-[10px] text-white/35"><span>정렬</span><select id="chat-audit-log-sort" class="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5 text-[10px] text-white/70 outline-none"><option value="newest">최신순</option><option value="oldest">오래된순</option></select></label>
+              <span id="chat-audit-log-filter-count" class="font-mono text-[9px] text-white/23">0건</span>
+            </div>
+          </div>
           <div class="mt-3 overflow-x-auto rounded-xl border border-white/6">
             <table class="w-full min-w-[1120px] border-collapse text-left">
               <thead class="bg-black/15 text-[9px] uppercase tracking-wider text-white/28">
@@ -569,12 +610,119 @@ function communicationLogRow(event: CommunicationEvent): string {
   </tr>`;
 }
 
+function normalizeFilterQuery(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function matchesFilter(values: unknown[], query: string): boolean {
+  const terms = normalizeFilterQuery(query).split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const haystack = values
+    .filter((value) => value !== null && value !== undefined)
+    .map((value) => typeof value === "string" ? value : String(value))
+    .join(" ")
+    .toLowerCase();
+  return terms.every((term) => haystack.includes(term));
+}
+
+function detailsSearchText(details: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(details);
+  } catch {
+    return "";
+  }
+}
+
+function sortByOccurredAt<T>(
+  values: T[],
+  getTimestamp: (value: T) => string | null,
+  order: LogSortOrder,
+): T[] {
+  const factor = order === "newest" ? -1 : 1;
+  return [...values].sort((left, right) => {
+    const leftTime = Date.parse(getTimestamp(left) || "");
+    const rightTime = Date.parse(getTimestamp(right) || "");
+    const normalizedLeft = Number.isNaN(leftTime) ? 0 : leftTime;
+    const normalizedRight = Number.isNaN(rightTime) ? 0 : rightTime;
+    return (normalizedLeft - normalizedRight) * factor;
+  });
+}
+
+function filterCommunicationEvents(events: CommunicationEvent[], query: string): CommunicationEvent[] {
+  return events.filter((event) => {
+    return matchesFilter([
+      channelLabels[event.channel] || event.channel,
+      phaseLabels[event.phase] || event.phase,
+      event.status,
+      event.method,
+      event.path,
+      event.project_id,
+      event.client_id,
+      event.provider,
+      event.model,
+      event.error,
+      event.request_id,
+      event.status_code,
+      event.duration_ms,
+      event.source_count,
+      event.direction,
+      detailsSearchText(event.details),
+    ], query);
+  });
+}
+
+function filterChatAuditLogs(logs: ChatAuditLog[], query: string): ChatAuditLog[] {
+  return logs.filter((log) => {
+    return matchesFilter([
+      log.status,
+      log.status_code,
+      log.project_id,
+      log.session_id,
+      log.client_id,
+      log.message,
+      log.answer,
+      log.error,
+      log.provider,
+      log.requested_model_id,
+      log.used_model_id,
+      log.source_count,
+      log.duration_ms,
+      log.context_chars,
+      log.history_count,
+      log.request_id,
+    ], query);
+  });
+}
+
+function filterFrontendRegistrationEvents(events: FrontendRegistrationEvent[], query: string): FrontendRegistrationEvent[] {
+  return events.filter((event) => {
+    return matchesFilter([
+      registrationEventLabels[event.event_type] || event.event_type,
+      event.status,
+      event.client_name,
+      event.declared_user,
+      event.client_id,
+      event.instance_id,
+      event.source_ip,
+      event.client_version,
+      event.reason,
+      event.registration_type,
+      event.identification_method,
+      event.is_first_connection ? "first first_connection 최초 연결 신규 id" : "existing 기존 등록",
+      event.request_id,
+    ], query);
+  });
+}
+
 function renderCommunicationLogs(events: CommunicationEvent[]): void {
   const list = document.getElementById("communication-log-list");
   if (!list) return;
-  list.innerHTML = events.length > 0
-    ? events.map(communicationLogRow).join("")
-    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">아직 기록된 통신 로그가 없습니다.</td></tr>';
+  const filtered = filterCommunicationEvents(events, communicationFilterQuery);
+  const sorted = sortByOccurredAt(filtered, (event) => event.occurred_at, communicationLogSortOrder);
+  list.innerHTML = sorted.length > 0
+    ? sorted.map(communicationLogRow).join("")
+    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">조건에 맞는 로그가 없습니다.</td></tr>';
+  setText("communication-log-filter-count", `${filtered.length}/${events.length}건`);
 }
 
 function chatAuditContent(
@@ -644,11 +792,15 @@ function renderChatAuditLogs(logs: ChatAuditLog[], error?: string): void {
   if (!list) return;
   if (error) {
     list.innerHTML = `<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-danger-300">Chat 감사 로그 조회 실패 · ${escapeHtml(error)}</td></tr>`;
+    setText("chat-audit-log-filter-count", "0건");
     return;
   }
-  list.innerHTML = logs.length > 0
-    ? logs.map(chatAuditLogRow).join("")
-    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">아직 기록된 Chat 요청이 없습니다.</td></tr>';
+  const filtered = filterChatAuditLogs(logs, chatAuditFilterQuery);
+  const sorted = sortByOccurredAt(filtered, (log) => log.received_at, chatAuditLogSortOrder);
+  list.innerHTML = sorted.length > 0
+    ? sorted.map(chatAuditLogRow).join("")
+    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">조건에 맞는 Chat 요청이 없습니다.</td></tr>';
+  setText("chat-audit-log-filter-count", `${filtered.length}/${logs.length}건`);
 }
 
 const registrationEventLabels: Record<string, string> = {
@@ -705,11 +857,15 @@ function renderFrontendRegistrationLogs(
   if (!list) return;
   if (error) {
     list.innerHTML = `<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-danger-300">Frontend 등록 로그 조회 실패 · ${escapeHtml(error)}</td></tr>`;
+    setText("frontend-registration-log-filter-count", "0건");
     return;
   }
-  list.innerHTML = events.length > 0
-    ? events.map(frontendRegistrationLogRow).join("")
-    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">아직 기록된 최초 연결 시도가 없습니다.</td></tr>';
+  const filtered = filterFrontendRegistrationEvents(events, frontendRegistrationFilterQuery);
+  const sorted = sortByOccurredAt(filtered, (event) => event.occurred_at, frontendRegistrationLogSortOrder);
+  list.innerHTML = sorted.length > 0
+    ? sorted.map(frontendRegistrationLogRow).join("")
+    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">조건에 맞는 최초 연결 로그가 없습니다.</td></tr>';
+  setText("frontend-registration-log-filter-count", `${filtered.length}/${events.length}건`);
 }
 
 function latestEvent(
@@ -855,8 +1011,9 @@ export async function loadSystemCommunicationLogs(
     }
     const connectivity = (await connectivityResult.value.json()) as ConnectivityResponse;
     const logs = (await logsResult.value.json()) as CommunicationEventListResponse;
-    renderCommunicationLogs(logs.events);
-    applyFlowStatuses(connectivity, logs.events);
+    allCommunicationEvents = logs.events;
+    renderCommunicationLogs(allCommunicationEvents);
+    applyFlowStatuses(connectivity, allCommunicationEvents);
 
     if (chatAuditResult.status === "rejected") {
       const auditError = chatAuditResult.reason instanceof Error
@@ -867,7 +1024,8 @@ export async function loadSystemCommunicationLogs(
       renderChatAuditLogs([], `HTTP ${chatAuditResult.value.status}`);
     } else {
       const chatAudit = (await chatAuditResult.value.json()) as ChatAuditLogListResponse;
-      renderChatAuditLogs(chatAudit.logs);
+      allChatAuditLogs = chatAudit.logs;
+      renderChatAuditLogs(allChatAuditLogs);
       setText(
         "chat-audit-log-policy",
         `질문·답변은 최근 ${chatAudit.retention_days}일, 항목별 최대 ${chatAudit.content_limit_chars.toLocaleString("ko-KR")}자로 보관합니다. Context와 History는 크기·개수만 기록합니다.`,
@@ -885,7 +1043,8 @@ export async function loadSystemCommunicationLogs(
       const registrationLogs = (
         await registrationResult.value.json()
       ) as FrontendRegistrationEventListResponse;
-      renderFrontendRegistrationLogs(registrationLogs.events);
+      allFrontendRegistrationEvents = registrationLogs.events;
+      renderFrontendRegistrationLogs(allFrontendRegistrationEvents);
     }
 
     setText(
@@ -968,6 +1127,57 @@ export function initializeSystemStatus(adminApiBaseUrl: string): void {
         loadSystemEndpointActivity(adminApiBaseUrl),
         loadSystemCommunicationLogs(adminApiBaseUrl),
       ]);
+    });
+  }
+
+  const communicationFilter = document.getElementById("communication-log-filter") as HTMLInputElement | null;
+  if (communicationFilter && communicationFilter.dataset.bound !== "true") {
+    communicationFilter.dataset.bound = "true";
+    communicationFilter.addEventListener("input", () => {
+      communicationFilterQuery = normalizeFilterQuery(communicationFilter.value);
+      renderCommunicationLogs(allCommunicationEvents);
+    });
+  }
+  const communicationSort = document.getElementById("communication-log-sort") as HTMLSelectElement | null;
+  if (communicationSort && communicationSort.dataset.bound !== "true") {
+    communicationSort.dataset.bound = "true";
+    communicationSort.addEventListener("change", () => {
+      communicationLogSortOrder = communicationSort.value === "oldest" ? "oldest" : "newest";
+      renderCommunicationLogs(allCommunicationEvents);
+    });
+  }
+
+  const registrationFilter = document.getElementById("frontend-registration-log-filter") as HTMLInputElement | null;
+  if (registrationFilter && registrationFilter.dataset.bound !== "true") {
+    registrationFilter.dataset.bound = "true";
+    registrationFilter.addEventListener("input", () => {
+      frontendRegistrationFilterQuery = normalizeFilterQuery(registrationFilter.value);
+      renderFrontendRegistrationLogs(allFrontendRegistrationEvents);
+    });
+  }
+  const registrationSort = document.getElementById("frontend-registration-log-sort") as HTMLSelectElement | null;
+  if (registrationSort && registrationSort.dataset.bound !== "true") {
+    registrationSort.dataset.bound = "true";
+    registrationSort.addEventListener("change", () => {
+      frontendRegistrationLogSortOrder = registrationSort.value === "oldest" ? "oldest" : "newest";
+      renderFrontendRegistrationLogs(allFrontendRegistrationEvents);
+    });
+  }
+
+  const chatFilter = document.getElementById("chat-audit-log-filter") as HTMLInputElement | null;
+  if (chatFilter && chatFilter.dataset.bound !== "true") {
+    chatFilter.dataset.bound = "true";
+    chatFilter.addEventListener("input", () => {
+      chatAuditFilterQuery = normalizeFilterQuery(chatFilter.value);
+      renderChatAuditLogs(allChatAuditLogs);
+    });
+  }
+  const chatSort = document.getElementById("chat-audit-log-sort") as HTMLSelectElement | null;
+  if (chatSort && chatSort.dataset.bound !== "true") {
+    chatSort.dataset.bound = "true";
+    chatSort.addEventListener("change", () => {
+      chatAuditLogSortOrder = chatSort.value === "oldest" ? "oldest" : "newest";
+      renderChatAuditLogs(allChatAuditLogs);
     });
   }
 }

@@ -532,6 +532,10 @@ class QdrantVectorStore:
         must = [
             {"key": "project_id", "match": {"value": project_id}},
             {
+                "key": "embedding_provider",
+                "match": {"value": embedding_provider},
+            },
+            {
                 "key": "embedding_model",
                 "match": {"value": embedding_model},
             },

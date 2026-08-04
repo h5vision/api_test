@@ -76,20 +76,12 @@ class Settings:
     trusted_proxy_hosts: tuple[str, ...]
     cors_origins: tuple[str, ...]
     request_timeout_seconds: int
+    rag_lab_base_url: str
+    rag_lab_token: str
+    rag_lab_timeout_seconds: int
     allow_local_fallback: bool
     chunk_size: int
     chunk_overlap: int
-    rag_candidate_k: int
-    rag_min_sources: int
-    rag_max_sources: int
-    rag_context_max_chars: int
-    rag_min_score: float
-    rag_score_window: float
-    agentic_rag_default_mode: str
-    agentic_rag_balanced_steps: int
-    agentic_rag_deep_steps: int
-    agentic_rag_min_coverage: float
-    agentic_rag_min_novelty_ratio: float
     project_id_aliases: tuple[tuple[str, str], ...]
     ai_provider: str
     ai_base_url: str
@@ -103,6 +95,7 @@ class Settings:
     ai_frontend_context_max_chars: int
     embedding_deployment: str
     embedding_provider: str
+    embedding_provider_id: str
     embedding_base_url: str
     embedding_model: str
     embedding_model_id: str
@@ -113,6 +106,7 @@ class Settings:
     embedding_timeout_seconds: int
     vector_db_provider: str
     vector_db_path: Path
+    vector_db_local_root: Path
     qdrant_url: str
     qdrant_api_key: str
     qdrant_collection: str
@@ -179,15 +173,6 @@ class Settings:
         embedding_model = os.getenv(
             "EMBEDDING_MODEL", "bge-m3:latest"
         ).strip()
-        rag_candidate_k = max(4, min(50, _as_int("RAG_CANDIDATE_K", 12)))
-        rag_max_sources = max(
-            1,
-            min(rag_candidate_k, _as_int("RAG_MAX_SOURCES", 8)),
-        )
-        rag_min_sources = max(
-            1,
-            min(rag_max_sources, _as_int("RAG_MIN_SOURCES", 3)),
-        )
         return cls(
             backend_host=os.getenv("BACKEND_HOST", "127.0.0.1").strip(),
             backend_port=_as_int("BACKEND_PORT", 8000),
@@ -197,46 +182,16 @@ class Settings:
             trusted_proxy_hosts=trusted_proxy_hosts,
             cors_origins=cors,
             request_timeout_seconds=_as_int("REQUEST_TIMEOUT_SECONDS", 60),
-            allow_local_fallback=_as_bool("ALLOW_LOCAL_FALLBACK", True),
+            rag_lab_base_url=os.getenv(
+                "RAG_LAB_BASE_URL", "http://192.168.0.12:8200"
+            ).strip().rstrip("/"),
+            rag_lab_token=_env_or_secret("RAG_LAB_TOKEN", "RAG_LAB_TOKEN_FILE"),
+            rag_lab_timeout_seconds=max(
+                10, _as_int("RAG_LAB_TIMEOUT_SECONDS", 60)
+            ),
+            allow_local_fallback=_as_bool("ALLOW_LOCAL_FALLBACK", False),
             chunk_size=max(200, _as_int("CHUNK_SIZE", 1600)),
             chunk_overlap=max(0, _as_int("CHUNK_OVERLAP", 200)),
-            rag_candidate_k=rag_candidate_k,
-            rag_min_sources=rag_min_sources,
-            rag_max_sources=rag_max_sources,
-            rag_context_max_chars=max(
-                2_000,
-                _as_int("RAG_CONTEXT_MAX_CHARS", 12_000),
-            ),
-            rag_min_score=min(
-                1.0,
-                max(-1.0, _as_float("RAG_MIN_SCORE", 0.30)),
-            ),
-            rag_score_window=min(
-                1.0,
-                max(0.0, _as_float("RAG_SCORE_WINDOW", 0.20)),
-            ),
-            agentic_rag_default_mode=(
-                os.getenv("AGENTIC_RAG_DEFAULT_MODE", "auto").strip().lower()
-                if os.getenv("AGENTIC_RAG_DEFAULT_MODE", "auto").strip().lower()
-                in {"auto", "fast", "balanced", "deep"}
-                else "auto"
-            ),
-            agentic_rag_balanced_steps=max(
-                1,
-                min(4, _as_int("AGENTIC_RAG_BALANCED_STEPS", 2)),
-            ),
-            agentic_rag_deep_steps=max(
-                2,
-                min(6, _as_int("AGENTIC_RAG_DEEP_STEPS", 3)),
-            ),
-            agentic_rag_min_coverage=min(
-                1.0,
-                max(0.0, _as_float("AGENTIC_RAG_MIN_COVERAGE", 0.55)),
-            ),
-            agentic_rag_min_novelty_ratio=min(
-                1.0,
-                max(0.0, _as_float("AGENTIC_RAG_MIN_NOVELTY_RATIO", 0.10)),
-            ),
             project_id_aliases=_project_id_aliases(),
             ai_provider=os.getenv("AI_PROVIDER", "nvidia").strip().lower(),
             ai_base_url=os.getenv(
@@ -271,6 +226,9 @@ class Settings:
             embedding_provider=os.getenv(
                 "EMBEDDING_PROVIDER", "ollama"
             ).strip().lower(),
+            embedding_provider_id=os.getenv(
+                "EMBEDDING_PROVIDER_ID", ""
+            ).strip(),
             embedding_base_url=embedding_base_url,
             embedding_model=embedding_model,
             embedding_model_id=os.getenv(
@@ -286,6 +244,9 @@ class Settings:
             vector_db_provider=os.getenv("VECTOR_DB_PROVIDER", "sqlite").strip().lower(),
             vector_db_path=_resolve_path(
                 os.getenv("VECTOR_DB_PATH", "./data/vector_store.sqlite3")
+            ),
+            vector_db_local_root=_resolve_path(
+                os.getenv("VECTOR_DB_LOCAL_ROOT", "./data/vector-databases")
             ),
             qdrant_url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
             .strip()
@@ -391,7 +352,7 @@ class Settings:
             if self.vector_db_provider == "qdrant"
             else None,
             "index_version": self.index_version,
-            "agentic_rag_default_mode": self.agentic_rag_default_mode,
+            "rag_lab_base_url_configured": bool(self.rag_lab_base_url),
             "metadata_db_provider": "postgresql",
             "metadata_db_configured": bool(self.postgres_password),
             "default_model_id": self.default_model_id,

@@ -31,6 +31,7 @@ class RuntimeVectorSettings:
     collection: str
     embedding_deployment: str
     embedding_provider: str
+    embedding_provider_id: str | None
     embedding_base_url: str
     embedding_model: str
     embedding_model_id: str
@@ -58,6 +59,7 @@ def _vector_default(settings: Settings) -> RuntimeVectorSettings:
         collection=settings.qdrant_collection,
         embedding_deployment=settings.embedding_deployment,
         embedding_provider=settings.embedding_provider,
+        embedding_provider_id=settings.embedding_provider_id or None,
         embedding_base_url=settings.embedding_base_url,
         embedding_model=settings.embedding_model,
         embedding_model_id=settings.embedding_model_id,
@@ -131,6 +133,7 @@ class PostgresRuntimeServiceSettingsStore:
                     for column, definition in (
                         ("embedding_deployment", "TEXT"),
                         ("embedding_provider", "TEXT"),
+                        ("embedding_provider_id", "TEXT"),
                         ("embedding_base_url", "TEXT"),
                         ("embedding_model_id", "TEXT"),
                         ("embedding_dimension", "INTEGER"),
@@ -196,6 +199,11 @@ class PostgresRuntimeServiceSettingsStore:
                 collection=str(row["vector_collection"]),
                 embedding_deployment=str(row["embedding_deployment"]),
                 embedding_provider=str(row["embedding_provider"]),
+                embedding_provider_id=(
+                    str(row["embedding_provider_id"])
+                    if row.get("embedding_provider_id")
+                    else None
+                ),
                 embedding_base_url=str(row["embedding_base_url"]).rstrip("/"),
                 embedding_model=str(row["embedding_model"]),
                 embedding_model_id=str(row["embedding_model_id"]),
@@ -218,7 +226,8 @@ class PostgresRuntimeServiceSettingsStore:
                     SELECT groq_enabled, groq_base_url, groq_model,
                            default_model_id, vector_host, vector_port,
                            vector_collection, embedding_deployment,
-                           embedding_provider, embedding_base_url,
+                           embedding_provider, embedding_provider_id,
+                           embedding_base_url,
                            embedding_model, embedding_model_id,
                            embedding_dimension,
                            embedding_batch_size, index_version,
@@ -261,6 +270,7 @@ class PostgresRuntimeServiceSettingsStore:
         vector_collection: str,
         embedding_deployment: str,
         embedding_provider: str,
+        embedding_provider_id: str | None,
         embedding_base_url: str,
         embedding_model: str,
         embedding_model_id: str,
@@ -277,13 +287,14 @@ class PostgresRuntimeServiceSettingsStore:
                         singleton, groq_enabled, groq_base_url, groq_model,
                         default_model_id, vector_host, vector_port,
                         vector_collection, embedding_deployment,
-                        embedding_provider, embedding_base_url,
+                        embedding_provider, embedding_provider_id,
+                        embedding_base_url,
                         embedding_model, embedding_model_id,
                         embedding_dimension,
                         embedding_batch_size, index_version, updated_at
                     ) VALUES (
                         TRUE, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, NOW()
+                        %s, %s, %s, %s, %s, %s, %s, NOW()
                     )
                     ON CONFLICT (singleton)
                     DO UPDATE SET
@@ -296,6 +307,7 @@ class PostgresRuntimeServiceSettingsStore:
                         vector_collection = EXCLUDED.vector_collection,
                         embedding_deployment = EXCLUDED.embedding_deployment,
                         embedding_provider = EXCLUDED.embedding_provider,
+                        embedding_provider_id = EXCLUDED.embedding_provider_id,
                         embedding_base_url = EXCLUDED.embedding_base_url,
                         embedding_model = EXCLUDED.embedding_model,
                         embedding_model_id = EXCLUDED.embedding_model_id,
@@ -306,7 +318,8 @@ class PostgresRuntimeServiceSettingsStore:
                     RETURNING groq_enabled, groq_base_url, groq_model,
                               default_model_id, vector_host, vector_port,
                               vector_collection, embedding_deployment,
-                              embedding_provider, embedding_base_url,
+                              embedding_provider, embedding_provider_id,
+                              embedding_base_url,
                               embedding_model, embedding_model_id,
                               embedding_dimension,
                               embedding_batch_size, index_version, updated_at
@@ -321,6 +334,7 @@ class PostgresRuntimeServiceSettingsStore:
                         vector_collection,
                         embedding_deployment,
                         embedding_provider,
+                        embedding_provider_id,
                         embedding_base_url.rstrip("/"),
                         embedding_model,
                         embedding_model_id,
@@ -353,6 +367,7 @@ class PostgresRuntimeServiceSettingsStore:
             qdrant_url=runtime.vector.url,
             qdrant_collection=runtime.vector.collection,
             embedding_provider=runtime.vector.embedding_provider,
+            embedding_provider_id=runtime.vector.embedding_provider_id or "",
             embedding_base_url=runtime.vector.embedding_base_url,
             embedding_model=runtime.vector.embedding_model,
             embedding_model_id=runtime.vector.embedding_model_id,

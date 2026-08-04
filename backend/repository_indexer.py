@@ -412,6 +412,8 @@ class RepositoryIndexer:
                 content,
                 self.settings.chunk_size,
                 self.settings.chunk_overlap,
+                path=str(entry["relative_path"]),
+                language=entry.get("language"),
             )
             path_hash = hashlib.sha256(
                 entry["relative_path"].encode("utf-8")
@@ -422,6 +424,14 @@ class RepositoryIndexer:
                 "snapshot_id": snapshot_id,
             }
             for ordinal, item in enumerate(chunk_specs, start=1):
+                chunk_metadata = {
+                    **metadata,
+                    "content_type": item.get("content_type"),
+                    "path_category": item.get("path_category"),
+                    "locale": item.get("locale"),
+                    "is_translation": bool(item.get("is_translation")),
+                    "chunking_strategy": item.get("chunking_strategy"),
+                }
                 tasks.append(
                     {
                         "chunk_id": f"{path_hash}#chunk-{ordinal}",
@@ -431,7 +441,7 @@ class RepositoryIndexer:
                         "content": str(item["content"]),
                         "line_start": int(item["line_start"]),
                         "line_end": int(item["line_end"]),
-                        "metadata": metadata,
+                        "metadata": chunk_metadata,
                         "is_last": ordinal == len(chunk_specs),
                     }
                 )

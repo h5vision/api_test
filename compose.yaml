@@ -90,14 +90,19 @@ services:
     environment:
       BACKEND_HOST: 0.0.0.0
       BACKEND_PORT: 8000
+      RAG_LAB_BASE_URL: "${RAG_LAB_BASE_URL:-http://192.168.0.12:8200}"
+      RAG_LAB_TOKEN: "${RAG_LAB_TOKEN:-}"
+      RAG_LAB_TIMEOUT_SECONDS: "${RAG_LAB_TIMEOUT_SECONDS:-60}"
       EMBEDDING_PROVIDER: ollama
       EMBEDDING_BASE_URL: "${EMBEDDING_BASE_URL:-http://host.docker.internal:11434}"
       EMBEDDING_MODEL_ID: "${EMBEDDING_MODEL_ID:-bge-m3:latest}"
-      EMBEDDING_BATCH_SIZE: "${EMBEDDING_BATCH_SIZE:-8}"
+      EMBEDDING_BATCH_SIZE: "${EMBEDDING_BATCH_SIZE:-32}"
       EMBEDDING_DIMENSION: 1024
       EMBEDDING_KEEP_ALIVE: 10m
       EMBEDDING_TIMEOUT_SECONDS: 300
+      ALLOW_LOCAL_FALLBACK: "false"
       VECTOR_DB_PROVIDER: qdrant
+      VECTOR_DB_LOCAL_ROOT: /vector-db-local
       QDRANT_COLLECTION: vision_bge_m3_v1
       INDEX_VERSION: bge-m3-v1
       PROJECT_DB_LOCAL_ROOT: /project-db
@@ -160,6 +165,12 @@ services:
         source: "${PROJECT_DB_LOCAL_ROOT:-C:/Users/PC2412/Documents/HancomAI5}"
         target: /project-db
         read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${VECTOR_DB_LOCAL_ROOT:-C:/Users/PC2412/Documents/HancomAI5/Vision/data/vector-databases}"
+        target: /vector-db-local
+        read_only: false
         bind:
           create_host_path: false
       - api_python_deps:/opt/vision-deps:ro
@@ -255,7 +266,8 @@ services:
     pull_policy: missing
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${ADMIN_PREVIEW_PORT:-4173}:8080"
+      # 4173 is reserved by Windows on some hosts. 4180 avoids that range.
+      - "127.0.0.1:${ADMIN_PREVIEW_PORT:-4180}:8080"
     expose:
       - "8080"
     volumes:

@@ -7,7 +7,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .config import Settings
 from .schemas import HistoryMessage, Source
@@ -24,13 +24,16 @@ def _post_json(
     payload: dict[str, Any],
     api_key: str,
     timeout: int,
+    auth_type: str = "bearer",
 ) -> dict[str, Any]:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "User-Agent": "VisionBackend/1.0",
     }
-    if api_key:
+    if api_key and auth_type == "x-api-key":
+        headers["X-API-Key"] = api_key
+    elif api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         url,
@@ -59,8 +62,37 @@ class EmbeddingResult:
 
 
 class EmbeddingService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        provider_resolver: Callable[[str], Any] | None = None,
+    ) -> None:
         self.settings = settings
+        self._provider_resolver = provider_resolver
+
+    def _provider_connection(self) -> tuple[str, str, str, str]:
+        provider_id = self.settings.embedding_provider_id
+        if not provider_id:
+            return (
+                self.settings.embedding_provider,
+                self.settings.embedding_base_url,
+                self.settings.embedding_api_key,
+                "bearer",
+            )
+        if self._provider_resolver is None:
+            raise ServiceError("선택된 Embedding Provider를 조회할 수 없습니다.", 503)
+        try:
+            provider = self._provider_resolver(provider_id)
+        except Exception as exc:
+            raise ServiceError("Embedding Provider 설정 조회에 실패했습니다.", 503) from exc
+        if provider is None or not getattr(provider, "enabled", False):
+            raise ServiceError("선택된 Embedding Provider가 없거나 비활성화되어 있습니다.", 503)
+        return (
+            str(provider.protocol),
+            str(provider.base_url).rstrip("/"),
+            str(provider.api_key or ""),
+            str(provider.auth_type),
+        )
 
     def embed(self, text: str, input_type: str) -> EmbeddingResult:
         return self.embed_many([text], input_type)[0]
@@ -68,11 +100,17 @@ class EmbeddingService:
     def embed_many(self, texts: list[str], input_type: str) -> list[EmbeddingResult]:
         if not texts or any(not text.strip() for text in texts):
             raise ServiceError("임베딩할 텍스트가 비어 있습니다.", status_code=400)
-        if self.settings.embedding_provider == "ollama":
-            return self._ollama_embeddings(texts)
-        if self.settings.embedding_provider == "local":
+        protocol, base_url, api_key, auth_type = self._provider_connection()
+        if protocol == "ollama":
+            return self._ollama_embeddings(
+                texts,
+                base_url=base_url,
+                api_key=api_key,
+                auth_type=auth_type,
+            )
+        if protocol == "local":
             return [self._local_embedding(text) for text in texts]
-        if not self.settings.embedding_api_key:
+        if not api_key:
             if self.settings.allow_local_fallback:
                 return [self._local_embedding(text) for text in texts]
             raise ServiceError("EMBEDDING_API_KEY 또는 NVIDIA_API_KEY가 필요합니다.", 503)
@@ -85,12 +123,30 @@ class EmbeddingService:
                 "encoding_format": "float",
                 "truncate": "END",
             }
-            data = _post_json(
-                f"{self.settings.embedding_base_url}/embeddings",
-                payload,
-                self.settings.embedding_api_key,
-                self.settings.request_timeout_seconds,
-            )
+            try:
+                data = _post_json(
+                    f"{base_url}/embeddings",
+                    payload,
+                    api_key,
+                    self.settings.request_timeout_seconds,
+                    auth_type,
+                )
+            except ServiceError as exc:
+                if "HTTP 400" not in str(exc) and "HTTP 422" not in str(exc):
+                    raise
+                # Generic OpenAI-compatible providers can reject NVIDIA's
+                # input_type/truncate extensions. Retry with the standard body.
+                data = _post_json(
+                    f"{base_url}/embeddings",
+                    {
+                        "input": texts,
+                        "model": self.settings.embedding_model,
+                        "encoding_format": "float",
+                    },
+                    api_key,
+                    self.settings.request_timeout_seconds,
+                    auth_type,
+                )
             rows = data.get("data")
             if not isinstance(rows, list) or len(rows) != len(texts):
                 raise ServiceError("임베딩 API 응답 개수가 요청과 일치하지 않습니다.")
@@ -99,10 +155,16 @@ class EmbeddingService:
                 embedding = row.get("embedding") if isinstance(row, dict) else None
                 if not isinstance(embedding, list) or not embedding:
                     raise ServiceError("임베딩 API 응답에 벡터가 없습니다.")
+                if len(embedding) != self.settings.embedding_dimension:
+                    raise ServiceError(
+                        "Embedding API 차원이 설정과 일치하지 않습니다: "
+                        f"expected={self.settings.embedding_dimension}, "
+                        f"actual={len(embedding)}"
+                    )
                 results.append(
                     EmbeddingResult(
                         vector=[float(value) for value in embedding],
-                        provider=self.settings.embedding_provider,
+                        provider=protocol,
                         model=self.settings.embedding_model,
                     )
                 )
@@ -112,17 +174,25 @@ class EmbeddingService:
                 return [self._local_embedding(text) for text in texts]
             raise
 
-    def _ollama_embeddings(self, texts: list[str]) -> list[EmbeddingResult]:
+    def _ollama_embeddings(
+        self,
+        texts: list[str],
+        *,
+        base_url: str,
+        api_key: str,
+        auth_type: str,
+    ) -> list[EmbeddingResult]:
         data = _post_json(
-            f"{self.settings.embedding_base_url}/api/embed",
+            f"{base_url}/api/embed",
             {
                 "model": self.settings.embedding_model,
                 "input": texts,
                 "truncate": False,
                 "keep_alive": self.settings.embedding_keep_alive,
             },
-            "",
+            api_key,
             self.settings.embedding_timeout_seconds,
+            auth_type,
         )
         embeddings = data.get("embeddings")
         if not isinstance(embeddings, list) or len(embeddings) != len(texts):
@@ -148,7 +218,7 @@ class EmbeddingService:
 
     @staticmethod
     def _local_embedding(text: str) -> EmbeddingResult:
-        dimensions = 384
+        dimensions = 1024
         vector = [0.0] * dimensions
         tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[가-힣]+|\d+", text.lower())
         for token in tokens:

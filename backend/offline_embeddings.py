@@ -506,6 +506,8 @@ class OfflineEmbeddingImporter:
                 content,
                 self.settings.chunk_size,
                 self.settings.chunk_overlap,
+                path=relative_path,
+                language=LANGUAGES.get(pure.suffix.lower()),
             )
             for ordinal, item in enumerate(specs, start=1):
                 chunk_content = str(item["content"])
@@ -525,6 +527,11 @@ class OfflineEmbeddingImporter:
                         "source_id": artifact.source_id,
                         "revision": revision,
                         "snapshot_id": artifact.snapshot_id,
+                        "content_type": item.get("content_type"),
+                        "path_category": item.get("path_category"),
+                        "locale": item.get("locale"),
+                        "is_translation": bool(item.get("is_translation")),
+                        "chunking_strategy": item.get("chunking_strategy"),
                     },
                 }
 

@@ -194,7 +194,7 @@ class MetadataListResponse(BaseModel):
 class SearchRequest(BaseModel):
     project_id: str = Field(default="default", min_length=1)
     query: str = Field(..., min_length=1)
-    top_k: int = Field(default=5, ge=1, le=20)
+    top_k: int = Field(default=5, ge=1, le=50)
 
 
 class Source(BaseModel):
@@ -218,182 +218,7 @@ class SearchResponse(BaseModel):
     query: str
     results: list[Source]
     embedding_provider: str
-
-
-# Previous Vision-owned /v1/chat contract. It remains here as a commented
-# migration reference while the Team-vision extension contract is active.
-#
-# class HistoryMessage(BaseModel):
-#     model_config = ConfigDict(extra="forbid")
-#
-#     role: Literal["user", "assistant"]
-#     content: str = Field(..., min_length=1, max_length=100_000)
-#
-#
-# class ChatRequest(BaseModel):
-#     model_config = ConfigDict(
-#         extra="forbid",
-#         json_schema_extra={
-#             "examples": [
-#                 {
-#                     "schema_version": "1.0",
-#                     "client_request_id": "vscode-1710000000000-001",
-#                     "project_id": "Vision",
-#                     "session_id": "Vision",
-#                     "model_id": "backendai-default",
-#                     "message": "이 프로젝트의 실행 구조를 설명해줘",
-#                     "top_k": 5,
-#                     "history": [],
-#                     "stream": False,
-#                 }
-#             ]
-#         },
-#     )
-#
-#     schema_version: Literal["1.0"] | None = Field(
-#         default=None,
-#         description="Optional request schema marker. Null or omission is treated as v1.",
-#     )
-#     client_request_id: str | None = Field(
-#         default=None,
-#         max_length=128,
-#         pattern=r"^(?:|[A-Za-z0-9._:-]{1,128})$",
-#         description=(
-#             "Frontend correlation ID. It is echoed back but is not an idempotency "
-#             "key. A blank string is normalized to null."
-#         ),
-#     )
-#     project_id: str = Field(
-#         ...,
-#         min_length=1,
-#         max_length=255,
-#         description="Required PostgreSQL/Qdrant project scope.",
-#     )
-#     message: str = Field(
-#         ...,
-#         min_length=1,
-#         max_length=100_000,
-#         validation_alias=AliasChoices("message", "prompt"),
-#         description=(
-#             "Canonical v1 question field. "
-#             "The legacy prompt alias is accepted until v2."
-#         ),
-#     )
-#     session_id: str = Field(..., min_length=1, max_length=255)
-#     model_id: str | None = Field(
-#         default=None,
-#         max_length=255,
-#         description=(
-#             "Public model ID. A blank string is normalized to null "
-#             "and the default model is used."
-#         ),
-#     )
-#     top_k: int | None = Field(
-#         default=None,
-#         ge=1,
-#         le=20,
-#         description="Null or omission uses 5.",
-#     )
-#     history: list[HistoryMessage] = Field(..., max_length=20)
-#     stream: Literal[False] | None = Field(
-#         default=None,
-#         description="Null or omission uses false. v1 does not support streaming.",
-#     )
-#
-#     @field_validator("client_request_id", "model_id", mode="before")
-#     @classmethod
-#     def normalize_blank_optional_chat_fields(cls, value: Any) -> Any:
-#         if isinstance(value, str) and not value.strip():
-#             return None
-#         return value
-#
-#     @field_validator("project_id", "session_id", "model_id", "message")
-#     @classmethod
-#     def normalize_chat_text(cls, value: str | None) -> str | None:
-#         if value is None:
-#             return None
-#         normalized = value.strip()
-#         if not normalized:
-#             raise ValueError("chat field must not be blank")
-#         return normalized
-#
-#
-# class ChatTiming(BaseModel):
-#     retrieval_ms: int = Field(..., ge=0)
-#     generation_ms: int = Field(..., ge=0)
-#     total_ms: int = Field(..., ge=0)
-#
-#
-# class ChatMetadata(BaseModel):
-#     ai_provider: Literal["backendai", "nvidia", "groq", "local"]
-#     ai_model: str
-#     embedding_provider: str
-#     embedding_model: str
-#     index_version: str
-#     top_k: int = Field(..., ge=1, le=20)
-#     session_scope: str
-#     history_messages: int = Field(..., ge=0, le=20)
-#     source_count: int = Field(..., ge=0, le=20)
-#
-#
-# class ChatResponse(BaseModel):
-#     model_config = ConfigDict(
-#         extra="forbid",
-#         json_schema_extra={
-#             "examples": [
-#                 {
-#                     "schema_version": "1.0",
-#                     "request_id": "req_0123456789abcdef",
-#                     "client_request_id": "vscode-1710000000000-001",
-#                     "created_at": "2026-07-22T05:00:00Z",
-#                     "status": "completed",
-#                     "project_id": "Vision",
-#                     "session_id": "Vision",
-#                     "requested_model_id": "backendai-default",
-#                     "used_model_id": "backendai-default",
-#                     "provider": "backendai",
-#                     "fallback_used": False,
-#                     "finish_reason": "stop",
-#                     "answer": "프로젝트 실행 구조는 다음과 같습니다. [1]",
-#                     "sources": [],
-#                     "timing": {
-#                         "retrieval_ms": 25,
-#                         "generation_ms": 840,
-#                         "total_ms": 865,
-#                     },
-#                     "metadata": {
-#                         "ai_provider": "backendai",
-#                         "ai_model": "gemma3:4b",
-#                         "embedding_provider": "ollama",
-#                         "embedding_model": "bge-m3:latest",
-#                         "index_version": "bge-m3-v1",
-#                         "top_k": 5,
-#                         "session_scope": "Vision",
-#                         "history_messages": 0,
-#                         "source_count": 0,
-#                     },
-#                 }
-#             ]
-#         },
-#     )
-#
-#     schema_version: Literal["1.0"] = API_SCHEMA_VERSION
-#     request_id: str
-#     client_request_id: str | None = None
-#     created_at: datetime
-#     status: Literal["completed"] = "completed"
-#     project_id: str
-#     session_id: str
-#     requested_model_id: str
-#     used_model_id: str
-#     provider: Literal["backendai", "nvidia", "groq", "local"]
-#     fallback_used: bool
-#     finish_reason: Literal["stop"] = "stop"
-#     answer: str
-#     sources: list[Source]
-#     timing: ChatTiming
-#     metadata: ChatMetadata
-
+    
 
 class HistoryMessage(BaseModel):
     """Team-vision ChatMessage used by the current VS Code extension."""
@@ -511,6 +336,7 @@ class ChatRequest(BaseModel):
                     "message": "이 프로젝트의 실행 구조를 설명해줘",
                     "session_id": "9efda536-b502-49e4-926d-53343a428df0",
                     "reasoning_mode": "balanced",
+                    "debug": False,
                     "history": [],
                     "context": (
                         "파일: README.md\n\n"
@@ -552,7 +378,7 @@ class ChatRequest(BaseModel):
         deprecated=True,
         description=(
             "Deprecated compatibility field. /v1/chat ignores client top_k and "
-            "uses the Backend adaptive retrieval policy."
+            "uses the search policy configured by rag_lab."
         ),
     )
     history: list[HistoryMessage] = Field(default_factory=list, max_length=20)
@@ -567,13 +393,25 @@ class ChatRequest(BaseModel):
         pattern=r"^(?:|[A-Za-z0-9._:-]{1,128})$",
     )
     model_id: str | None = Field(default=None, max_length=512)
-    stream: Literal[False] | None = None
+    stream: bool | None = Field(
+        default=False,
+        description=(
+            "false returns the frozen JSON response. true returns Server-Sent "
+            "Events: meta, delta, done, or error."
+        ),
+    )
+    debug: bool = Field(
+        default=False,
+        description=(
+            "When true, include diagnostic metadata in the chat response. "
+            "Normal frontend requests receive an empty metadata object."
+        ),
+    )
     reasoning_mode: Literal["auto", "fast", "balanced", "deep"] | None = Field(
         default=None,
         description=(
-            "Optional Agentic RAG budget. Omit to use the Backend default. "
-            "auto=Backend complexity routing, fast=one retrieval, "
-            "balanced=context-aware bounded retry, deep=multi-query evidence exploration."
+            "Deprecated compatibility field. rag_lab owns retrieval and prompt "
+            "assembly, so the Backend accepts but ignores this value."
         ),
     )
 
@@ -837,12 +675,7 @@ class ChatResponse(BaseModel):
                             "score": 0.91,
                         }
                     ],
-                    "metadata": {
-                        "request_id": "req_0123456789abcdef",
-                        "project_id": "h5vision/fest-api",
-                        "session_id": "9efda536-b502-49e4-926d-53343a428df0",
-                        "used_model_id": "backendai-default",
-                    },
+                    "metadata": {},
                 }
             ]
         },
@@ -1001,6 +834,8 @@ class AIProviderRecord(BaseModel):
     latency_ms: int = Field(default=0, ge=0)
     model_count: int = Field(default=0, ge=0)
     models: list[str] = Field(default_factory=list)
+    embedding_model_count: int = Field(default=0, ge=0)
+    embedding_models: list[str] = Field(default_factory=list)
     last_checked_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -1011,6 +846,32 @@ class AIProviderListResponse(BaseModel):
     total: int = Field(..., ge=0)
 
 
+class EmbeddingModelProbeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(..., min_length=1, max_length=255)
+    model_name: str = Field(..., min_length=1, max_length=512)
+
+    @field_validator("provider_id", "model_name")
+    @classmethod
+    def normalize_embedding_probe_fields(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("embedding probe field must not be blank")
+        return normalized
+
+
+class EmbeddingModelProbeResponse(BaseModel):
+    provider_id: str
+    provider_name: str
+    protocol: Literal["ollama", "openai"]
+    base_url: str
+    deployment_type: Literal["cloud", "local", "remote_server"]
+    model_name: str
+    dimension: int = Field(..., ge=1, le=65_536)
+    latency_ms: int = Field(..., ge=0)
+
+
 class OllamaScanTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1018,6 +879,7 @@ class OllamaScanTarget(BaseModel):
     base_url: str
     status: Literal["online", "degraded", "offline"]
     models: list[str] = Field(default_factory=list)
+    embedding_models: list[str] = Field(default_factory=list)
     skipped_non_chat_models: list[str] = Field(default_factory=list)
     latency_ms: int = Field(default=0, ge=0)
     error: str | None = None
@@ -1031,6 +893,188 @@ class OllamaScanResponse(BaseModel):
     discovered_servers: int = Field(..., ge=0)
     registered_providers: int = Field(..., ge=0)
     chat_models: int = Field(..., ge=0)
+    embedding_models: int = Field(..., ge=0)
+
+
+class CloudProviderScanTarget(BaseModel):
+    name: str
+    base_url: str
+    configured: bool
+    status: Literal["online", "degraded", "offline", "not_configured"]
+    chat_models: list[str] = Field(default_factory=list)
+    embedding_models: list[str] = Field(default_factory=list)
+    skipped_models: list[str] = Field(default_factory=list)
+    latency_ms: int = Field(default=0, ge=0)
+    error: str | None = None
+    registered: bool = False
+    provider_id: str | None = None
+
+
+class CloudProviderScanResponse(BaseModel):
+    checked_at: datetime
+    targets: list[CloudProviderScanTarget]
+    configured_providers: int = Field(..., ge=0)
+    registered_providers: int = Field(..., ge=0)
+    chat_models: int = Field(..., ge=0)
+    embedding_models: int = Field(..., ge=0)
+
+
+class CloudProviderCredentialRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_type: Literal["nvidia", "groq", "openai", "custom"]
+    name: str | None = Field(default=None, max_length=100)
+    api_key: str = Field(..., min_length=1, max_length=4096)
+    base_url: str | None = Field(default=None, min_length=8, max_length=2048)
+    auth_type: Literal["bearer", "x-api-key"] = "bearer"
+    enabled: bool = True
+
+    @field_validator("name", "api_key")
+    @classmethod
+    def normalize_cloud_credential_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("cloud credential field must not be blank")
+        return normalized
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_cloud_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+        ):
+            raise ValueError("base_url must be an absolute HTTP(S) URL")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_custom_cloud_provider(self) -> "CloudProviderCredentialRequest":
+        if self.provider_type == "custom" and not self.base_url:
+            raise ValueError("base_url is required for a custom provider")
+        if self.provider_type != "custom" and self.auth_type != "bearer":
+            raise ValueError("known Cloud providers use Bearer authentication")
+        return self
+
+
+VectorDatabaseEngine = Literal[
+    "auto",
+    "sqlite",
+    "qdrant",
+    "weaviate",
+    "chroma",
+    "milvus",
+    "pgvector",
+    "rag_lab",
+    "custom",
+]
+
+
+class VectorDatabaseProviderWriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=100)
+    engine: VectorDatabaseEngine = "auto"
+    connection_mode: Literal["remote", "local"] = "remote"
+    host: str | None = Field(default=None, min_length=1, max_length=253)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    use_tls: bool = False
+    storage_namespace: str = Field(..., min_length=1, max_length=255)
+    local_path: str | None = Field(default=None, min_length=1, max_length=2048)
+    embedding_model_path: str = Field(..., min_length=1, max_length=2048)
+    embedding_models: list[str] = Field(default_factory=list, max_length=100)
+    enabled: bool = True
+
+    @field_validator("name", "storage_namespace", "embedding_model_path")
+    @classmethod
+    def normalize_vector_database_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("VectorDB provider field must not be blank")
+        return normalized
+
+    @field_validator("host")
+    @classmethod
+    def validate_vector_database_host(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if (
+            not normalized
+            or "/" in normalized
+            or "\\" in normalized
+            or any(character.isspace() for character in normalized)
+        ):
+            raise ValueError("host must be an IP address or DNS/service name")
+        return normalized
+
+    @field_validator("local_path")
+    @classmethod
+    def normalize_vector_database_local_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().replace("\\", "/")
+        if not normalized:
+            return None
+        return normalized
+
+    @field_validator("embedding_models")
+    @classmethod
+    def normalize_vector_database_models(cls, value: list[str]) -> list[str]:
+        normalized = sorted({item.strip() for item in value if item.strip()})
+        if not normalized:
+            raise ValueError("at least one embedding model must be selected")
+        if any(len(item) > 512 for item in normalized):
+            raise ValueError("embedding model name is too long")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_vector_database_connection(self) -> "VectorDatabaseProviderWriteRequest":
+        if self.connection_mode == "remote" and (not self.host or not self.port):
+            raise ValueError("host and port are required for a remote VectorDB")
+        if self.connection_mode == "local" and not self.local_path:
+            raise ValueError("local_path is required for local VectorDB storage")
+        return self
+
+
+class VectorDatabaseProviderRecord(BaseModel):
+    provider_id: str
+    name: str
+    engine: VectorDatabaseEngine
+    detected_engine: str | None = None
+    connection_mode: Literal["remote", "local"]
+    host: str | None = None
+    port: int | None = None
+    base_url: str
+    use_tls: bool
+    storage_namespace: str
+    local_path: str | None = None
+    embedding_model_path: str
+    embedding_models: list[str]
+    enabled: bool
+    status: Literal["unknown", "online", "degraded", "offline", "disabled"]
+    collections: list[str]
+    adapter_available: bool
+    error: str | None = None
+    latency_ms: int = Field(default=0, ge=0)
+    last_checked_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class VectorDatabaseProviderListResponse(BaseModel):
+    providers: list[VectorDatabaseProviderRecord]
+    total: int = Field(..., ge=0)
+    online: int = Field(..., ge=0)
+    adapter_ready: int = Field(..., ge=0)
 
 
 class GitVersionInfo(BaseModel):
@@ -1477,7 +1521,8 @@ class RuntimeVectorSettingsWrite(BaseModel):
     port: int = Field(..., ge=1, le=65535)
     collection: str = Field(..., min_length=1, max_length=255)
     embedding_deployment: Literal["api", "local"]
-    embedding_provider: Literal["ollama", "nvidia"]
+    embedding_provider: Literal["ollama", "nvidia", "openai"]
+    embedding_provider_id: str | None = Field(default=None, max_length=255)
     embedding_base_url: str = Field(..., min_length=1, max_length=2048)
     embedding_model: str = Field(..., min_length=1, max_length=255)
     embedding_model_id: str = Field(..., min_length=1, max_length=255)
@@ -1522,6 +1567,13 @@ class RuntimeVectorSettingsWrite(BaseModel):
             raise ValueError("vector setting must not be blank")
         return normalized
 
+    @field_validator("embedding_provider_id")
+    @classmethod
+    def normalize_embedding_provider_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
 
 class RuntimeVectorSettingsResponse(RuntimeVectorSettingsWrite):
     provider: str
@@ -1530,6 +1582,7 @@ class RuntimeVectorSettingsResponse(RuntimeVectorSettingsWrite):
     active_collection: str
     active_embedding_deployment: Literal["api", "local"]
     active_embedding_provider: str
+    active_embedding_provider_id: str | None = None
     active_embedding_base_url: str
     active_embedding_model: str
     active_embedding_model_id: str

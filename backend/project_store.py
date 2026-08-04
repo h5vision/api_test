@@ -432,7 +432,12 @@ class PostgresProjectStore:
         except (psycopg.Error, OSError) as exc:
             raise ProjectStoreError("PostgreSQL document version write failed") from exc
 
-    def enrich_sources(self, sources: list[Source]) -> list[Source]:
+    def enrich_sources(
+        self,
+        sources: list[Source],
+        *,
+        project_id: str | None = None,
+    ) -> list[Source]:
         if not self.configured or not sources:
             return sources
         self._ensure_schema()
@@ -441,19 +446,24 @@ class PostgresProjectStore:
             with self._connect() as connection:
                 rows = connection.execute(
                     """
-                    SELECT c.chunk_id, c.content, c.line_start, c.line_end,
+                    SELECT c.chunk_id, c.document_id, c.content, c.line_start, c.line_end,
                            c.metadata, v.document_version_id, v.path, v.language
                     FROM document_chunks c
                     JOIN document_versions v
                       ON v.document_version_id = c.document_version_id
-                    WHERE c.chunk_id = ANY(%s) AND v.is_current
+                    WHERE c.chunk_id = ANY(%s)
+                      AND (%s::text IS NULL OR c.project_id = %s)
+                      AND v.is_current
                     """,
-                    (chunk_ids,),
+                    (chunk_ids, project_id, project_id),
                 ).fetchall()
-            by_id = {row["chunk_id"]: row for row in rows}
+            by_id = {
+                (str(row["chunk_id"]), str(row["document_id"])): row
+                for row in rows
+            }
             enriched: list[Source] = []
             for source in sources:
-                row = by_id.get(source.chunk_id)
+                row = by_id.get((source.chunk_id, source.document_id))
                 if row is None:
                     enriched.append(source)
                     continue

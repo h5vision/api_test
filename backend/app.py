@@ -4,9 +4,11 @@ import hashlib
 import json
 import logging
 import re
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_network
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -15,10 +17,9 @@ from uuid import uuid4
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from .agentic_rag import AgenticRAGOrchestrator, ConversationAwareQueryPlanner
 from .ai_providers import (
     AIProvider,
     AIProviderRegistry,
@@ -50,7 +51,7 @@ from .local_projects import (
 )
 from .project_store import PostgresProjectStore, ProjectStoreError
 from .project_resolution import resolve_project_id
-from .retrieval import AdaptiveReranker
+from .rag_lab import RagLabClient, RagLabError
 from .repository_indexer import RepositoryIndexer
 from .repository_store import PostgresRepositoryStore, RepositoryStoreError
 from .schemas import (
@@ -69,6 +70,11 @@ from .schemas import (
     AIProviderListResponse,
     AIProviderRecord,
     AIProviderWriteRequest,
+    CloudProviderCredentialRequest,
+    CloudProviderScanResponse,
+    CloudProviderScanTarget,
+    EmbeddingModelProbeRequest,
+    EmbeddingModelProbeResponse,
     ChatAuditLog,
     ChatAuditLogListResponse,
     CommunicationEvent,
@@ -134,6 +140,9 @@ from .schemas import (
     RepositorySourceRecord,
     RepositorySourceWriteRequest,
     VectorIndexValidationResponse,
+    VectorDatabaseProviderListResponse,
+    VectorDatabaseProviderRecord,
+    VectorDatabaseProviderWriteRequest,
 )
 from .services import ChatService, EmbeddingService, ServiceError
 from .runtime_config import (
@@ -146,9 +155,15 @@ from .runtime_services import (
     RuntimeServiceSettings,
     RuntimeServiceSettingsError,
 )
-from .text import chunk_text_with_metadata
+from .text import chunk_text_with_metadata, classify_index_path
 from .uploads import UploadError, UploadManager
 from .vector_store import QdrantVectorStore, SQLiteVectorStore, VectorStoreError
+from .vector_db_registry import (
+    PostgresVectorDatabaseRegistry,
+    VectorDatabaseDetector,
+    VectorDatabaseProvider,
+    VectorDatabaseRegistryError,
+)
 
 
 app = FastAPI(
@@ -654,28 +669,19 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 runtime_service_store = PostgresRuntimeServiceSettingsStore(settings)
 settings = runtime_service_store.effective_settings(settings)
-embedding_service = EmbeddingService(settings)
+ai_provider_store = PostgresAIProviderStore(settings)
+vector_database_store = PostgresVectorDatabaseRegistry(settings)
+vector_database_detector = VectorDatabaseDetector()
+embedding_service = EmbeddingService(
+    settings,
+    provider_resolver=lambda provider_id: ai_provider_store.get(
+        provider_id,
+        with_secret=True,
+    ),
+)
 chat_service = ChatService(settings)
-rag_reranker = AdaptiveReranker(
-    min_sources=settings.rag_min_sources,
-    max_sources=settings.rag_max_sources,
-    max_context_chars=settings.rag_context_max_chars,
-    min_score=settings.rag_min_score,
-    score_window=settings.rag_score_window,
-)
-agentic_query_planner = ConversationAwareQueryPlanner(
-    balanced_steps=settings.agentic_rag_balanced_steps,
-    deep_steps=settings.agentic_rag_deep_steps,
-)
-agentic_rag = AgenticRAGOrchestrator(
-    rag_reranker,
-    min_evidence=settings.rag_min_sources,
-    min_coverage=settings.agentic_rag_min_coverage,
-    min_novelty_ratio=settings.agentic_rag_min_novelty_ratio,
-)
 runtime_network_store = PostgresRuntimeNetworkSettingsStore(settings)
 model_access_store = PostgresModelAccessPolicyStore(settings)
-ai_provider_store = PostgresAIProviderStore(settings)
 ai_provider_registry = AIProviderRegistry(
     ai_provider_store,
     settings,
@@ -687,6 +693,34 @@ generation_router = GenerationRouter(
     groq_settings_provider=runtime_service_store.groq_settings,
     model_enabled_provider=model_access_store.is_enabled,
     custom_provider_registry=ai_provider_registry,
+)
+def _registered_rag_lab_provider() -> VectorDatabaseProvider | None:
+    try:
+        providers = vector_database_store.list()
+    except VectorDatabaseRegistryError:
+        return None
+    for provider in providers:
+        if (
+            provider.enabled
+            and provider.connection_mode == "remote"
+            and (provider.detected_engine == "rag_lab" or provider.engine == "rag_lab")
+        ):
+            return provider
+    return None
+
+
+def _active_rag_lab_base_url() -> str:
+    provider = _registered_rag_lab_provider()
+    if provider is not None:
+        return provider.base_url
+    return settings.rag_lab_base_url
+
+
+rag_lab_client = RagLabClient(
+    settings.rag_lab_base_url,
+    settings.rag_lab_token,
+    settings.rag_lab_timeout_seconds,
+    base_url_provider=_active_rag_lab_base_url,
 )
 if settings.vector_db_provider == "sqlite":
     vector_store = SQLiteVectorStore(settings.vector_db_path)
@@ -799,6 +833,8 @@ def _runtime_service_settings_response(
             value.vector.embedding_deployment
             != settings.embedding_deployment,
             value.vector.embedding_provider != settings.embedding_provider,
+            (value.vector.embedding_provider_id or "")
+            != settings.embedding_provider_id,
             value.vector.embedding_base_url != settings.embedding_base_url,
             value.vector.embedding_model != settings.embedding_model,
             value.vector.embedding_model_id != settings.embedding_model_id,
@@ -833,6 +869,7 @@ def _runtime_service_settings_response(
             collection=value.vector.collection,
             embedding_deployment=value.vector.embedding_deployment,
             embedding_provider=value.vector.embedding_provider,
+            embedding_provider_id=value.vector.embedding_provider_id,
             embedding_base_url=value.vector.embedding_base_url,
             embedding_model=value.vector.embedding_model,
             embedding_model_id=value.vector.embedding_model_id,
@@ -844,6 +881,9 @@ def _runtime_service_settings_response(
             active_collection=settings.qdrant_collection,
             active_embedding_deployment=settings.embedding_deployment,
             active_embedding_provider=settings.embedding_provider,
+            active_embedding_provider_id=(
+                settings.embedding_provider_id or None
+            ),
             active_embedding_base_url=settings.embedding_base_url,
             active_embedding_model=settings.embedding_model,
             active_embedding_model_id=settings.embedding_model_id,
@@ -912,6 +952,33 @@ def _service_error(exc: Exception) -> HTTPException:
     return HTTPException(
         status_code=getattr(exc, "status_code", 503), detail=str(exc)
     )
+
+
+def _sse_event(event: str, payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {encoded}\n\n"
+
+
+_ANSWER_CITATION_PATTERN = re.compile(r"\[(?:[1-9]|[1-9][0-9]+)\]")
+
+
+def _ensure_answer_citations(answer: str, sources: list[Any]) -> tuple[str, bool]:
+    if not sources or _ANSWER_CITATION_PATTERN.search(answer):
+        return answer, bool(_ANSWER_CITATION_PATTERN.search(answer))
+    labels = ", ".join(
+        f"[{index}] {source.path or source.document_id}"
+        for index, source in enumerate(sources, start=1)
+    )
+    return f"{answer.rstrip()}\n\n근거 문서: {labels}", False
+
+
+def _client_chat_metadata(
+    payload: ChatRequest,
+    internal_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep operational details out of ordinary extension chat responses."""
+
+    return dict(internal_metadata) if payload.debug else {}
 
 
 def _metadata_store_error() -> HTTPException:
@@ -1329,13 +1396,24 @@ def root() -> dict[str, str]:
 
 @app.get("/v1/health", tags=["System"])
 def health() -> dict[str, Any]:
+    rag_provider = _registered_rag_lab_provider()
+    local_vector_stats = vector_store.stats()
+    rag_status = rag_provider.status if rag_provider is not None else "unknown"
     return {
         "status": "ok",
         "service": "vs-code-ai-assistant-backend",
         "version": "3.0.0",
         "instance_id": settings.instance_id,
         "configuration": settings.public_status(),
-        "vector_store": vector_store.stats(),
+        "vector_store": {
+            "provider": "rag_lab",
+            "status": "ok" if rag_status == "online" else "unavailable",
+            "registered_status": rag_status,
+            "base_url": rag_provider.base_url if rag_provider else settings.rag_lab_base_url,
+            "projects": len(rag_provider.collections) if rag_provider else 0,
+            "chunks": 0,
+        },
+        "local_vector_store": local_vector_stats,
         "metadata_store": metadata_store.status(),
         "project_store": project_store.status(),
         "message": "백엔드 API 서버에서 응답중 입니다."
@@ -1400,41 +1478,41 @@ def list_indexed_projects(
 ) -> IndexedProjectListResponse | JSONResponse:
     response.headers["Cache-Control"] = "no-store"
     try:
-        rows = project_store.list_projects()
-    except ProjectStoreError:
+        rows = rag_lab_client.projects()
+    except RagLabError as exc:
         return _error_response(
             request,
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "프로젝트 목록을 불러올 수 없습니다.",
+            exc.status_code,
+            str(exc),
             code="PROJECT_REGISTRY_UNAVAILABLE",
             headers={"Cache-Control": "no-store"},
         )
 
     projects: list[IndexedProjectItem] = []
     for row in rows:
-        commit_sha = (row.get("git_commit_sha") or "").strip() or None
-        public_status = _public_index_status(row.get("index_status"))
-        project_id = row["project_id"]
-        project_name = row.get("display_name") or project_id
-        if project_name == project_id and "/" in project_id:
-            project_name = project_id.rsplit("/", 1)[-1]
-        indexed_at = row.get("index_completed_at")
-        if indexed_at is None and public_status == "ready":
-            # Existing rows created before index_completed_at was introduced
-            # retain their last known successful update time.
-            indexed_at = row.get("updated_at")
+        project_id = str(row.get("project_id") or "").strip()
+        if not project_id:
+            continue
+        commit_sha = str(row.get("commit") or "").strip() or None
+        public_status = {
+            "none": "not_indexed",
+            "running": "indexing",
+            "done": "ready",
+            "failed": "failed",
+            "aborted": "failed",
+        }.get(str(row.get("state") or "none").lower(), "stale")
         projects.append(
             IndexedProjectItem(
                 project_id=project_id,
-                project_name=project_name,
+                project_name=project_id.rsplit("/", 1)[-1],
                 git_commit_sha=commit_sha,
                 git_short_sha=commit_sha[:7] if commit_sha else None,
-                git_branch=row.get("git_branch"),
-                git_dirty=row.get("git_dirty"),
-                git_committed_at=row.get("git_committed_at"),
-                active_snapshot_id=row.get("current_snapshot_id"),
+                git_branch=None,
+                git_dirty=(bool(row["dirty"]) if row.get("dirty") is not None else None),
+                git_committed_at=None,
+                active_snapshot_id=commit_sha,
                 index_status=public_status,
-                indexed_at=indexed_at,
+                indexed_at=row.get("indexed_at"),
             )
         )
 
@@ -1710,12 +1788,12 @@ def ai_communication_probe(
     try:
         generation = generation_router.generate(
             requested_model_id,
-            "Reply with exactly VISION_AI_OK.",
-            [],
-            [],
-            "",
-            "system-diagnostic",
-            "system-diagnostic",
+            [
+                {
+                    "role": "user",
+                    "content": "Reply with exactly VISION_AI_OK.",
+                }
+            ],
             request_id=request_id,
         )
     except ServiceError as exc:
@@ -1913,6 +1991,247 @@ def update_network_settings(
     return _network_settings_response(value)
 
 
+def _vector_database_record(
+    provider: VectorDatabaseProvider,
+) -> VectorDatabaseProviderRecord:
+    return VectorDatabaseProviderRecord(
+        provider_id=provider.provider_id,
+        name=provider.name,
+        engine=provider.engine,
+        detected_engine=provider.detected_engine,
+        connection_mode=provider.connection_mode,
+        host=provider.host if provider.connection_mode == "remote" else None,
+        port=provider.port if provider.connection_mode == "remote" else None,
+        base_url=provider.base_url,
+        use_tls=provider.use_tls,
+        storage_namespace=provider.storage_namespace,
+        local_path=provider.local_path,
+        embedding_model_path=provider.embedding_model_path,
+        embedding_models=provider.embedding_models,
+        enabled=provider.enabled,
+        status=provider.status,
+        collections=provider.collections,
+        adapter_available=provider.adapter_available,
+        error=provider.error,
+        latency_ms=provider.latency_ms,
+        last_checked_at=provider.last_checked_at,
+        created_at=provider.created_at,
+        updated_at=provider.updated_at,
+    )
+
+
+def _vector_database_probe(provider: VectorDatabaseProvider) -> VectorDatabaseProvider:
+    configured_url = settings.qdrant_url.rstrip("/")
+    if provider.base_url.rstrip("/") == configured_url:
+        api_key = settings.qdrant_api_key
+    elif provider.engine == "rag_lab" or provider.detected_engine == "rag_lab":
+        api_key = settings.rag_lab_token
+    else:
+        api_key = ""
+    result = vector_database_detector.probe(provider, api_key=api_key)
+    return vector_database_store.update_probe(provider.provider_id, result)
+
+
+def _prepare_vector_database_target(
+    payload: VectorDatabaseProviderWriteRequest,
+) -> tuple[str, int, str | None]:
+    if payload.connection_mode == "remote":
+        return str(payload.host), int(payload.port), None
+    root = settings.vector_db_local_root.resolve()
+    requested = Path(str(payload.local_path))
+    candidate = requested.resolve() if requested.is_absolute() else (root / requested).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"local_path must stay under the mounted root: {root}",
+        ) from exc
+    try:
+        if payload.engine == "sqlite" or candidate.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            candidate.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"local_path is not writable: {candidate}",
+        ) from exc
+    return "local", 1, str(candidate)
+
+
+def _ensure_default_vector_database_provider() -> None:
+    if vector_database_store.list():
+        return
+    parsed = urlsplit(settings.qdrant_url)
+    provider = vector_database_store.create(
+        name="Vision Active VectorDB",
+        engine=("qdrant" if settings.vector_db_provider == "qdrant" else "custom"),
+        connection_mode="remote",
+        host=parsed.hostname or "qdrant",
+        port=parsed.port or (443 if parsed.scheme == "https" else 6333),
+        use_tls=parsed.scheme == "https",
+        storage_namespace=settings.qdrant_collection,
+        local_path=None,
+        embedding_model_path=settings.embedding_base_url,
+        embedding_models=[settings.embedding_model],
+        enabled=True,
+    )
+    _vector_database_probe(provider)
+
+
+def _vector_database_store_error(
+    exc: VectorDatabaseRegistryError,
+) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=str(exc),
+    )
+
+
+@app.get(
+    "/v1/admin/vector-databases",
+    response_model=VectorDatabaseProviderListResponse,
+    tags=["System"],
+    summary="List registered VectorDB targets and adapter readiness",
+)
+def list_vector_databases(
+    request: Request,
+    refresh: bool = Query(default=False),
+) -> VectorDatabaseProviderListResponse:
+    _require_admin_proxy(request)
+    try:
+        _ensure_default_vector_database_provider()
+        providers = vector_database_store.list()
+        if refresh:
+            with ThreadPoolExecutor(max_workers=min(8, len(providers))) as executor:
+                list(executor.map(_vector_database_probe, providers))
+            providers = vector_database_store.list()
+    except VectorDatabaseRegistryError as exc:
+        raise _vector_database_store_error(exc) from exc
+    records = [_vector_database_record(provider) for provider in providers]
+    return VectorDatabaseProviderListResponse(
+        providers=records,
+        total=len(records),
+        online=sum(record.status == "online" for record in records),
+        adapter_ready=sum(record.adapter_available for record in records),
+    )
+
+
+@app.post(
+    "/v1/admin/vector-databases",
+    response_model=VectorDatabaseProviderRecord,
+    status_code=status.HTTP_201_CREATED,
+    tags=["System"],
+    summary="Register and detect a VectorDB target",
+)
+def create_vector_database(
+    payload: VectorDatabaseProviderWriteRequest,
+    request: Request,
+) -> VectorDatabaseProviderRecord:
+    _require_admin_proxy(request)
+    try:
+        host, port, local_path = _prepare_vector_database_target(payload)
+        provider = vector_database_store.create(
+            name=payload.name,
+            engine=payload.engine,
+            connection_mode=payload.connection_mode,
+            host=host,
+            port=port,
+            use_tls=payload.use_tls,
+            storage_namespace=payload.storage_namespace,
+            local_path=local_path,
+            embedding_model_path=payload.embedding_model_path,
+            embedding_models=payload.embedding_models,
+            enabled=payload.enabled,
+        )
+        provider = _vector_database_probe(provider)
+        return _vector_database_record(provider)
+    except VectorDatabaseRegistryError as exc:
+        raise _vector_database_store_error(exc) from exc
+
+
+@app.put(
+    "/v1/admin/vector-databases/{provider_id}",
+    response_model=VectorDatabaseProviderRecord,
+    tags=["System"],
+    summary="Update and redetect a VectorDB target",
+)
+def update_vector_database(
+    provider_id: str,
+    payload: VectorDatabaseProviderWriteRequest,
+    request: Request,
+) -> VectorDatabaseProviderRecord:
+    _require_admin_proxy(request)
+    try:
+        host, port, local_path = _prepare_vector_database_target(payload)
+        provider = vector_database_store.update(
+            provider_id,
+            name=payload.name,
+            engine=payload.engine,
+            connection_mode=payload.connection_mode,
+            host=host,
+            port=port,
+            use_tls=payload.use_tls,
+            storage_namespace=payload.storage_namespace,
+            local_path=local_path,
+            embedding_model_path=payload.embedding_model_path,
+            embedding_models=payload.embedding_models,
+            enabled=payload.enabled,
+        )
+        if provider is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="VectorDB provider was not found",
+            )
+        provider = _vector_database_probe(provider)
+        return _vector_database_record(provider)
+    except VectorDatabaseRegistryError as exc:
+        raise _vector_database_store_error(exc) from exc
+
+
+@app.post(
+    "/v1/admin/vector-databases/{provider_id}/discover",
+    response_model=VectorDatabaseProviderRecord,
+    tags=["System"],
+    summary="Repeat VectorDB engine and collection discovery",
+)
+def discover_vector_database(
+    provider_id: str,
+    request: Request,
+) -> VectorDatabaseProviderRecord:
+    _require_admin_proxy(request)
+    try:
+        provider = vector_database_store.get(provider_id)
+        if provider is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="VectorDB provider was not found",
+            )
+        return _vector_database_record(_vector_database_probe(provider))
+    except VectorDatabaseRegistryError as exc:
+        raise _vector_database_store_error(exc) from exc
+
+
+@app.delete(
+    "/v1/admin/vector-databases/{provider_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["System"],
+    summary="Remove a VectorDB registration without deleting its data",
+)
+def delete_vector_database(provider_id: str, request: Request) -> None:
+    _require_admin_proxy(request)
+    try:
+        deleted = vector_database_store.delete(provider_id)
+    except VectorDatabaseRegistryError as exc:
+        raise _vector_database_store_error(exc) from exc
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="VectorDB provider was not found",
+        )
+
+
 @app.get(
     "/v1/admin/service-settings",
     response_model=RuntimeServiceSettingsResponse,
@@ -1954,6 +2273,11 @@ def _ai_provider_record(provider: AIProvider) -> AIProviderRecord:
         for item in ai_provider_store.discovered_models()
         if item.provider_id == provider.provider_id
     ]
+    embedding_models = [
+        item.model_name
+        for item in ai_provider_store.discovered_embedding_models()
+        if item.provider_id == provider.provider_id
+    ]
     return AIProviderRecord(
         provider_id=provider.provider_id,
         name=provider.name,
@@ -1969,6 +2293,8 @@ def _ai_provider_record(provider: AIProvider) -> AIProviderRecord:
         latency_ms=provider.latency_ms,
         model_count=provider.model_count,
         models=models,
+        embedding_model_count=len(embedding_models),
+        embedding_models=embedding_models,
         last_checked_at=provider.last_checked_at,
         created_at=provider.created_at,
         updated_at=provider.updated_at,
@@ -2108,7 +2434,7 @@ def scan_known_ollama_servers(request: Request) -> OllamaScanResponse:
         result = results[base_url]
         provider_id: str | None = None
         registered = False
-        if result.models:
+        if result.models or result.embedding_models:
             existing = existing_providers.get(base_url)
             try:
                 if existing is not None:
@@ -2118,7 +2444,7 @@ def scan_known_ollama_servers(request: Request) -> OllamaScanResponse:
                     )
                     provider_id = existing.provider_id
                     registered = True
-                elif base_url == legacy_backendai_url:
+                elif base_url == legacy_backendai_url and not result.embedding_models:
                     provider_id = settings.backendai_public_model_id
                     registered = True
                 else:
@@ -2159,6 +2485,7 @@ def scan_known_ollama_servers(request: Request) -> OllamaScanResponse:
                 base_url=base_url,
                 status=result.status,
                 models=result.models,
+                embedding_models=result.embedding_models,
                 skipped_non_chat_models=result.skipped_models,
                 latency_ms=result.latency_ms,
                 error=result.error,
@@ -2174,7 +2501,240 @@ def scan_known_ollama_servers(request: Request) -> OllamaScanResponse:
         ),
         registered_providers=registered_count,
         chat_models=sum(len(target.models) for target in targets),
+        embedding_models=sum(
+            len(target.embedding_models) for target in targets
+        ),
     )
+
+
+@app.post(
+    "/v1/admin/ai-providers/scan-cloud",
+    response_model=CloudProviderScanResponse,
+    tags=["System"],
+    summary="Discover embedding models from configured Cloud API credentials",
+)
+def scan_configured_cloud_providers(
+    request: Request,
+) -> CloudProviderScanResponse:
+    _require_admin_proxy(request)
+    groq_runtime = runtime_service_store.groq_settings()
+    candidates = (
+        (
+            "NVIDIA API Catalog",
+            settings.ai_base_url.rstrip("/"),
+            settings.ai_api_key,
+        ),
+        (
+            "Groq Cloud",
+            groq_runtime.base_url.rstrip("/"),
+            settings.groq_api_key,
+        ),
+    )
+    try:
+        existing_by_url = {
+            provider.base_url.rstrip("/"): provider
+            for provider in ai_provider_store.list()
+        }
+    except AIProviderStoreError as exc:
+        raise _provider_store_unavailable(exc) from exc
+
+    targets: list[CloudProviderScanTarget] = []
+    registered_count = 0
+    for name, base_url, api_key in candidates:
+        if not api_key:
+            targets.append(
+                CloudProviderScanTarget(
+                    name=name,
+                    base_url=base_url,
+                    configured=False,
+                    status="not_configured",
+                    error="api_key_not_configured",
+                )
+            )
+            continue
+        result = ai_provider_registry.probe_openai_catalog(
+            base_url,
+            auth_type="bearer",
+            api_key=api_key,
+            timeout_seconds=10,
+        )
+        existing = existing_by_url.get(base_url)
+        provider_id: str | None = existing.provider_id if existing else None
+        registered = existing is not None
+        try:
+            if existing is not None:
+                # The configured Cloud credential is authoritative for its
+                # canonical Base URL. Refresh the encrypted copy without ever
+                # returning the secret to the browser.
+                refreshed = ai_provider_store.update(
+                    existing.provider_id,
+                    name=existing.name,
+                    protocol="openai",
+                    base_url=base_url,
+                    auth_type="bearer",
+                    api_key=api_key,
+                    clear_api_key=False,
+                    enabled=existing.enabled,
+                    deployment_type="cloud",
+                )
+                if refreshed is not None:
+                    ai_provider_store.update_discovery(
+                        refreshed.provider_id,
+                        result,
+                    )
+                    provider_id = refreshed.provider_id
+                    registered = True
+            elif result.embedding_models:
+                created = ai_provider_store.create(
+                    name=f"Cloud · {name}",
+                    protocol="openai",
+                    base_url=base_url,
+                    auth_type="bearer",
+                    api_key=api_key,
+                    enabled=True,
+                    deployment_type="cloud",
+                )
+                ai_provider_store.update_discovery(created.provider_id, result)
+                existing_by_url[base_url] = created
+                provider_id = created.provider_id
+                registered = True
+        except AIProviderStoreError as exc:
+            raise _provider_store_unavailable(exc) from exc
+        if registered:
+            registered_count += 1
+        targets.append(
+            CloudProviderScanTarget(
+                name=name,
+                base_url=base_url,
+                configured=True,
+                status=result.status,
+                chat_models=result.models,
+                embedding_models=result.embedding_models,
+                skipped_models=result.skipped_models,
+                latency_ms=result.latency_ms,
+                error=result.error,
+                registered=registered,
+                provider_id=provider_id,
+            )
+        )
+    return CloudProviderScanResponse(
+        checked_at=datetime.now(timezone.utc),
+        targets=targets,
+        configured_providers=sum(target.configured for target in targets),
+        registered_providers=registered_count,
+        chat_models=sum(len(target.chat_models) for target in targets),
+        embedding_models=sum(
+            len(target.embedding_models) for target in targets
+        ),
+    )
+
+
+@app.post(
+    "/v1/admin/ai-providers/cloud-credentials",
+    response_model=AIProviderRecord,
+    status_code=status.HTTP_201_CREATED,
+    tags=["System"],
+    summary="Register a Cloud API credential and discover chat/embedding models",
+)
+def register_cloud_provider_credential(
+    payload: CloudProviderCredentialRequest,
+    request: Request,
+) -> AIProviderRecord:
+    """Validate a Cloud credential before storing its encrypted value.
+
+    Known providers use their server-side canonical catalog URL, so the
+    administrator only supplies the provider type and API key. A custom
+    OpenAI-compatible service still requires an explicit Base URL because an
+    opaque API key cannot identify its issuer or endpoint.
+    """
+
+    _require_admin_proxy(request)
+    groq_runtime = runtime_service_store.groq_settings()
+    presets: dict[str, tuple[str, str]] = {
+        "nvidia": (
+            "Cloud · NVIDIA API Catalog",
+            settings.ai_base_url.rstrip("/"),
+        ),
+        "groq": (
+            "Cloud · Groq",
+            groq_runtime.base_url.rstrip("/"),
+        ),
+        "openai": (
+            "Cloud · OpenAI",
+            "https://api.openai.com/v1",
+        ),
+    }
+    if payload.provider_type == "custom":
+        default_name = "Cloud · Custom OpenAI Compatible"
+        base_url = str(payload.base_url).rstrip("/")
+        auth_type = payload.auth_type
+    else:
+        default_name, base_url = presets[payload.provider_type]
+        auth_type = "bearer"
+
+    result = ai_provider_registry.probe_openai_catalog(
+        base_url,
+        auth_type=auth_type,
+        api_key=payload.api_key,
+        timeout_seconds=10,
+    )
+    if result.status == "offline":
+        invalid_credential = result.error in {"http_401", "http_403"}
+        raise HTTPException(
+            status_code=(
+                status.HTTP_422_UNPROCESSABLE_ENTITY
+                if invalid_credential
+                else status.HTTP_502_BAD_GATEWAY
+            ),
+            detail=(
+                "The API key was rejected by the selected Cloud provider"
+                if invalid_credential
+                else f"Cloud provider model discovery failed: {result.error}"
+            ),
+        )
+    if not result.models and not result.embedding_models:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The Cloud provider returned no recognizable chat or embedding models",
+        )
+
+    try:
+        existing = next(
+            (
+                provider
+                for provider in ai_provider_store.list()
+                if provider.base_url.rstrip("/") == base_url
+            ),
+            None,
+        )
+        if existing is None:
+            provider = ai_provider_store.create(
+                name=payload.name or default_name,
+                protocol="openai",
+                base_url=base_url,
+                auth_type=auth_type,
+                api_key=payload.api_key,
+                enabled=payload.enabled,
+                deployment_type="cloud",
+            )
+        else:
+            provider = ai_provider_store.update(
+                existing.provider_id,
+                name=payload.name or existing.name or default_name,
+                protocol="openai",
+                base_url=base_url,
+                auth_type=auth_type,
+                api_key=payload.api_key,
+                clear_api_key=False,
+                enabled=payload.enabled,
+                deployment_type="cloud",
+            )
+            if provider is None:
+                raise AIProviderStoreError("AI provider was not found")
+        provider = ai_provider_store.update_discovery(provider.provider_id, result)
+        return _ai_provider_record(provider)
+    except AIProviderStoreError as exc:
+        raise _provider_store_unavailable(exc) from exc
 
 
 @app.put(
@@ -2206,6 +2766,24 @@ def update_ai_provider(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Select another default model before disabling this provider",
             )
+        if not payload.enabled:
+            try:
+                selected_embedding_provider_id = runtime_service_store.get(
+                    refresh=True
+                ).vector.embedding_provider_id
+            except RuntimeServiceSettingsError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Runtime service settings are unavailable",
+                ) from exc
+            if selected_embedding_provider_id == provider_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "Select another embedding provider before disabling "
+                        "this provider"
+                    ),
+                )
         if (
             payload.auth_type != "none"
             and not payload.api_key
@@ -2274,6 +2852,42 @@ def discover_ai_provider(
         raise _provider_store_unavailable(exc) from exc
 
 
+@app.post(
+    "/v1/admin/embedding-models/probe",
+    response_model=EmbeddingModelProbeResponse,
+    tags=["System"],
+    summary="Validate one discovered embedding model and return its dimension",
+)
+def probe_embedding_model(
+    payload: EmbeddingModelProbeRequest,
+    request: Request,
+) -> EmbeddingModelProbeResponse:
+    _require_admin_proxy(request)
+    try:
+        result = ai_provider_registry.probe_embedding(
+            payload.provider_id,
+            payload.model_name,
+        )
+    except AIProviderStoreError as exc:
+        detail = str(exc)
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if "not found" in detail.casefold()
+            else status.HTTP_502_BAD_GATEWAY
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    return EmbeddingModelProbeResponse(
+        provider_id=result.provider_id,
+        provider_name=result.provider_name,
+        protocol=result.protocol,
+        base_url=result.base_url,
+        deployment_type=result.deployment_type,
+        model_name=result.model_name,
+        dimension=result.dimension,
+        latency_ms=result.latency_ms,
+    )
+
+
 @app.delete(
     "/v1/admin/ai-providers/{provider_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -2286,6 +2900,20 @@ def delete_ai_provider(provider_id: str, request: Request) -> Response:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Select another default model before deleting this provider",
+        )
+    try:
+        selected_embedding_provider_id = runtime_service_store.get(
+            refresh=True
+        ).vector.embedding_provider_id
+    except RuntimeServiceSettingsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Runtime service settings are unavailable",
+        ) from exc
+    if selected_embedding_provider_id == provider_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Select another embedding provider before deleting this provider",
         )
     try:
         deleted = ai_provider_store.delete(provider_id)
@@ -2375,6 +3003,74 @@ def update_runtime_service_settings(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="groq-default cannot be selected while Groq is disabled",
         )
+    if payload.vector.embedding_provider_id:
+        try:
+            embedding_provider = ai_provider_store.get(
+                payload.vector.embedding_provider_id,
+                with_secret=False,
+            )
+            embedding_models = {
+                item.model_name
+                for item in ai_provider_store.discovered_embedding_models()
+                if item.provider_id == payload.vector.embedding_provider_id
+            }
+        except AIProviderStoreError as exc:
+            raise _provider_store_unavailable(exc) from exc
+        if embedding_provider is None or not embedding_provider.enabled:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="embedding_provider_id must reference an enabled provider",
+            )
+        if payload.vector.embedding_model not in embedding_models:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "embedding_model must be a discovered embedding model of "
+                    "embedding_provider_id"
+                ),
+            )
+        if payload.vector.embedding_provider != embedding_provider.protocol:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="embedding_provider must match the selected provider protocol",
+            )
+        if (
+            payload.vector.embedding_base_url.rstrip("/")
+            != embedding_provider.base_url.rstrip("/")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="embedding_base_url must match the selected provider",
+            )
+        expected_model_id = (
+            f"{payload.vector.embedding_provider_id}:"
+            f"{payload.vector.embedding_model}"
+        )
+        if payload.vector.embedding_model_id != expected_model_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "embedding_model_id must identify the selected provider and model"
+                ),
+            )
+        try:
+            probe = ai_provider_registry.probe_embedding(
+                payload.vector.embedding_provider_id,
+                payload.vector.embedding_model,
+            )
+        except AIProviderStoreError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=str(exc),
+            ) from exc
+        if payload.vector.embedding_dimension != probe.dimension:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "embedding_dimension does not match the provider response: "
+                    f"expected={probe.dimension}"
+                ),
+            )
     try:
         value = runtime_service_store.update(
             groq_enabled=payload.groq.enabled,
@@ -2386,6 +3082,7 @@ def update_runtime_service_settings(
             vector_collection=payload.vector.collection,
             embedding_deployment=payload.vector.embedding_deployment,
             embedding_provider=payload.vector.embedding_provider,
+            embedding_provider_id=payload.vector.embedding_provider_id,
             embedding_base_url=payload.vector.embedding_base_url,
             embedding_model=payload.vector.embedding_model,
             embedding_model_id=payload.vector.embedding_model_id,
@@ -2909,8 +3606,20 @@ def _ingest_documents(
 
 def _ingest_one_document(project_id: str, document: DocumentInput) -> tuple[int, str]:
     chunk_specs = chunk_text_with_metadata(
-        document.text, settings.chunk_size, settings.chunk_overlap
+        document.text,
+        settings.chunk_size,
+        settings.chunk_overlap,
+        path=document.path,
+        language=document.language,
     )
+    index_metadata = {
+        **document.metadata,
+        **classify_index_path(document.path, document.language),
+        "chunking_strategy": (
+            chunk_specs[0].get("chunking_strategy") if chunk_specs else "none"
+        ),
+    }
+    indexed_document = document.model_copy(update={"metadata": index_metadata})
     document_hash = hashlib.sha256(document.text.encode("utf-8")).hexdigest()[:16]
     embedded_chunks: list[dict[str, Any]] = []
     for batch_start in range(0, len(chunk_specs), settings.embedding_batch_size):
@@ -2934,7 +3643,7 @@ def _ingest_one_document(project_id: str, document: DocumentInput) -> tuple[int,
                 }
             )
     try:
-        project_store.save_document(project_id, document, embedded_chunks)
+        project_store.save_document(project_id, indexed_document, embedded_chunks)
     except ProjectStoreError as exc:
         raise _project_store_error() from exc
     stored = vector_store.replace_document(
@@ -2943,7 +3652,7 @@ def _ingest_one_document(project_id: str, document: DocumentInput) -> tuple[int,
         document.path,
         document.language,
         embedded_chunks,
-        document.metadata,
+        index_metadata,
     )
     provider = embedded_chunks[0]["embedding_provider"] if embedded_chunks else ""
     return stored, provider
@@ -3129,34 +3838,18 @@ def check_project_version(
 @app.post("/v1/search", response_model=SearchResponse, tags=["Documents"])
 def search_documents(payload: SearchRequest) -> SearchResponse:
     try:
-        embedding = embedding_service.embed(payload.query, input_type="query")
-        active_generation = (
-            repository_store.get_active_generation(payload.project_id)
-            if repository_store.configured
-            else None
-        )
-        results = vector_store.search(
+        result = rag_lab_client.search(
             payload.project_id,
-            embedding.vector,
-            embedding.provider,
-            embedding.model,
-            payload.top_k,
-            (
-                active_generation["generation_id"]
-                if active_generation is not None
-                else None
-            ),
+            payload.query,
+            top_k=payload.top_k,
         )
-        results = project_store.enrich_sources(results)
-    except (ServiceError, VectorStoreError) as exc:
-        raise _service_error(exc) from exc
-    except (ProjectStoreError, RepositoryStoreError) as exc:
-        raise _project_store_error() from exc
+    except RagLabError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return SearchResponse(
         project_id=payload.project_id,
         query=payload.query,
-        results=results,
-        embedding_provider=embedding.provider,
+        results=result.sources,
+        embedding_provider="rag_lab",
     )
 
 
@@ -3166,31 +3859,46 @@ def search_documents(payload: SearchRequest) -> SearchResponse:
     tags=["Chat"],
     summary="Run project-scoped RAG chat",
     description=(
-        "Resolves a Frontend project_id to the canonical indexed project, "
-        "retrieves a broad BGE-M3/Qdrant candidate set, adaptively reranks and "
-        "selects evidence within the Backend context budget, calls the selected "
-        "public model_id, and returns answer plus source[]. Client top_k is "
-        "accepted only for backward compatibility and is ignored. "
-        "reasoning_mode controls the bounded Agentic RAG budget: auto lets the "
-        "Backend choose by complexity/history/attachments, fast performs one "
-        "context-aware search, balanced may retry once, and deep explores up "
-        "to the configured multi-query limit. "
+        "Resolves project_id against rag_lab /projects, calls rag_lab /prompt, "
+        "and passes the returned messages unchanged to the selected model. "
+        "rag_lab owns retrieval, evidence gating, prompt assembly, and source order. "
+        "Client top_k and reasoning_mode remain accepted only for compatibility. "
         "The canonical question field is message; prompt is a v1 compatibility alias."
     ),
     responses=ERROR_RESPONSES,
 )
-def chat(payload: ChatRequest, request: Request) -> ChatResponse:
-    # project_id is the canonical Backend registry key. session_id identifies
-    # one client conversation and is independent from the retrieval scope.
+def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResponse:
     overall_started = perf_counter()
+    request_id = _request_id(request)
+    requested_model_id = payload.model_id or generation_router.default_model_id
+
     try:
-        project_resolution = resolve_project_id(
-            payload.project_id,
-            project_store.list_projects(),
-            configured_aliases=settings.project_id_aliases,
-        )
-    except ProjectStoreError as exc:
-        raise _project_store_error() from exc
+        external_projects = rag_lab_client.projects()
+    except RagLabError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    resolution_rows = [
+        {
+            "project_id": str(item.get("project_id") or ""),
+            "display_name": str(item.get("project_id") or ""),
+            "index_status": (
+                "ready" if str(item.get("state") or "") == "done"
+                else str(item.get("state") or "")
+            ),
+            "current_snapshot_id": (
+                item.get("commit") or item.get("indexed_at")
+                if str(item.get("state") or "") == "done"
+                else None
+            ),
+        }
+        for item in external_projects
+        if item.get("project_id")
+    ]
+    project_resolution = resolve_project_id(
+        payload.project_id,
+        resolution_rows,
+        configured_aliases=settings.project_id_aliases,
+    )
     if project_resolution.resolved_project_id is None:
         candidate_text = (
             ", ".join(project_resolution.candidates)
@@ -3200,43 +3908,25 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "project_id를 인덱싱된 프로젝트로 결정할 수 없습니다. "
-                f"requested={payload.project_id!r}, "
-                f"candidates={candidate_text}. "
-                "GET /v1/IngestResponse에서 project_id를 확인하거나 "
-                "PROJECT_ID_ALIASES를 설정하세요."
+                "project_id를 rag_lab의 인덱싱 프로젝트로 결정할 수 없습니다. "
+                f"requested={payload.project_id!r}, candidates={candidate_text}. "
+                "rag_lab GET /projects에서 project_id를 확인하세요."
             ),
         )
+
     effective_project_id = project_resolution.resolved_project_id
-    logger.info(
-        "Resolved chat project requested=%r resolved=%r strategy=%s confidence=%.4f",
-        payload.project_id,
-        effective_project_id,
-        project_resolution.strategy,
-        project_resolution.confidence,
-    )
-    candidate_k = settings.rag_candidate_k
-    reasoning_mode = (
-        payload.reasoning_mode or settings.agentic_rag_default_mode
-    )
-    request_id = _request_id(request)
     telemetry_client_id = _frontend_client_id(request, effective_project_id)
-    requested_model_id = payload.model_id or generation_router.default_model_id
     context_chars = (
         len(payload.context)
         if isinstance(payload.context, str)
         else len(
             json.dumps(
-                [
-                    item.model_dump(mode="json")
-                    for item in payload.context
-                ],
+                [item.model_dump(mode="json") for item in payload.context],
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
         )
     )
-    usable_frontend_context = _has_usable_frontend_context(payload.context)
     _safe_record_chat_audit_request(
         request_id=request_id,
         client_id=telemetry_client_id,
@@ -3248,27 +3938,7 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         context_chars=context_chars,
     )
     _record_frontend_activity(request, effective_project_id, "chat.request")
-    if payload.stream:
-        _safe_complete_chat_audit(
-            request_id=request_id,
-            status="error",
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            used_model_id=requested_model_id,
-            source_count=0,
-            duration_ms=round((perf_counter() - overall_started) * 1000),
-            error="stream=true is not supported yet; use stream=false",
-        )
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="stream=true is not supported yet; use stream=false",
-        )
-    query_plan = agentic_query_planner.plan(
-        payload.message,
-        payload.history,
-        reasoning_mode,
-        payload.context,
-    )
-    resolved_reasoning_mode = query_plan.mode
+
     retrieval_started = perf_counter()
     _safe_record_communication_event(
         request_id=request_id,
@@ -3278,117 +3948,170 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         status="started",
         client_id=telemetry_client_id,
         project_id=effective_project_id,
-        provider=settings.vector_db_provider,
-        model=settings.embedding_model,
+        provider="rag_lab",
+        model=None,
         details={
-            "policy": f"agentic-rag-v1/{resolved_reasoning_mode}",
-            "requested_reasoning_mode": reasoning_mode,
-            "reasoning_mode": resolved_reasoning_mode,
-            "candidate_k": candidate_k,
-            "frontend_context_available": usable_frontend_context,
+            "policy": "rag_lab/prompt",
+            "endpoint": f"{rag_lab_client.base_url}/prompt",
             "project_resolution": project_resolution.metadata(),
         },
     )
-    retrieval_degraded_error: str | None = None
-    retrieval_degraded_status_code: int | None = None
     try:
-        agentic_result = agentic_rag.run(
-            query_plan,
-            lambda query: search_documents(
-                SearchRequest(
-                    project_id=effective_project_id,
-                    query=query,
-                    top_k=candidate_k,
-                )
-            ),
+        prompt_result = rag_lab_client.prompt(
+            effective_project_id,
+            payload.message,
         )
-        retrieval_decision = agentic_result.decision
-        agentic_trace = agentic_result.trace
-        embedding_provider = agentic_result.embedding_provider
-        selected_sources = retrieval_decision.sources
-    except HTTPException as exc:
-        if exc.status_code >= 500 and usable_frontend_context:
-            retrieval_degraded_error = str(exc.detail)
-            retrieval_degraded_status_code = exc.status_code
-            agentic_result = agentic_rag.fallback(
-                query_plan,
-                stop_reason="vector_unavailable_context_fallback",
-            )
-            retrieval_decision = agentic_result.decision
-            agentic_trace = agentic_result.trace
-            embedding_provider = agentic_result.embedding_provider
-            selected_sources = retrieval_decision.sources
-        else:
-            retrieval_ms = round((perf_counter() - retrieval_started) * 1000)
-            _safe_record_communication_event(
-                request_id=request_id,
-                channel="rag",
-                direction="vectordb_to_fastapi",
-                phase="rag.response",
-                status="error",
-                client_id=telemetry_client_id,
-                project_id=effective_project_id,
-                status_code=exc.status_code,
-                duration_ms=retrieval_ms,
-                provider=settings.vector_db_provider,
-                model=settings.embedding_model,
-                error=str(exc),
-                details={
-                    "policy": f"agentic-rag-v1/{resolved_reasoning_mode}",
-                    "requested_reasoning_mode": reasoning_mode,
-                    "reasoning_mode": resolved_reasoning_mode,
-                    "candidate_k": candidate_k,
-                    "frontend_context_available": usable_frontend_context,
-                    "project_resolution": project_resolution.metadata(),
-                },
-            )
-            _safe_complete_chat_audit(
-                request_id=request_id,
-                status="error",
-                status_code=exc.status_code,
-                used_model_id=requested_model_id,
-                source_count=0,
-                duration_ms=round((perf_counter() - overall_started) * 1000),
-                error=str(exc.detail),
-            )
-            raise
+    except RagLabError as exc:
+        retrieval_ms = round((perf_counter() - retrieval_started) * 1000)
+        _safe_record_communication_event(
+            request_id=request_id,
+            channel="rag",
+            direction="vectordb_to_fastapi",
+            phase="rag.response",
+            status="error",
+            client_id=telemetry_client_id,
+            project_id=effective_project_id,
+            status_code=exc.status_code,
+            duration_ms=retrieval_ms,
+            provider="rag_lab",
+            error=str(exc),
+            details={"policy": "rag_lab/prompt"},
+        )
+        _safe_complete_chat_audit(
+            request_id=request_id,
+            status="error",
+            status_code=exc.status_code,
+            used_model_id=requested_model_id,
+            source_count=0,
+            duration_ms=round((perf_counter() - overall_started) * 1000),
+            error=str(exc),
+        )
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
     retrieval_ms = round((perf_counter() - retrieval_started) * 1000)
+    chat_sources = [
+        source.model_copy(update={"citation_id": index})
+        for index, source in enumerate(prompt_result.sources, start=1)
+    ]
+    evidence_status = "sufficient" if prompt_result.has_evidence else "missing"
+    retrieval_metadata = {
+        "policy": "rag_lab/prompt",
+        "prompt_owner": "rag_lab",
+        "has_evidence": prompt_result.has_evidence,
+        "top_score": prompt_result.top_score,
+        "threshold": prompt_result.threshold,
+        "reason": prompt_result.reason,
+        "selected_count": len(chat_sources),
+        "source_order_preserved": True,
+        "client_top_k_ignored": payload.top_k is not None,
+        "reasoning_mode_ignored": payload.reasoning_mode is not None,
+        "history_ignored_by_prompt_owner": len(payload.history),
+        "frontend_context_ignored_by_prompt_owner": context_chars,
+    }
     _safe_record_communication_event(
         request_id=request_id,
         channel="rag",
         direction="vectordb_to_fastapi",
         phase="rag.response",
-        status=("degraded" if retrieval_degraded_error else "success"),
+        status="success",
         client_id=telemetry_client_id,
         project_id=effective_project_id,
-        status_code=retrieval_degraded_status_code or 200,
+        status_code=200,
         duration_ms=retrieval_ms,
-        provider=embedding_provider,
-        model=settings.embedding_model,
-        source_count=len(selected_sources),
-        error=retrieval_degraded_error,
-        details={
-            "policy": retrieval_decision.policy,
-            "candidate_k": candidate_k,
-            "candidate_count": retrieval_decision.candidate_count,
-            "reranked_count": retrieval_decision.reranked_count,
-            "selected_count": retrieval_decision.selected_count,
-            "context_chars": retrieval_decision.context_chars,
-            "requested_reasoning_mode": agentic_trace.requested_mode,
-            "reasoning_mode": agentic_trace.mode,
-            "step_count": agentic_trace.step_count,
-            "max_steps": agentic_trace.max_steps,
-            "follow_up_rewritten": agentic_trace.follow_up_rewritten,
-            "context_grounded": agentic_trace.context_grounded,
-            "evidence_coverage": agentic_trace.evidence_coverage,
-            "final_novelty_ratio": agentic_trace.final_novelty_ratio,
-            "stop_reason": agentic_trace.stop_reason,
-            "degraded": retrieval_degraded_error is not None,
-            "frontend_context_available": usable_frontend_context,
-            "client_top_k_ignored": payload.top_k is not None,
-            "project_resolution": project_resolution.metadata(),
-        },
+        provider="rag_lab",
+        source_count=len(chat_sources),
+        details=retrieval_metadata,
     )
+
+    response_metadata = {
+        "schema_version": API_SCHEMA_VERSION,
+        "request_id": request_id,
+        "client_request_id": payload.client_request_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "project_id": effective_project_id,
+        "requested_project_id": payload.project_id,
+        "resolved_project_id": effective_project_id,
+        "project_resolution": project_resolution.metadata(),
+        "session_id": payload.session_id,
+        "requested_model_id": requested_model_id,
+        "evidence_status": evidence_status,
+        "embedding_provider": "rag_lab",
+        "retrieval": retrieval_metadata,
+        "session_scope": effective_project_id,
+        "history_messages": len(payload.history),
+        "context_items": (
+            1
+            if isinstance(payload.context, str) and payload.context.strip()
+            else 0
+            if isinstance(payload.context, str)
+            else len(payload.context)
+        ),
+        "source_count": len(chat_sources),
+        "sources": [source.model_dump(mode="json") for source in chat_sources],
+    }
+
+    if not prompt_result.has_evidence:
+        answer = "NO_EVIDENCE"
+        total_ms = round((perf_counter() - overall_started) * 1000)
+        response_metadata.update(
+            {
+                "status": "completed",
+                "used_model_id": None,
+                "provider": "rag_lab",
+                "ai_model": None,
+                "llm_called": False,
+                "timing": {
+                    "retrieval_ms": retrieval_ms,
+                    "generation_ms": 0,
+                    "total_ms": total_ms,
+                },
+            }
+        )
+        _safe_complete_chat_audit(
+            request_id=request_id,
+            status="completed",
+            status_code=200,
+            answer=answer,
+            used_model_id=None,
+            provider="rag_lab",
+            source_count=0,
+            duration_ms=total_ms,
+        )
+        if payload.stream:
+            def no_evidence_stream():
+                yield _sse_event(
+                    "meta",
+                    _client_chat_metadata(payload, response_metadata),
+                )
+                yield _sse_event(
+                    "delta",
+                    {"request_id": request_id, "sequence": 1, "text": answer},
+                )
+                yield _sse_event(
+                    "done",
+                    {
+                        "answer": answer,
+                        "source": [],
+                        "metadata": _client_chat_metadata(payload, response_metadata),
+                    },
+                )
+
+            return StreamingResponse(
+                no_evidence_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "X-Accel-Buffering": "no",
+                    "X-Request-ID": request_id,
+                    "X-API-Version": API_SCHEMA_VERSION,
+                },
+            )
+        return ChatResponse(
+            answer=answer,
+            source=[],
+            metadata=_client_chat_metadata(payload, response_metadata),
+        )
+
     generation_started = perf_counter()
     _safe_record_communication_event(
         request_id=request_id,
@@ -3400,53 +4123,222 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         project_id=effective_project_id,
         provider="model-router",
         model=requested_model_id,
-        source_count=len(selected_sources),
+        source_count=len(chat_sources),
         details={
-            "rag_sources_attached": len(selected_sources),
-            "rag_degraded": retrieval_degraded_error is not None,
-            "frontend_context_available": usable_frontend_context,
+            "prompt_owner": "rag_lab",
+            "messages_forwarded_unchanged": True,
         },
     )
+
+    if payload.stream:
+        def event_stream():
+            yield _sse_event(
+                "meta",
+                _client_chat_metadata(
+                    payload,
+                    {**response_metadata, "status": "streaming"},
+                ),
+            )
+            answer_parts: list[str] = []
+            sequence = 0
+            try:
+                if (
+                    requested_model_id == settings.backendai_public_model_id
+                    or requested_model_id.startswith("backendai:")
+                ):
+                    streaming_generation = generation_router.stream_backendai(
+                        payload.model_id,
+                        prompt_result.messages,
+                        request_id=request_id,
+                    )
+                    used_model_id = streaming_generation.used_model_id
+                    used_model_name = streaming_generation.used_model_name
+                    provider = streaming_generation.provider
+                    inference_protocol = streaming_generation.inference_protocol
+                    inference_endpoint = streaming_generation.inference_endpoint
+                    deltas = streaming_generation.deltas
+                else:
+                    completed_generation = generation_router.generate(
+                        payload.model_id,
+                        prompt_result.messages,
+                        request_id=request_id,
+                    )
+                    used_model_id = completed_generation.used_model_id
+                    used_model_name = completed_generation.used_model_name
+                    provider = completed_generation.provider
+                    inference_protocol = (
+                        completed_generation.inference_protocol or provider
+                    )
+                    inference_endpoint = completed_generation.inference_endpoint
+                    deltas = iter((completed_generation.answer,))
+
+                for delta in deltas:
+                    if not delta:
+                        continue
+                    sequence += 1
+                    answer_parts.append(delta)
+                    yield _sse_event(
+                        "delta",
+                        {
+                            "request_id": request_id,
+                            "sequence": sequence,
+                            "text": delta,
+                        },
+                    )
+                answer = "".join(answer_parts).strip()
+                if not answer:
+                    raise ServiceError("생성 모델이 빈 streaming 답변을 반환했습니다.")
+                cited_answer, model_citation_compliant = _ensure_answer_citations(
+                    answer,
+                    chat_sources,
+                )
+                if cited_answer != answer:
+                    footer = cited_answer[len(answer):]
+                    sequence += 1
+                    yield _sse_event(
+                        "delta",
+                        {
+                            "request_id": request_id,
+                            "sequence": sequence,
+                            "text": footer,
+                        },
+                    )
+                answer = cited_answer
+                generation_ms = round((perf_counter() - generation_started) * 1000)
+                total_ms = round((perf_counter() - overall_started) * 1000)
+                final_metadata = {
+                    **response_metadata,
+                    "status": "completed",
+                    "used_model_id": used_model_id,
+                    "provider": provider,
+                    "ai_model": used_model_name,
+                    "inference_protocol": inference_protocol,
+                    "inference_endpoint": inference_endpoint,
+                    "llm_called": True,
+                    "model_citation_compliant": model_citation_compliant,
+                    "timing": {
+                        "retrieval_ms": retrieval_ms,
+                        "generation_ms": generation_ms,
+                        "total_ms": total_ms,
+                    },
+                }
+                _safe_record_communication_event(
+                    request_id=request_id,
+                    channel="fastapi-ai",
+                    direction="ai_server_to_fastapi",
+                    phase="ai.response",
+                    status="success",
+                    client_id=telemetry_client_id,
+                    project_id=effective_project_id,
+                    status_code=200,
+                    duration_ms=generation_ms,
+                    provider=provider,
+                    model=used_model_name,
+                    source_count=len(chat_sources),
+                    details={"stream": True, "chunks": sequence},
+                )
+                _safe_complete_chat_audit(
+                    request_id=request_id,
+                    status="completed",
+                    status_code=200,
+                    answer=answer,
+                    used_model_id=used_model_id,
+                    provider=provider,
+                    source_count=len(chat_sources),
+                    duration_ms=total_ms,
+                )
+                yield _sse_event(
+                    "done",
+                    {
+                        "answer": answer,
+                        "source": [
+                            SourceDocument(
+                                file=source.path or source.document_id,
+                                chunk=source.text,
+                                score=source.score,
+                            ).model_dump(mode="json")
+                            for source in chat_sources
+                        ],
+                        "metadata": _client_chat_metadata(payload, final_metadata),
+                    },
+                )
+            except ServiceError as exc:
+                status_code = getattr(exc, "status_code", 503)
+                _safe_complete_chat_audit(
+                    request_id=request_id,
+                    status="error",
+                    status_code=status_code,
+                    used_model_id=requested_model_id,
+                    source_count=len(chat_sources),
+                    duration_ms=round((perf_counter() - overall_started) * 1000),
+                    error=str(exc),
+                )
+                yield _sse_event(
+                    "error",
+                    {
+                        "request_id": request_id,
+                        "status_code": status_code,
+                        "error": str(exc),
+                        "partial": "".join(answer_parts),
+                    },
+                )
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+                "X-Request-ID": request_id,
+                "X-API-Version": API_SCHEMA_VERSION,
+            },
+        )
+
     try:
         generation = generation_router.generate(
             payload.model_id,
-            payload.message,
-            selected_sources,
-            payload.history,
-            payload.context,
-            effective_project_id,
-            payload.session_id,
+            prompt_result.messages,
             request_id=request_id,
         )
     except ServiceError as exc:
         generation_ms = round((perf_counter() - generation_started) * 1000)
-        _safe_record_communication_event(
-            request_id=request_id,
-            channel="fastapi-ai",
-            direction="ai_server_to_fastapi",
-            phase="ai.response",
-            status="error",
-            client_id=telemetry_client_id,
-            project_id=effective_project_id,
-            status_code=getattr(exc, "status_code", 503),
-            duration_ms=generation_ms,
-            provider="model-router",
-            model=requested_model_id,
-            source_count=len(selected_sources),
-            error=str(exc),
-            details={"rag_sources_attached": len(selected_sources)},
-        )
         _safe_complete_chat_audit(
             request_id=request_id,
             status="error",
             status_code=getattr(exc, "status_code", 503),
             used_model_id=requested_model_id,
-            source_count=len(selected_sources),
+            source_count=len(chat_sources),
             duration_ms=round((perf_counter() - overall_started) * 1000),
             error=str(exc),
         )
         raise _service_error(exc) from exc
+
+    cited_answer, model_citation_compliant = _ensure_answer_citations(
+        generation.answer,
+        chat_sources,
+    )
+    generation = replace(generation, answer=cited_answer)
     generation_ms = round((perf_counter() - generation_started) * 1000)
+    total_ms = round((perf_counter() - overall_started) * 1000)
+    response_metadata.update(
+        {
+            "status": "completed",
+            "used_model_id": generation.used_model_id,
+            "provider": generation.provider,
+            "fallback_used": generation.requested_model_id != generation.used_model_id,
+            "ai_provider": generation.provider,
+            "ai_model": generation.used_model_name,
+            "inference_protocol": generation.inference_protocol or generation.provider,
+            "inference_endpoint": generation.inference_endpoint,
+            "llm_called": True,
+            "model_citation_compliant": model_citation_compliant,
+            "timing": {
+                "retrieval_ms": retrieval_ms,
+                "generation_ms": generation_ms,
+                "total_ms": total_ms,
+            },
+        }
+    )
     _safe_record_communication_event(
         request_id=request_id,
         channel="fastapi-ai",
@@ -3459,22 +4351,9 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         duration_ms=generation_ms,
         provider=generation.provider,
         model=generation.used_model_name,
-        source_count=len(selected_sources),
-        details={
-            "answer_chars": len(generation.answer),
-            "rag_sources_attached": len(selected_sources),
-        },
+        source_count=len(chat_sources),
+        details={"messages_from": "rag_lab"},
     )
-    total_ms = round((perf_counter() - overall_started) * 1000)
-    chat_sources = [
-        source.model_copy(update={"citation_id": index})
-        for index, source in enumerate(selected_sources, start=1)
-    ]
-    timing = {
-        "retrieval_ms": retrieval_ms,
-        "generation_ms": generation_ms,
-        "total_ms": total_ms,
-    }
     _safe_complete_chat_audit(
         request_id=request_id,
         status="completed",
@@ -3495,98 +4374,7 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
             )
             for source in chat_sources
         ],
-        metadata={
-            "schema_version": API_SCHEMA_VERSION,
-            "request_id": generation.request_id,
-            "client_request_id": payload.client_request_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "status": "completed",
-            "project_id": effective_project_id,
-            "requested_project_id": payload.project_id,
-            "resolved_project_id": effective_project_id,
-            "project_resolution": project_resolution.metadata(),
-            "session_id": payload.session_id,
-            "client": {
-                "client_id": getattr(
-                    request.state,
-                    "frontend_client_id",
-                    None,
-                ),
-                "auto_registered": bool(
-                    getattr(
-                        request.state,
-                        "frontend_client_auto_registered",
-                        False,
-                    )
-                ),
-            },
-            "requested_model_id": generation.requested_model_id,
-            "used_model_id": generation.used_model_id,
-            "provider": generation.provider,
-            "fallback_used": (
-                generation.requested_model_id != generation.used_model_id
-            ),
-            "finish_reason": "stop",
-            "timing": timing,
-            "ai_provider": generation.provider,
-            "ai_model": generation.used_model_name,
-            "embedding_provider": embedding_provider,
-            "embedding_model": settings.embedding_model,
-            "index_version": settings.index_version,
-            "retrieval": {
-                "policy": retrieval_decision.policy,
-                "candidate_k": candidate_k,
-                "candidate_count": retrieval_decision.candidate_count,
-                "reranked_count": retrieval_decision.reranked_count,
-                "selected_count": retrieval_decision.selected_count,
-                "context_chars": retrieval_decision.context_chars,
-                "requested_reasoning_mode": agentic_trace.requested_mode,
-                "reasoning_mode": agentic_trace.mode,
-                "step_count": agentic_trace.step_count,
-                "max_steps": agentic_trace.max_steps,
-                "queries": list(agentic_trace.queries),
-                "standalone_query": agentic_trace.standalone_query,
-                "follow_up_rewritten": agentic_trace.follow_up_rewritten,
-                "context_grounded": agentic_trace.context_grounded,
-                "unique_candidate_count": agentic_trace.unique_candidate_count,
-                "evidence_coverage": agentic_trace.evidence_coverage,
-                "final_novelty_ratio": agentic_trace.final_novelty_ratio,
-                "stop_reason": agentic_trace.stop_reason,
-                "degraded": retrieval_degraded_error is not None,
-                "degraded_error": retrieval_degraded_error,
-                "frontend_context_available": usable_frontend_context,
-                "client_top_k_ignored": payload.top_k is not None,
-            },
-            "prompt_budget": {
-                "context_window_tokens": settings.ai_context_window_tokens,
-                "question_max_chars": settings.ai_question_max_chars,
-                "history_max_chars": settings.ai_history_max_chars,
-                "frontend_context_max_chars": (
-                    settings.ai_frontend_context_max_chars
-                ),
-                "rag_context_max_chars": settings.rag_context_max_chars,
-            },
-            "request_normalization": {
-                "auto_project_requested": payload.project_id == "__auto__",
-                "fallback_session_id": payload.session_id.startswith("vscode-"),
-                "accepted_extra_fields": sorted(
-                    (payload.model_extra or {}).keys()
-                ),
-            },
-            "session_scope": effective_project_id,
-            "history_messages": len(payload.history),
-            "context_items": (
-                1
-                if isinstance(payload.context, str) and payload.context.strip()
-                else 0
-                if isinstance(payload.context, str)
-                else len(payload.context)
-            ),
-            "source_count": len(chat_sources),
-            "sources": [
-                source.model_dump(mode="json") for source in chat_sources
-            ],
-        },
+        metadata=_client_chat_metadata(payload, response_metadata),
     )
 
 

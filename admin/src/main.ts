@@ -183,6 +183,8 @@ type AIProviderRecord = {
   latency_ms: number;
   model_count: number;
   models: string[];
+  embedding_model_count: number;
+  embedding_models: string[];
   last_checked_at: string | null;
   created_at: string;
   updated_at: string;
@@ -193,6 +195,38 @@ type AIProviderListResponse = {
   total: number;
 };
 
+type VectorDatabaseProviderRecord = {
+  provider_id: string;
+  name: string;
+  engine: "auto" | "sqlite" | "qdrant" | "weaviate" | "chroma" | "milvus" | "pgvector" | "rag_lab" | "custom";
+  detected_engine: string | null;
+  connection_mode: "remote" | "local";
+  host: string | null;
+  port: number | null;
+  base_url: string;
+  use_tls: boolean;
+  storage_namespace: string;
+  local_path: string | null;
+  embedding_model_path: string;
+  embedding_models: string[];
+  enabled: boolean;
+  status: "unknown" | "online" | "degraded" | "offline" | "disabled";
+  collections: string[];
+  adapter_available: boolean;
+  error: string | null;
+  latency_ms: number;
+  last_checked_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type VectorDatabaseProviderListResponse = {
+  providers: VectorDatabaseProviderRecord[];
+  total: number;
+  online: number;
+  adapter_ready: number;
+};
+
 type OllamaScanResponse = {
   checked_at: string;
   targets: {
@@ -201,6 +235,7 @@ type OllamaScanResponse = {
     status: "online" | "degraded" | "offline";
     models: string[];
     skipped_non_chat_models: string[];
+    embedding_models: string[];
     latency_ms: number;
     error: string | null;
     registered: boolean;
@@ -209,6 +244,39 @@ type OllamaScanResponse = {
   discovered_servers: number;
   registered_providers: number;
   chat_models: number;
+  embedding_models: number;
+};
+
+type CloudProviderScanResponse = {
+  checked_at: string;
+  targets: {
+    name: string;
+    base_url: string;
+    configured: boolean;
+    status: "online" | "degraded" | "offline" | "not_configured";
+    chat_models: string[];
+    embedding_models: string[];
+    skipped_models: string[];
+    latency_ms: number;
+    error: string | null;
+    registered: boolean;
+    provider_id: string | null;
+  }[];
+  configured_providers: number;
+  registered_providers: number;
+  chat_models: number;
+  embedding_models: number;
+};
+
+type EmbeddingModelProbeResponse = {
+  provider_id: string;
+  provider_name: string;
+  protocol: "ollama" | "openai";
+  base_url: string;
+  deployment_type: "cloud" | "local" | "remote_server";
+  model_name: string;
+  dimension: number;
+  latency_ms: number;
 };
 
 type RuntimeServiceSettingsResponse = {
@@ -226,7 +294,8 @@ type RuntimeServiceSettingsResponse = {
     port: number;
     collection: string;
     embedding_deployment: "api" | "local";
-    embedding_provider: "ollama" | "nvidia";
+    embedding_provider: "ollama" | "nvidia" | "openai";
+    embedding_provider_id: string | null;
     embedding_base_url: string;
     embedding_model: string;
     embedding_model_id: string;
@@ -238,6 +307,7 @@ type RuntimeServiceSettingsResponse = {
     active_collection: string;
     active_embedding_deployment: "api" | "local";
     active_embedding_provider: string;
+    active_embedding_provider_id: string | null;
     active_embedding_base_url: string;
     active_embedding_model: string;
     active_embedding_model_id: string;
@@ -428,33 +498,6 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <div class="${isOverview ? "" : "hidden"} mx-auto max-w-[1280px] px-4 py-5 sm:px-6 lg:px-8">
         <section class="enter grid gap-3 md:grid-cols-2 xl:grid-cols-3" aria-label="접근 제어 및 Backend 인프라">
           <article class="panel rounded-2xl p-4">
-            <div>
-              <div class="flex flex-wrap items-center gap-2">
-                <h2 class="text-sm font-semibold text-white/90">Frontend Client</h2>
-                <span class="rounded-md border border-mint-300/20 bg-mint-400/7 px-2 py-1 font-mono text-[9px] font-bold tracking-wider text-mint-300">POSTGRESQL</span>
-              </div>
-              <p class="mt-1 text-[11px] text-white/35">첫 Chat 자동 등록·관리자 차단</p>
-            </div>
-
-            <form id="frontend-client-form" class="mt-3" autocomplete="off">
-              <input id="frontend-client-id" type="hidden" />
-              <div class="grid gap-2 sm:grid-cols-2">
-                <label class="block sm:col-span-2">
-                  <span class="mb-1 block text-[10px] font-medium text-white/42">Client 이름</span>
-                  <input id="frontend-client-name" class="playground-control w-full" maxlength="80" required placeholder="Frontend 개발 PC" />
-                </label>
-                ${endpointInput("IP 주소", "frontend-client-ip", "ip")}
-                ${endpointInput("Port", "frontend-client-port", "port")}
-                <button id="frontend-client-submit" type="submit" class="h-9 rounded-lg bg-mint-400 px-3 text-xs font-bold text-ink-950 transition hover:bg-mint-300 disabled:opacity-50 sm:col-span-2">Client 추가</button>
-              </div>
-              <div class="mt-2 flex min-h-5 items-center justify-between gap-2">
-                <p id="frontend-client-message" class="text-[10px] text-white/32" role="status" aria-live="polite">Client는 첫 Chat에서 자동 등록되며 False 이후 요청은 403으로 차단됩니다.</p>
-                <button id="frontend-client-cancel-edit" type="button" class="hidden rounded-lg border border-white/10 px-3 py-1.5 text-[10px] font-semibold text-white/55 transition hover:bg-white/5">수정 취소</button>
-              </div>
-            </form>
-          </article>
-
-          <article class="panel rounded-2xl p-4">
             <div class="flex flex-wrap items-center gap-2">
               <h2 class="text-sm font-semibold text-white/90">AI Model · <span id="selected-ai-model-name" class="text-mint-300">조회 중</span></h2>
               <span id="network-settings-updated" class="font-mono text-[9px] text-white/28">설정 불러오는 중</span>
@@ -483,7 +526,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
                 </label>
               </div>
               <button id="groq-settings-save" type="submit" class="mt-2 w-full rounded-lg bg-mint-400 px-3 py-2 text-[11px] font-bold text-ink-950 hover:bg-mint-300">AI Model 기본값 저장</button>
-              <p id="groq-settings-message" class="mt-2 text-[10px] text-white/35" role="status" aria-live="polite">API key는 .env에서만 관리합니다.</p>
+              <p id="groq-settings-message" class="mt-2 text-[10px] text-white/35" role="status" aria-live="polite">기본 모델과 Runtime 사용 여부를 지정합니다. API Key는 아래 Cloud Provider에서 등록합니다.</p>
             </form>
 
             <details class="mt-3 border-t border-white/7 pt-3">
@@ -492,9 +535,33 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
             </details>
 
             <details class="mt-3 border-t border-white/7 pt-3">
-              <summary class="cursor-pointer text-[11px] font-semibold text-white/55">AI Provider CRUD · 자동 감지</summary>
-              <button id="ollama-scan-button" type="button" class="mt-3 w-full rounded-lg border border-mint-300/20 bg-mint-400/5 px-3 py-2 text-[11px] font-semibold text-mint-300 hover:bg-mint-400/10">등록 PC의 Ollama 자동 탐색</button>
+              <summary class="cursor-pointer text-[11px] font-semibold text-white/55">AI · Embedding Provider CRUD · 자동 감지</summary>
+              <form id="cloud-provider-key-form" class="mt-3 rounded-xl border border-sky-300/12 bg-sky-400/3 p-3" autocomplete="off">
+                <div class="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 class="text-[11px] font-semibold text-sky-200">Cloud API Key 등록</h3>
+                    <p class="mt-0.5 text-[9px] text-white/30">알려진 공급자는 Base URL 입력 없이 Chat/Embedding 모델을 감지합니다.</p>
+                  </div>
+                  <label class="flex shrink-0 items-center gap-1.5 text-[9px] text-white/45"><input id="cloud-provider-enabled" type="checkbox" class="size-3.5 accent-sky-400" checked /> 사용</label>
+                </div>
+                <div class="mt-2 grid gap-2 sm:grid-cols-2">
+                  <label><span class="mb-1 block text-[10px] text-white/42">공급자</span><select id="cloud-provider-type" class="playground-control w-full"><option value="nvidia">NVIDIA API Catalog</option><option value="groq">Groq Cloud</option><option value="openai">OpenAI</option><option value="custom">Custom OpenAI Compatible</option></select></label>
+                  <label><span class="mb-1 block text-[10px] text-white/42">표시 이름 (선택)</span><input id="cloud-provider-name" class="playground-control w-full" maxlength="100" placeholder="미입력 시 공급자 기본 이름" /></label>
+                  <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">API Key</span><input id="cloud-provider-key" class="playground-control w-full" type="password" maxlength="4096" required placeholder="저장 후에는 끝 4자리만 표시" /></label>
+                  <div id="cloud-provider-custom-fields" class="hidden gap-2 sm:col-span-2 sm:grid-cols-[1fr_150px]">
+                    <label><span class="mb-1 block text-[10px] text-white/42">Custom Base URL</span><input id="cloud-provider-base-url" class="playground-control w-full" type="url" placeholder="https://api.example.com/v1" /></label>
+                    <label><span class="mb-1 block text-[10px] text-white/42">인증 방식</span><select id="cloud-provider-auth" class="playground-control w-full"><option value="bearer">Bearer</option><option value="x-api-key">X-API-Key</option></select></label>
+                  </div>
+                </div>
+                <button id="cloud-provider-key-save" type="submit" class="mt-2 w-full rounded-lg bg-sky-300 px-3 py-2 text-[11px] font-bold text-ink-950 hover:brightness-105">API Key 검증 · 모델 자동 등록</button>
+                <p id="cloud-provider-key-message" class="mt-2 text-[10px] text-white/35" role="status" aria-live="polite">키는 모델 조회 성공 후 암호화하여 저장합니다.</p>
+              </form>
+              <div class="mt-3 grid gap-2 sm:grid-cols-2">
+                <button id="ollama-scan-button" type="button" class="w-full rounded-lg border border-mint-300/20 bg-mint-400/5 px-3 py-2 text-[11px] font-semibold text-mint-300 hover:bg-mint-400/10">등록 PC의 Ollama 자동 탐색</button>
+                <button id="cloud-scan-button" type="button" class="w-full rounded-lg border border-sky-300/20 bg-sky-400/5 px-3 py-2 text-[11px] font-semibold text-sky-300 hover:bg-sky-400/10">.env Cloud Key 다시 탐색</button>
+              </div>
               <div id="ollama-scan-result" class="mt-2 text-[9px] text-white/35">API Server host, 설정된 AI Server, 활성 Frontend Client의 11434 포트를 확인합니다.</div>
+              <div id="cloud-scan-result" class="mt-2 text-[9px] text-white/35">NVIDIA/Groq 키를 노출하지 않고 /models에서 Embedding capability를 확인합니다.</div>
               <form id="ai-provider-form" class="mt-3 space-y-2" autocomplete="off">
                 <input id="ai-provider-id" type="hidden" />
                 <div class="grid gap-2 sm:grid-cols-2">
@@ -511,7 +578,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
                   <label><span class="mb-1 block text-[10px] text-white/42">인증</span><select id="ai-provider-auth" class="playground-control w-full"><option value="none">없음</option><option value="bearer">Bearer API Key</option><option value="x-api-key">X-API-Key</option></select></label>
                   <label><span class="mb-1 block text-[10px] text-white/42">API Key</span><input id="ai-provider-key" class="playground-control w-full" type="password" maxlength="4096" placeholder="수정 시 공란이면 기존 키 유지" /></label>
                 </div>
-                <label class="flex items-center gap-2 text-[10px] text-white/45"><input id="ai-provider-enabled" type="checkbox" class="size-4 accent-emerald-400" checked /> 모델 자동 감지 및 Chat 사용</label>
+                <label class="flex items-center gap-2 text-[10px] text-white/45"><input id="ai-provider-enabled" type="checkbox" class="size-4 accent-emerald-400" checked /> Chat/Embedding 모델 자동 감지 및 사용</label>
                 <div class="grid grid-cols-2 gap-2">
                   <button id="ai-provider-save" type="submit" class="rounded-lg bg-mint-400 px-3 py-2 text-[11px] font-bold text-ink-950 hover:bg-mint-300">Provider 추가</button>
                   <button id="ai-provider-cancel" type="button" class="rounded-lg border border-white/10 px-3 py-2 text-[11px] font-semibold text-white/55 hover:bg-white/5">입력 초기화</button>
@@ -527,16 +594,51 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
               <h2 class="text-sm font-semibold text-white/90">Vector Store · Index</h2>
               <span id="vector-runtime-badge" class="rounded-md border border-mint-300/20 bg-mint-400/7 px-2 py-1 font-mono text-[9px] font-bold text-mint-300">QDRANT</span>
             </div>
+            <details class="mt-3 border-t border-white/7 pt-3" open>
+              <summary class="cursor-pointer text-[11px] font-semibold text-white/65">VectorDB Provider 등록 · 자동 감지</summary>
+              <form id="vector-db-provider-form" class="mt-3 space-y-2" autocomplete="off">
+                <input id="vector-db-provider-id" type="hidden" />
+                <div class="grid gap-2 sm:grid-cols-2">
+                  <label><span class="mb-1 block text-[10px] text-white/42">VectorDB 이름</span><input id="vector-db-name" class="playground-control w-full" maxlength="100" required placeholder="사내 VectorDB" /></label>
+                  <label><span class="mb-1 block text-[10px] text-white/42">DB 종류</span><select id="vector-db-engine" class="playground-control w-full"><option value="auto">자동 감지</option><option value="rag_lab">rag_lab API</option><option value="sqlite">SQLite Local</option><option value="qdrant">Qdrant</option><option value="weaviate">Weaviate</option><option value="chroma">Chroma</option><option value="milvus">Milvus</option><option value="pgvector">PostgreSQL pgvector</option><option value="custom">Custom</option></select></label>
+                  <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">저장 위치 방식</span><select id="vector-db-connection-mode" class="playground-control w-full"><option value="remote">원격/별도 VectorDB 서버</option><option value="local">API Server Local 경로</option></select></label>
+                  <div id="vector-db-remote-fields" class="grid gap-2 sm:col-span-2 sm:grid-cols-[1fr_110px_auto]">
+                    <label><span class="mb-1 block text-[10px] text-white/42">Host / Service Name</span><input id="vector-db-host" class="playground-control w-full" required placeholder="192.168.0.12 또는 qdrant" /></label>
+                    <label><span class="mb-1 block text-[10px] text-white/42">Port</span><input id="vector-db-port" class="playground-control w-full" type="number" min="1" max="65535" value="6333" required /></label>
+                    <label class="flex items-end gap-1.5 pb-2 text-[9px] text-white/45"><input id="vector-db-tls" type="checkbox" class="size-3.5 accent-mint-400" /> TLS</label>
+                  </div>
+                  <label id="vector-db-local-field" class="hidden sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">Local 상대 경로</span><input id="vector-db-local-path" class="playground-control w-full" placeholder="project-a/vector.sqlite3 또는 project-a/chroma" /><span class="mt-1 block text-[9px] text-white/28">컨테이너 /vector-db-local 기준 · Host 경로는 .env의 VECTOR_DB_LOCAL_ROOT</span></label>
+                  <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">저장 VectorDB 폴더 / Namespace / Collection</span><input id="vector-db-namespace" class="playground-control w-full" maxlength="255" required placeholder="vision_bge_m3_v1" /></label>
+                  <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">임베딩 모델 경로</span><input id="vector-db-model-path" class="playground-control w-full" maxlength="2048" required placeholder="http://192.168.0.12:11434 또는 모델 저장 경로" /></label>
+                  <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">임베딩 모델 목록 (복수 선택)</span><select id="vector-db-models" class="playground-control h-24 w-full" multiple required><option value="">Embedding Provider 모델 조회 중</option></select></label>
+                </div>
+                <label class="flex items-center gap-2 text-[10px] text-white/45"><input id="vector-db-enabled" type="checkbox" class="size-3.5 accent-mint-400" checked /> 등록 후 연결 및 Collection 자동 감지</label>
+                <div class="grid grid-cols-2 gap-2"><button id="vector-db-save" type="submit" class="rounded-lg bg-mint-400 px-3 py-2 text-[10px] font-bold text-ink-950">VectorDB 등록</button><button id="vector-db-cancel" type="button" class="rounded-lg border border-white/10 px-3 py-2 text-[10px] text-white/55">입력 초기화</button></div>
+                <p id="vector-db-message" class="text-[10px] text-white/35" role="status" aria-live="polite">Qdrant·Weaviate·Chroma·Milvus는 API 특징과 Collection을 감지합니다.</p>
+              </form>
+              <div id="vector-db-provider-list" class="mt-3 max-h-64 space-y-2 overflow-y-auto" aria-live="polite"><p class="text-[10px] text-white/30">등록 VectorDB 조회 중</p></div>
+            </details>
+            <details class="mt-3 border-t border-white/7 pt-3">
+              <summary class="cursor-pointer text-[11px] font-semibold text-white/55">활성 RAG Adapter · Index 호환 계약</summary>
             <form id="vector-settings-form" class="mt-3" autocomplete="off">
+              <input id="embedding-provider-id" type="hidden" />
               <div class="grid gap-2 sm:grid-cols-[1fr_100px]">
-                <label><span class="mb-1 block text-[10px] text-white/42">Qdrant Host</span><input id="vector-host" class="playground-control w-full" required /></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">활성 Adapter Host</span><input id="vector-host" class="playground-control w-full" required /></label>
                 ${endpointInput("Port", "vector-port", "port")}
               </div>
               <div class="mt-2 grid gap-2 sm:grid-cols-2">
-                <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">Collection</span><input id="vector-collection" class="playground-control w-full" required /></label>
+                <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">활성 Namespace / Collection</span><input id="vector-collection" class="playground-control w-full" required /></label>
                 <label><span class="mb-1 block text-[10px] text-white/42">Embedding 실행 위치</span><select id="embedding-deployment" class="playground-control w-full"><option value="api">외부/내부 API</option><option value="local">API Server Local</option></select></label>
-                <label><span class="mb-1 block text-[10px] text-white/42">Embedding Provider</span><select id="embedding-provider" class="playground-control w-full"><option value="ollama">Ollama API</option><option value="nvidia">NVIDIA Compatible API</option></select></label>
-                <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">Embedding Base URL</span><input id="embedding-base-url" class="playground-control w-full" type="url" required placeholder="https://... 또는 http://host.docker.internal:11434" /></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">Embedding Provider</span><select id="embedding-provider" class="playground-control w-full"><option value="ollama">Ollama API</option><option value="openai">OpenAI Compatible API</option><option value="nvidia">NVIDIA Compatible API</option></select></label>
+                <label><span class="mb-1 block text-[10px] text-white/42">감지된 모델 선택</span><select id="embedding-model-catalog" class="playground-control w-full"><option value="">Provider 자동 감지 후 선택</option></select></label>
+                <button id="embedding-model-select" type="button" class="sm:col-span-2 rounded-lg border border-mint-300/20 bg-mint-400/5 px-3 py-2 text-[10px] font-semibold text-mint-300 hover:bg-mint-400/10">선택 모델 연결·차원 검증</button>
+                <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">연결 입력 방식</span><select id="embedding-connection-mode" class="playground-control w-full"><option value="host">IP / Host + Port</option><option value="url">Provider Base URL</option></select></label>
+                <div id="embedding-host-fields" class="grid gap-2 sm:col-span-2 sm:grid-cols-[1fr_92px_auto]">
+                  <label><span class="mb-1 block text-[10px] text-white/42">IP / Host</span><input id="embedding-host" class="playground-control w-full" placeholder="192.168.0.12" /></label>
+                  <label><span class="mb-1 block text-[10px] text-white/42">Port</span><input id="embedding-port" class="playground-control w-full" type="number" min="1" max="65535" value="11434" /></label>
+                  <label class="flex items-end gap-1.5 pb-2 text-[10px] text-white/45"><input id="embedding-tls" type="checkbox" class="size-4 accent-emerald-400" /> HTTPS</label>
+                </div>
+                <label id="embedding-url-field" class="hidden sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">Embedding Base URL</span><input id="embedding-base-url" class="playground-control w-full" type="url" placeholder="https://api.provider.com/v1" /></label>
                 <label><span class="mb-1 block text-[10px] text-white/42">Embedding model</span><input id="embedding-model" class="playground-control w-full" required placeholder="bge-m3:latest" /></label>
                 <label><span class="mb-1 block text-[10px] text-white/42">Embedding Model ID</span><input id="embedding-model-id" class="playground-control w-full" required placeholder="bge-m3-1024-v1" /></label>
                 <label><span class="mb-1 block text-[10px] text-white/42">Vector Dimension</span><input id="embedding-dimension" class="playground-control w-full" type="number" min="1" max="65536" required /></label>
@@ -546,6 +648,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
               <button id="vector-settings-save" type="submit" class="mt-2 w-full rounded-lg border border-white/10 px-3 py-2 text-[11px] font-semibold text-white/65 hover:bg-white/5">Vector 설정 저장</button>
               <p id="vector-settings-message" class="mt-2 text-[10px] text-white/35" role="status" aria-live="polite">설정 조회 중</p>
             </form>
+            </details>
             <div class="mt-3 border-t border-white/7 pt-3">
               <button id="reembed-button" type="button" class="w-full rounded-lg bg-amber-300 px-3 py-2 text-[11px] font-bold text-ink-950 hover:brightness-105 disabled:opacity-50">등록 Source 전체 재임베딩</button>
               <p id="reembed-status" class="mt-2 min-h-4 text-[10px] text-white/35" role="status" aria-live="polite">실제 Repository Index Job을 생성합니다.</p>
@@ -581,9 +684,38 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
               </div>
               <span id="frontend-client-count" class="shrink-0 font-mono text-[10px] text-white/32">불러오는 중</span>
             </div>
-            <div class="mt-3 overflow-hidden rounded-xl border border-white/7">
+            <form id="frontend-client-form" class="mt-4 rounded-xl border border-white/7 bg-white/2 p-3" autocomplete="off">
+              <input id="frontend-client-id" type="hidden" />
+              <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(12rem,1.3fr)_minmax(9rem,1fr)_90px_auto] xl:items-end">
+                <label class="block">
+                  <span class="mb-1 block text-[10px] font-medium text-white/42">Client 이름</span>
+                  <input id="frontend-client-name" class="playground-control w-full" maxlength="80" required placeholder="Frontend 개발 PC" />
+                </label>
+                ${endpointInput("Endpoint IP", "frontend-client-ip", "ip")}
+                ${endpointInput("Port", "frontend-client-port", "port")}
+                <div class="flex gap-2 sm:col-span-2 xl:col-span-1">
+                  <button id="frontend-client-submit" type="submit" class="h-9 flex-1 rounded-lg bg-mint-400 px-3 text-xs font-bold text-ink-950 transition hover:bg-mint-300 disabled:opacity-50">Client 추가</button>
+                  <button id="frontend-client-cancel-edit" type="button" class="hidden h-9 rounded-lg border border-white/10 px-3 text-[10px] font-semibold text-white/55 transition hover:bg-white/5">수정 취소</button>
+                </div>
+              </div>
+              <p id="frontend-client-message" class="mt-2 min-h-4 text-[10px] text-white/32" role="status" aria-live="polite">Client는 첫 Chat에서 자동 등록되며 False 이후 요청은 403으로 차단됩니다.</p>
+            </form>
+
+            <div class="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-[150px_minmax(13rem,1fr)_160px_112px_auto] xl:items-end" role="search" aria-label="Frontend Client 검색 및 정렬">
+              <label><span class="mb-1 block text-[9px] text-white/35">검색 필드</span><select id="frontend-client-search-field" class="playground-control w-full"><option value="all">전체 필드</option><option value="created_at">등록 날짜</option><option value="name">이름</option><option value="client_id">Client ID</option><option value="endpoint">Endpoint</option><option value="port">Port</option><option value="enabled">Backend 연결 T/F</option><option value="last_seen_at">마지막 연결 시간</option></select></label>
+              <label><span class="mb-1 block text-[9px] text-white/35">일부 일치 검색</span><input id="frontend-client-search" type="search" class="playground-control w-full" placeholder="날짜, 이름, ID, IP:Port, True/False…" /></label>
+              <label><span class="mb-1 block text-[9px] text-white/35">정렬 기준</span><select id="frontend-client-sort-key" class="playground-control w-full"><option value="created_at">등록 날짜</option><option value="name">이름</option><option value="client_id">Client ID</option><option value="endpoint">Endpoint</option><option value="port">Port</option><option value="enabled">Backend 연결 T/F</option><option value="last_seen_at">마지막 연결 시간</option></select></label>
+              <label><span class="mb-1 block text-[9px] text-white/35">정렬 방향</span><select id="frontend-client-sort-direction" class="playground-control w-full"><option value="desc">내림차순</option><option value="asc">오름차순</option></select></label>
+              <button id="frontend-client-filter-reset" type="button" class="h-9 rounded-lg border border-white/10 px-3 text-[10px] font-semibold text-white/55 hover:bg-white/5">검색 초기화</button>
+            </div>
+            <div class="mt-2 flex items-center justify-between gap-2 text-[9px] text-white/30">
+              <span id="frontend-client-filter-count">검색 결과 계산 중</span>
+              <span>문자 일부만 입력해도 일치합니다.</span>
+            </div>
+
+            <div class="mt-3 overflow-x-auto rounded-xl border border-white/7">
               <div class="mock-client-table-head">
-                <span>Client</span><span>Endpoint</span><span>Backend 연결</span><span class="text-right">관리</span>
+                <span>Client · 등록 날짜</span><span>Endpoint · Port</span><span>마지막 연결 시간</span><span>Backend 연결 T/F</span><span class="text-right">관리</span>
               </div>
               <div id="frontend-client-list" aria-live="polite"></div>
               <p id="frontend-client-empty" class="hidden px-4 py-8 text-center text-xs text-white/30">등록된 Frontend Client가 없습니다.</p>
@@ -690,12 +822,16 @@ async function loadHealth(): Promise<void> {
         (model) => model.model_id === health.configuration.default_model_id,
       )?.model_name || health.configuration.ai_model,
       embeddingModel: health.configuration.embedding_model,
-      vectorProvider: health.configuration.vector_db_provider.toUpperCase(),
+      vectorProvider: (
+        health.vector_store.provider || health.configuration.vector_db_provider
+      ).toUpperCase(),
       backendVersion: `v${health.version}`,
     });
     setText("last-updated", `마지막 동기화 ${new Date().toLocaleString("ko-KR")}`);
     setServiceStatus("api-service-status", `정상 · ${latency}ms`, true);
-    const vectorAvailable = health.vector_store.status !== "unavailable";
+    const vectorAvailable = ["ok", "online"].includes(
+      health.vector_store.status || "unknown",
+    );
     const vectorProvider = (
       health.vector_store.provider || health.configuration.vector_db_provider
     ).toUpperCase();
@@ -932,6 +1068,315 @@ async function loadModels(): Promise<void> {
 
 let aiProviders: AIProviderRecord[] = [];
 
+function syncEmbeddingConnectionFields(): void {
+  const mode = (
+    document.getElementById("embedding-connection-mode") as HTMLSelectElement | null
+  )?.value || "host";
+  document.getElementById("embedding-host-fields")?.classList.toggle("hidden", mode !== "host");
+  document.getElementById("embedding-url-field")?.classList.toggle("hidden", mode !== "url");
+  const host = document.getElementById("embedding-host") as HTMLInputElement | null;
+  const port = document.getElementById("embedding-port") as HTMLInputElement | null;
+  const baseUrl = document.getElementById("embedding-base-url") as HTMLInputElement | null;
+  if (host) host.required = mode === "host";
+  if (port) port.required = mode === "host";
+  if (baseUrl) baseUrl.required = mode === "url";
+}
+
+function setEmbeddingConnection(baseUrl: string): void {
+  setInputValue("embedding-base-url", baseUrl);
+  try {
+    const parsed = new URL(baseUrl);
+    const rootOnly = parsed.pathname === "/" && !parsed.search;
+    setInputValue("embedding-connection-mode", rootOnly ? "host" : "url");
+    if (rootOnly) {
+      setInputValue("embedding-host", parsed.hostname);
+      setInputValue("embedding-port", parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+      const tls = document.getElementById("embedding-tls") as HTMLInputElement | null;
+      if (tls) tls.checked = parsed.protocol === "https:";
+    }
+  } catch {
+    setInputValue("embedding-connection-mode", "url");
+  }
+  syncEmbeddingConnectionFields();
+}
+
+function embeddingBaseUrl(): string {
+  const mode = inputValue("embedding-connection-mode") || "host";
+  if (mode === "url") return inputValue("embedding-base-url").replace(/\/$/, "");
+  const tls = (document.getElementById("embedding-tls") as HTMLInputElement | null)?.checked ?? false;
+  return `${tls ? "https" : "http"}://${inputValue("embedding-host")}:${Number(inputValue("embedding-port"))}`;
+}
+
+function renderEmbeddingModelCatalog(): void {
+  const select = document.getElementById("embedding-model-catalog") as HTMLSelectElement | null;
+  if (!select) return;
+  const selectedProviderId = inputValue("embedding-provider-id");
+  const selectedModel = inputValue("embedding-model");
+  const rows = aiProviders.flatMap((provider) =>
+    provider.embedding_models.map((model) => ({ provider, model })),
+  );
+  select.innerHTML = '<option value="">감지된 Embedding 모델 선택</option>' + rows.map(({ provider, model }) => {
+    const value = `${provider.provider_id}::${encodeURIComponent(model)}`;
+    const selected = provider.provider_id === selectedProviderId && model === selectedModel ? " selected" : "";
+    return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(provider.name)} · ${escapeHtml(model)} · ${provider.protocol.toUpperCase()}</option>`;
+  }).join("");
+  renderVectorDatabaseEmbeddingModels();
+}
+
+let vectorDatabaseProviders: VectorDatabaseProviderRecord[] = [];
+let editingVectorDatabaseProviderId: string | null = null;
+
+function vectorDatabaseModelValue(providerId: string, model: string): string {
+  return `provider:${providerId}:${model}`;
+}
+
+function renderVectorDatabaseEmbeddingModels(selectedModels?: string[]): void {
+  const select = document.getElementById("vector-db-models") as HTMLSelectElement | null;
+  if (!select) return;
+  const selected = new Set(
+    selectedModels ?? Array.from(select.selectedOptions).map((option) => option.value),
+  );
+  const rows = aiProviders.flatMap((provider) =>
+    provider.embedding_models.map((model) => ({ provider, model })),
+  );
+  const knownValues = new Set(
+    rows.map(({ provider, model }) => vectorDatabaseModelValue(provider.provider_id, model)),
+  );
+  const retained = Array.from(selected).filter((value) => value && !knownValues.has(value));
+  select.innerHTML = rows.length || retained.length
+    ? rows.map(({ provider, model }) => {
+      const value = vectorDatabaseModelValue(provider.provider_id, model);
+      return `<option value="${escapeHtml(value)}"${selected.has(value) ? " selected" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(model)}</option>`;
+    }).join("") + retained.map((value) => `<option value="${escapeHtml(value)}" selected>기존 계약 · ${escapeHtml(value)}</option>`).join("")
+    : '<option value="" disabled>감지된 Embedding 모델이 없습니다.</option>';
+}
+
+function setVectorDatabaseMessage(message: string, ok = true): void {
+  const element = document.getElementById("vector-db-message");
+  if (!element) return;
+  element.textContent = message;
+  element.className = `text-[10px] ${ok ? "text-mint-300/75" : "text-danger-300"}`;
+}
+
+function syncVectorDatabaseConnectionFields(): void {
+  const mode = inputValue("vector-db-connection-mode") || "remote";
+  const remote = mode === "remote";
+  document.getElementById("vector-db-remote-fields")?.classList.toggle("hidden", !remote);
+  document.getElementById("vector-db-local-field")?.classList.toggle("hidden", remote);
+  const host = document.getElementById("vector-db-host") as HTMLInputElement | null;
+  const port = document.getElementById("vector-db-port") as HTMLInputElement | null;
+  const localPath = document.getElementById("vector-db-local-path") as HTMLInputElement | null;
+  if (host) host.required = remote;
+  if (port) port.required = remote;
+  if (localPath) localPath.required = !remote;
+}
+
+function resetVectorDatabaseForm(): void {
+  editingVectorDatabaseProviderId = null;
+  setInputValue("vector-db-provider-id", "");
+  setInputValue("vector-db-name", "");
+  setInputValue("vector-db-engine", "auto");
+  setInputValue("vector-db-connection-mode", "remote");
+  setInputValue("vector-db-host", "");
+  setInputValue("vector-db-port", 6333);
+  setInputValue("vector-db-namespace", "");
+  setInputValue("vector-db-local-path", "");
+  setInputValue("vector-db-model-path", "");
+  const tls = document.getElementById("vector-db-tls") as HTMLInputElement | null;
+  const enabled = document.getElementById("vector-db-enabled") as HTMLInputElement | null;
+  if (tls) tls.checked = false;
+  if (enabled) enabled.checked = true;
+  renderVectorDatabaseEmbeddingModels([]);
+  setText("vector-db-save", "VectorDB 등록");
+  syncVectorDatabaseConnectionFields();
+}
+
+function vectorDatabasePayload(): Record<string, unknown> {
+  const models = Array.from(
+    (document.getElementById("vector-db-models") as HTMLSelectElement | null)?.selectedOptions || [],
+  ).map((option) => option.value).filter(Boolean);
+  const connectionMode = inputValue("vector-db-connection-mode") || "remote";
+  return {
+    name: inputValue("vector-db-name"),
+    engine: inputValue("vector-db-engine") || "auto",
+    connection_mode: connectionMode,
+    host: connectionMode === "remote" ? inputValue("vector-db-host") : null,
+    port: connectionMode === "remote" ? Number(inputValue("vector-db-port")) : null,
+    use_tls: (document.getElementById("vector-db-tls") as HTMLInputElement | null)?.checked ?? false,
+    storage_namespace: inputValue("vector-db-namespace"),
+    local_path: connectionMode === "local" ? inputValue("vector-db-local-path") : null,
+    embedding_model_path: inputValue("vector-db-model-path"),
+    embedding_models: models,
+    enabled: (document.getElementById("vector-db-enabled") as HTMLInputElement | null)?.checked ?? true,
+  };
+}
+
+function vectorDatabaseProviderMarkup(provider: VectorDatabaseProviderRecord): string {
+  const statusTone = provider.status === "online"
+    ? "text-mint-300"
+    : provider.status === "degraded" ? "text-amber-300" : "text-danger-300";
+  const engine = provider.detected_engine || provider.engine;
+  const location = provider.connection_mode === "local"
+    ? `LOCAL · ${provider.local_path || "경로 없음"}`
+    : provider.base_url;
+  return `
+    <article class="rounded-xl border border-white/7 bg-white/2 p-3">
+      <div class="flex items-start justify-between gap-2"><div class="min-w-0"><p class="truncate text-[11px] font-semibold text-white/75">${escapeHtml(provider.name)}</p><p class="mt-0.5 break-all font-mono text-[9px] text-white/30">${escapeHtml(location)} · ${escapeHtml(provider.storage_namespace)}</p></div><span class="font-mono text-[9px] font-bold ${statusTone}">${provider.status.toUpperCase()}</span></div>
+      <p class="mt-1 text-[9px] text-white/38">${escapeHtml(engine.toUpperCase())} · ${provider.latency_ms}ms · ${provider.adapter_available ? '<span class="text-mint-300">Vision RAG Adapter 사용 가능</span>' : '<span class="text-amber-300">등록·감지만 지원</span>'}</p>
+      <p class="mt-1 break-all text-[9px] text-white/30">모델 경로 · ${escapeHtml(provider.embedding_model_path)}</p>
+      <p class="mt-1 break-all font-mono text-[9px] text-white/28">모델 · ${provider.embedding_models.map(escapeHtml).join(", ")}</p>
+      ${provider.collections.length ? `<p class="mt-1 break-all font-mono text-[9px] text-sky-300">감지 Collection · ${provider.collections.map(escapeHtml).join(", ")}</p>` : ""}
+      ${provider.error ? `<p class="mt-1 text-[9px] text-danger-300">${escapeHtml(provider.error)}</p>` : ""}
+      <div class="mt-2 grid grid-cols-3 gap-1.5"><button type="button" data-vector-db-action="discover" data-vector-db-id="${escapeHtml(provider.provider_id)}" class="rounded-md border border-white/10 px-2 py-1.5 text-[9px] text-white/55">재감지</button><button type="button" data-vector-db-action="edit" data-vector-db-id="${escapeHtml(provider.provider_id)}" class="rounded-md border border-white/10 px-2 py-1.5 text-[9px] text-white/55">수정</button><button type="button" data-vector-db-action="delete" data-vector-db-id="${escapeHtml(provider.provider_id)}" class="rounded-md border border-danger-300/20 px-2 py-1.5 text-[9px] text-danger-300">삭제</button></div>
+    </article>`;
+}
+
+function renderVectorDatabaseProviders(): void {
+  const target = document.getElementById("vector-db-provider-list");
+  if (!target) return;
+  target.innerHTML = vectorDatabaseProviders.map(vectorDatabaseProviderMarkup).join("")
+    || '<p class="text-[10px] text-white/30">등록된 VectorDB가 없습니다.</p>';
+}
+
+async function loadVectorDatabaseProviders(refresh = false): Promise<void> {
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/vector-databases${refresh ? "?refresh=true" : ""}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = (await response.json()) as VectorDatabaseProviderListResponse;
+    vectorDatabaseProviders = value.providers;
+    renderVectorDatabaseProviders();
+    setVectorDatabaseMessage(`${value.total}개 등록 · ${value.online}개 응답 · ${value.adapter_ready}개 Vision RAG Adapter 사용 가능`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setVectorDatabaseMessage(`VectorDB Registry 조회 실패: ${message}`, false);
+  }
+}
+
+async function saveVectorDatabaseProvider(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  const form = event.currentTarget as HTMLFormElement;
+  if (!form.reportValidity()) return;
+  const payload = vectorDatabasePayload();
+  if (!(payload.embedding_models as string[]).length) {
+    setVectorDatabaseMessage("Embedding 모델을 하나 이상 선택해 주세요.", false);
+    return;
+  }
+  const button = document.getElementById("vector-db-save") as HTMLButtonElement | null;
+  if (button) button.disabled = true;
+  setVectorDatabaseMessage("VectorDB 종류와 Collection을 감지하고 있습니다.");
+  try {
+    const response = await fetch(
+      editingVectorDatabaseProviderId ? `${adminApiBaseUrl}/vector-databases/${encodeURIComponent(editingVectorDatabaseProviderId)}` : `${adminApiBaseUrl}/vector-databases`,
+      { method: editingVectorDatabaseProviderId ? "PUT" : "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+    );
+    const body = await response.json().catch(() => null) as VectorDatabaseProviderRecord | { detail?: string } | null;
+    if (!response.ok) throw new Error(body && "detail" in body && body.detail ? body.detail : `HTTP ${response.status}`);
+    const provider = body as VectorDatabaseProviderRecord;
+    resetVectorDatabaseForm();
+    await loadVectorDatabaseProviders();
+    setVectorDatabaseMessage(`${provider.name} · ${provider.detected_engine || provider.engine} · ${provider.collections.length}개 Collection 감지`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setVectorDatabaseMessage(`VectorDB 저장 실패: ${message}`, false);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function editVectorDatabaseProvider(provider: VectorDatabaseProviderRecord): void {
+  editingVectorDatabaseProviderId = provider.provider_id;
+  setInputValue("vector-db-provider-id", provider.provider_id);
+  setInputValue("vector-db-name", provider.name);
+  setInputValue("vector-db-engine", provider.engine);
+  setInputValue("vector-db-connection-mode", provider.connection_mode);
+  setInputValue("vector-db-host", provider.host || "");
+  setInputValue("vector-db-port", provider.port || 6333);
+  setInputValue("vector-db-namespace", provider.storage_namespace);
+  setInputValue("vector-db-local-path", provider.local_path || "");
+  setInputValue("vector-db-model-path", provider.embedding_model_path);
+  const tls = document.getElementById("vector-db-tls") as HTMLInputElement | null;
+  const enabled = document.getElementById("vector-db-enabled") as HTMLInputElement | null;
+  if (tls) tls.checked = provider.use_tls;
+  if (enabled) enabled.checked = provider.enabled;
+  renderVectorDatabaseEmbeddingModels(provider.embedding_models);
+  setText("vector-db-save", "VectorDB 수정");
+  syncVectorDatabaseConnectionFields();
+  document.getElementById("vector-db-provider-form")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function handleVectorDatabaseProviderClick(event: MouseEvent): Promise<void> {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-vector-db-action]");
+  const provider = vectorDatabaseProviders.find((item) => item.provider_id === button?.dataset.vectorDbId);
+  if (!button || !provider) return;
+  const action = button.dataset.vectorDbAction;
+  if (action === "edit") return editVectorDatabaseProvider(provider);
+  if (action === "delete" && !window.confirm(`${provider.name} 등록정보를 삭제할까요? VectorDB 데이터 자체는 삭제하지 않습니다.`)) return;
+  button.disabled = true;
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/vector-databases/${encodeURIComponent(provider.provider_id)}${action === "discover" ? "/discover" : ""}`, { method: action === "discover" ? "POST" : "DELETE", headers: { Accept: "application/json" } });
+    if (!response.ok && response.status !== 204) {
+      const body = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new Error(body?.detail || `HTTP ${response.status}`);
+    }
+    if (action === "delete" && editingVectorDatabaseProviderId === provider.provider_id) resetVectorDatabaseForm();
+    await loadVectorDatabaseProviders();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setVectorDatabaseMessage(`VectorDB ${action === "discover" ? "감지" : "삭제"} 실패: ${message}`, false);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function selectEmbeddingModel(
+  providerId?: string,
+  modelName?: string,
+): Promise<void> {
+  if (!providerId || !modelName) {
+    const value = inputValue("embedding-model-catalog");
+    const [encodedProviderId, encodedModelName] = value.split("::", 2);
+    providerId = encodedProviderId;
+    modelName = encodedModelName ? decodeURIComponent(encodedModelName) : undefined;
+  }
+  if (!providerId || !modelName) {
+    setServiceMessage("vector-settings-message", "감지된 Embedding 모델을 먼저 선택해 주세요.", false);
+    return;
+  }
+  const button = document.getElementById("embedding-model-select") as HTMLButtonElement | null;
+  if (button) button.disabled = true;
+  setServiceMessage("vector-settings-message", `${modelName} 연결과 벡터 차원을 검증하고 있습니다.`);
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/embedding-models/probe`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: providerId, model_name: modelName }),
+    });
+    const body = await response.json().catch(() => null) as EmbeddingModelProbeResponse | { detail?: string } | null;
+    if (!response.ok) {
+      throw new Error(body && "detail" in body && body.detail ? body.detail : `HTTP ${response.status}`);
+    }
+    const probe = body as EmbeddingModelProbeResponse;
+    setInputValue("embedding-provider-id", probe.provider_id);
+    setInputValue("embedding-provider", probe.protocol);
+    setInputValue("embedding-deployment", probe.deployment_type === "local" ? "local" : "api");
+    setEmbeddingConnection(probe.base_url);
+    setInputValue("embedding-model", probe.model_name);
+    setInputValue("embedding-model-id", `${probe.provider_id}:${probe.model_name}`);
+    setInputValue("embedding-dimension", probe.dimension);
+    setInputValue("index-version", `${probe.model_name}-${probe.dimension}-v1`);
+    renderEmbeddingModelCatalog();
+    setServiceMessage(
+      "vector-settings-message",
+      `${probe.provider_name} · ${probe.model_name} · ${probe.dimension}D · ${probe.latency_ms}ms 검증 완료. 저장하면 재시작·재인덱싱 대상입니다.`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setServiceMessage("vector-settings-message", `Embedding 모델 검증 실패: ${message}`, false);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function setAIProviderMessage(message: string, ok = true): void {
   const element = document.getElementById("ai-provider-message");
   if (!element) return;
@@ -1004,8 +1449,9 @@ function renderAIProviders(): void {
           </div>
           <span class="shrink-0 font-mono text-[9px] font-bold ${statusClass}">${provider.status.toUpperCase()}</span>
         </div>
-        <p class="mt-1 text-[9px] text-white/35">${provider.protocol.toUpperCase()} · ${provider.deployment_type} · ${auth} · ${provider.model_count} models · ${provider.latency_ms}ms</p>
-        ${provider.models.length ? `<p class="mt-1 break-all font-mono text-[9px] text-white/28">${provider.models.map(escapeHtml).join(", ")}</p>` : ""}
+        <p class="mt-1 text-[9px] text-white/35">${provider.protocol.toUpperCase()} · ${provider.deployment_type} · ${auth} · Chat ${provider.models.length} / Embedding ${provider.embedding_model_count} · ${provider.latency_ms}ms</p>
+        ${provider.models.length ? `<p class="mt-1 break-all font-mono text-[9px] text-white/28"><span class="text-white/45">Chat</span> · ${provider.models.map(escapeHtml).join(", ")}</p>` : ""}
+        ${provider.embedding_models.length ? `<div class="mt-1.5 flex flex-wrap gap-1">${provider.embedding_models.map((model) => `<button type="button" data-provider-action="select-embedding" data-provider-id="${escapeHtml(provider.provider_id)}" data-embedding-model="${escapeHtml(model)}" class="rounded-md border border-mint-300/20 bg-mint-400/5 px-2 py-1 font-mono text-[9px] text-mint-300 hover:bg-mint-400/10">Embedding · ${escapeHtml(model)} 선택</button>`).join("")}</div>` : ""}
         ${provider.error ? `<p class="mt-1 text-[9px] text-danger-300">${escapeHtml(provider.error)}</p>` : ""}
         <div class="mt-2 grid grid-cols-3 gap-1.5">
           <button type="button" data-provider-action="discover" data-provider-id="${escapeHtml(provider.provider_id)}" class="rounded-md border border-white/10 px-2 py-1.5 text-[9px] text-white/55 hover:bg-white/5">자동 감지</button>
@@ -1015,6 +1461,7 @@ function renderAIProviders(): void {
       </div>
     `;
   }).join("") || '<p class="text-[10px] text-white/30">등록된 추가 Provider가 없습니다.</p>';
+  renderEmbeddingModelCatalog();
 }
 
 async function scanKnownOllamaServers(): Promise<void> {
@@ -1035,12 +1482,14 @@ async function scanKnownOllamaServers(): Promise<void> {
     }
     const value = (await response.json()) as OllamaScanResponse;
     target.innerHTML = `
-      <p class="font-semibold text-mint-300">${value.discovered_servers}개 서버 응답 · Chat 모델 ${value.chat_models}개 · 연결 ${value.registered_providers}개</p>
+      <p class="font-semibold text-mint-300">${value.discovered_servers}개 서버 응답 · Chat ${value.chat_models}개 · Embedding ${value.embedding_models}개 · 연결 ${value.registered_providers}개</p>
       <div class="mt-1.5 space-y-1">
         ${value.targets.map((item) => `
-          <p class="${item.status === "offline" ? "text-white/25" : item.models.length ? "text-white/55" : "text-amber-300"}">
+          <p class="${item.status === "offline" ? "text-white/25" : item.models.length || item.embedding_models.length ? "text-white/55" : "text-amber-300"}">
             ${escapeHtml(item.source)} · ${escapeHtml(item.base_url)} ·
-            ${item.models.length ? `Chat: ${item.models.map(escapeHtml).join(", ")}` : item.skipped_non_chat_models.length ? `Chat 불가: ${item.skipped_non_chat_models.map(escapeHtml).join(", ")}` : item.error || item.status}
+            ${item.models.length ? `Chat: ${item.models.map(escapeHtml).join(", ")}` : "Chat 없음"}
+            ${item.embedding_models.length ? ` · Embedding: ${item.embedding_models.map(escapeHtml).join(", ")}` : ""}
+            ${!item.models.length && !item.embedding_models.length ? ` · ${item.error || item.status}` : ""}
           </p>
         `).join("")}
       </div>
@@ -1052,6 +1501,103 @@ async function scanKnownOllamaServers(): Promise<void> {
   } finally {
     button.disabled = false;
     button.textContent = "등록 PC의 Ollama 자동 탐색";
+  }
+}
+
+async function scanConfiguredCloudProviders(): Promise<void> {
+  const button = document.getElementById("cloud-scan-button") as HTMLButtonElement | null;
+  const target = document.getElementById("cloud-scan-result");
+  if (!button || !target) return;
+  button.disabled = true;
+  button.textContent = "Cloud 모델을 탐색하는 중";
+  target.innerHTML = '<p class="text-white/35">암호화된 API Key로 `/models`를 확인합니다.</p>';
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/ai-providers/scan-cloud`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    const body = await response.json().catch(() => null) as CloudProviderScanResponse | { detail?: string } | null;
+    if (!response.ok) {
+      throw new Error(body && "detail" in body && body.detail ? body.detail : `HTTP ${response.status}`);
+    }
+    const value = body as CloudProviderScanResponse;
+    target.innerHTML = `
+      <p class="font-semibold text-sky-300">Cloud ${value.configured_providers}개 확인 · Embedding ${value.embedding_models}개 · Provider ${value.registered_providers}개 연결</p>
+      <div class="mt-1.5 space-y-1">
+        ${value.targets.map((item) => `
+          <div class="rounded-md border border-white/5 bg-white/2 px-2 py-1.5">
+            <p class="${item.status === "online" ? "text-white/55" : item.status === "degraded" ? "text-amber-300" : "text-white/25"}">${escapeHtml(item.name)} · ${escapeHtml(item.base_url)} · ${item.status.toUpperCase()} · ${item.latency_ms}ms</p>
+            ${item.embedding_models.length ? `<p class="mt-0.5 break-all font-mono text-mint-300">Embedding · ${item.embedding_models.map(escapeHtml).join(", ")}</p>` : '<p class="mt-0.5 text-white/25">Embedding 모델 없음</p>'}
+            ${item.error ? `<p class="mt-0.5 text-danger-300">${escapeHtml(item.error)}</p>` : ""}
+          </div>
+        `).join("")}
+      </div>
+    `;
+    await Promise.all([loadAIProviders(), loadModels()]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    target.innerHTML = `<p class="text-danger-300">Cloud 자동 탐색 실패: ${escapeHtml(message)}</p>`;
+  } finally {
+    button.disabled = false;
+    button.textContent = ".env Cloud Key 다시 탐색";
+  }
+}
+
+function setCloudProviderCredentialMessage(message: string, ok = true): void {
+  const element = document.getElementById("cloud-provider-key-message");
+  if (!element) return;
+  element.textContent = message;
+  element.className = `mt-2 text-[10px] ${ok ? "text-sky-300" : "text-danger-300"}`;
+}
+
+function syncCloudProviderCredentialFields(): void {
+  const providerType = inputValue("cloud-provider-type") || "nvidia";
+  const custom = providerType === "custom";
+  const fields = document.getElementById("cloud-provider-custom-fields");
+  fields?.classList.toggle("hidden", !custom);
+  fields?.classList.toggle("grid", custom);
+  const baseUrl = document.getElementById("cloud-provider-base-url") as HTMLInputElement | null;
+  if (baseUrl) baseUrl.required = custom;
+}
+
+async function saveCloudProviderCredential(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  const button = document.getElementById("cloud-provider-key-save") as HTMLButtonElement | null;
+  const keyInput = document.getElementById("cloud-provider-key") as HTMLInputElement | null;
+  if (!button || !keyInput) return;
+  const providerType = inputValue("cloud-provider-type") || "nvidia";
+  button.disabled = true;
+  button.textContent = "API Key와 모델 목록 검증 중";
+  setCloudProviderCredentialMessage("공급자의 /models 응답에서 Chat/Embedding capability를 분류하고 있습니다.");
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/ai-providers/cloud-credentials`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider_type: providerType,
+        name: inputValue("cloud-provider-name") || null,
+        api_key: keyInput.value,
+        base_url: providerType === "custom" ? inputValue("cloud-provider-base-url") : null,
+        auth_type: providerType === "custom" ? inputValue("cloud-provider-auth") : "bearer",
+        enabled: (document.getElementById("cloud-provider-enabled") as HTMLInputElement | null)?.checked ?? true,
+      }),
+    });
+    const body = await response.json().catch(() => null) as AIProviderRecord | { detail?: string } | null;
+    if (!response.ok) {
+      throw new Error(body && "detail" in body && body.detail ? body.detail : `HTTP ${response.status}`);
+    }
+    const provider = body as AIProviderRecord;
+    keyInput.value = "";
+    setCloudProviderCredentialMessage(
+      `${provider.name} 등록 완료 · Chat ${provider.models.length}개 / Embedding ${provider.embedding_models.length}개 감지`,
+    );
+    await Promise.all([loadAIProviders(), loadModels()]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setCloudProviderCredentialMessage(`Cloud API Key 등록 실패: ${message}`, false);
+  } finally {
+    button.disabled = false;
+    button.textContent = "API Key 검증 · 모델 자동 등록";
   }
 }
 
@@ -1183,6 +1729,10 @@ async function handleAIProviderClick(event: Event): Promise<void> {
   if (!button || !providerId || !action) return;
   const provider = aiProviders.find((item) => item.provider_id === providerId);
   if (!provider) return;
+  if (action === "select-embedding") {
+    await selectEmbeddingModel(providerId, button.dataset.embeddingModel);
+    return;
+  }
   if (action === "edit") {
     editAIProvider(provider);
     return;
@@ -1437,6 +1987,22 @@ async function importEmbeddingArtifact(button: HTMLButtonElement): Promise<void>
 
 let frontendClients: FrontendClientRecord[] = [];
 let editingFrontendClientId: string | null = null;
+let frontendClientListSummary: FrontendClientListResponse | null = null;
+
+type FrontendClientField =
+  | "all"
+  | "created_at"
+  | "name"
+  | "client_id"
+  | "endpoint"
+  | "port"
+  | "enabled"
+  | "last_seen_at";
+
+const frontendClientCollator = new Intl.Collator("ko", {
+  numeric: true,
+  sensitivity: "base",
+});
 
 function setFrontendClientMessage(message: string, ok = true): void {
   const element = document.getElementById("frontend-client-message");
@@ -1458,12 +2024,16 @@ function frontendClientRow(client: FrontendClientRecord): string {
         <p class="truncate text-xs font-semibold text-white/78">${escapeHtml(client.name)}</p>
         <p class="mt-1 font-mono text-[9px] text-white/28">${escapeHtml(client.client_id)} · ${registrationLabel}</p>
         ${client.instance_id ? `<p class="mt-1 truncate font-mono text-[9px] text-white/22">${escapeHtml(client.instance_id)}</p>` : ""}
-        <p class="mt-1 text-[9px] text-white/28">최초 연결 ${escapeHtml(formatClientDateTime(client.created_at))}</p>
+        <p class="mt-1 text-[9px] text-white/28">등록 ${escapeHtml(formatClientDateTime(client.created_at))}</p>
       </div>
       <div class="min-w-0">
         <p class="truncate font-mono text-[11px] text-white/55">${escapeHtml(client.ip)}:${client.port}</p>
-        <p class="mt-1 text-[9px]">${endpointState}</p>
-        <p class="mt-1 text-[9px] text-white/28">최근 ${escapeHtml(formatClientDateTime(client.last_seen_at))} · ${escapeHtml(client.last_seen_ip || client.ip)}</p>
+        <p class="mt-1 text-[9px] text-white/28">IP ${escapeHtml(client.ip)} · Port ${client.port}</p>
+      </div>
+      <div class="min-w-0">
+        <p class="text-[9px]">${endpointState}</p>
+        <p class="mt-1 text-[9px] text-white/35">${escapeHtml(formatClientDateTime(client.last_seen_at))}</p>
+        <p class="mt-1 truncate font-mono text-[9px] text-white/22">요청 IP ${escapeHtml(client.last_seen_ip || "-")}</p>
       </div>
       <label class="flex w-fit cursor-pointer items-center gap-2">
         <input class="square-checkbox" type="checkbox" data-client-toggle="${escapeHtml(client.client_id)}" ${client.enabled ? "checked" : ""} aria-label="${escapeHtml(client.name)} Backend 연결 허용" />
@@ -1476,16 +2046,92 @@ function frontendClientRow(client: FrontendClientRecord): string {
     </div>`;
 }
 
+function normalizeFrontendClientSearch(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase("ko-KR").replace(/\s+/g, " ").trim();
+}
+
+function frontendClientFieldText(
+  client: FrontendClientRecord,
+  field: FrontendClientField,
+): string {
+  const values: Record<Exclude<FrontendClientField, "all">, string> = {
+    created_at: `${client.created_at} ${formatClientDateTime(client.created_at)}`,
+    name: client.name,
+    client_id: `${client.client_id} ${client.instance_id || ""}`,
+    endpoint: `${client.ip}:${client.port} ${client.ip} ${client.last_seen_ip || ""}`,
+    port: String(client.port),
+    enabled: client.enabled
+      ? "true t 연결 허용 enabled active"
+      : "false f 연결 차단 disabled inactive",
+    last_seen_at: client.last_seen_at
+      ? `${client.last_seen_at} ${formatClientDateTime(client.last_seen_at)}`
+      : "연결 없음 never",
+  };
+  return field === "all" ? Object.values(values).join(" ") : values[field];
+}
+
+function frontendClientSortValue(
+  client: FrontendClientRecord,
+  field: Exclude<FrontendClientField, "all">,
+): string | number {
+  if (field === "created_at") return Date.parse(client.created_at) || 0;
+  if (field === "last_seen_at") return client.last_seen_at ? Date.parse(client.last_seen_at) || 0 : 0;
+  if (field === "port") return client.port;
+  if (field === "enabled") return Number(client.enabled);
+  if (field === "endpoint") return `${client.ip}:${client.port}`;
+  if (field === "client_id") return client.client_id;
+  return client.name;
+}
+
+function filteredFrontendClients(): FrontendClientRecord[] {
+  const field = (inputValue("frontend-client-search-field") || "all") as FrontendClientField;
+  const query = normalizeFrontendClientSearch(inputValue("frontend-client-search"));
+  const sortKey = (inputValue("frontend-client-sort-key") || "created_at") as Exclude<FrontendClientField, "all">;
+  const direction = inputValue("frontend-client-sort-direction") === "asc" ? 1 : -1;
+  return frontendClients
+    .filter((client) => (
+      !query || normalizeFrontendClientSearch(frontendClientFieldText(client, field)).includes(query)
+    ))
+    .sort((left, right) => {
+      const leftValue = frontendClientSortValue(left, sortKey);
+      const rightValue = frontendClientSortValue(right, sortKey);
+      const comparison = typeof leftValue === "number" && typeof rightValue === "number"
+        ? leftValue - rightValue
+        : frontendClientCollator.compare(String(leftValue), String(rightValue));
+      return comparison !== 0
+        ? comparison * direction
+        : frontendClientCollator.compare(left.client_id, right.client_id);
+    });
+}
+
 function renderFrontendClients(summary?: FrontendClientListResponse): void {
   const list = document.getElementById("frontend-client-list");
   const empty = document.getElementById("frontend-client-empty");
   if (!list || !empty) return;
-  list.innerHTML = frontendClients.map(frontendClientRow).join("");
-  empty.classList.toggle("hidden", frontendClients.length > 0);
+  if (summary) frontendClientListSummary = summary;
+  const filtered = filteredFrontendClients();
+  const activeSummary = frontendClientListSummary;
+  list.innerHTML = filtered.map(frontendClientRow).join("");
+  empty.textContent = frontendClients.length > 0
+    ? "검색 조건과 일치하는 Frontend Client가 없습니다."
+    : "등록된 Frontend Client가 없습니다.";
+  empty.classList.toggle("hidden", filtered.length > 0);
+  setText(
+    "frontend-client-filter-count",
+    `검색 결과 ${filtered.length} / 전체 ${frontendClients.length}`,
+  );
   setText(
     "frontend-client-count",
-    `${summary?.total ?? frontendClients.length} clients · ${summary?.enabled ?? frontendClients.filter((client) => client.enabled).length} active · ${summary?.reachable ?? frontendClients.filter((client) => client.reachable).length} reachable`,
+    `${activeSummary?.total ?? frontendClients.length} clients · ${activeSummary?.enabled ?? frontendClients.filter((client) => client.enabled).length} active · ${activeSummary?.reachable ?? frontendClients.filter((client) => client.reachable).length} reachable`,
   );
+}
+
+function resetFrontendClientFilters(): void {
+  setInputValue("frontend-client-search-field", "all");
+  setInputValue("frontend-client-search", "");
+  setInputValue("frontend-client-sort-key", "created_at");
+  setInputValue("frontend-client-sort-direction", "desc");
+  renderFrontendClients();
 }
 
 async function loadFrontendClients(): Promise<void> {
@@ -1527,6 +2173,7 @@ function editFrontendClient(clientId: string): void {
   setInputValue("frontend-client-port", client.port);
   setText("frontend-client-submit", "변경 저장");
   document.getElementById("frontend-client-cancel-edit")?.classList.remove("hidden");
+  document.getElementById("frontend-client-form")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   document.getElementById("frontend-client-name")?.focus();
   setFrontendClientMessage(`${client.name} 항목을 수정 중입니다.`);
 }
@@ -1704,7 +2351,8 @@ function serviceSettingsPayload(): object | null {
       embedding_provider: (
         document.getElementById("embedding-provider") as HTMLSelectElement | null
       )?.value || loadedServiceSettings.vector.embedding_provider,
-      embedding_base_url: inputValue("embedding-base-url"),
+      embedding_provider_id: inputValue("embedding-provider-id") || null,
+      embedding_base_url: embeddingBaseUrl(),
       embedding_model: inputValue("embedding-model"),
       embedding_model_id: inputValue("embedding-model-id"),
       embedding_dimension: Number(inputValue("embedding-dimension")),
@@ -1726,12 +2374,14 @@ function renderServiceSettings(value: RuntimeServiceSettingsResponse): void {
   setInputValue("vector-collection", value.vector.collection);
   setInputValue("embedding-deployment", value.vector.embedding_deployment);
   setInputValue("embedding-provider", value.vector.embedding_provider);
-  setInputValue("embedding-base-url", value.vector.embedding_base_url);
+  setInputValue("embedding-provider-id", value.vector.embedding_provider_id || "");
+  setEmbeddingConnection(value.vector.embedding_base_url);
   setInputValue("embedding-model", value.vector.embedding_model);
   setInputValue("embedding-model-id", value.vector.embedding_model_id);
   setInputValue("embedding-dimension", value.vector.embedding_dimension);
   setInputValue("embedding-batch-size", value.vector.embedding_batch_size);
   setInputValue("index-version", value.vector.index_version);
+  renderEmbeddingModelCatalog();
   setText(
     "vector-runtime-badge",
     `${value.vector.provider.toUpperCase()} · ${value.vector.embedding_provider.toUpperCase()}/${value.vector.embedding_deployment.toUpperCase()}`,
@@ -1931,6 +2581,10 @@ async function runReembedding(): Promise<void> {
 function initializeAdminControls(): void {
   resetFrontendClientForm();
   resetAIProviderForm();
+  resetVectorDatabaseForm();
+  syncVectorDatabaseConnectionFields();
+  syncEmbeddingConnectionFields();
+  syncCloudProviderCredentialFields();
   document.getElementById("frontend-client-form")
     ?.addEventListener("submit", (event) => void saveFrontendClient(event as SubmitEvent));
   document.getElementById("frontend-client-cancel-edit")
@@ -1942,6 +2596,16 @@ function initializeAdminControls(): void {
     ?.addEventListener("click", (event) => void handleFrontendClientClick(event));
   document.getElementById("frontend-client-list")
     ?.addEventListener("change", (event) => void handleFrontendClientToggle(event));
+  document.getElementById("frontend-client-search")
+    ?.addEventListener("input", () => renderFrontendClients());
+  document.getElementById("frontend-client-search-field")
+    ?.addEventListener("change", () => renderFrontendClients());
+  document.getElementById("frontend-client-sort-key")
+    ?.addEventListener("change", () => renderFrontendClients());
+  document.getElementById("frontend-client-sort-direction")
+    ?.addEventListener("change", () => renderFrontendClients());
+  document.getElementById("frontend-client-filter-reset")
+    ?.addEventListener("click", resetFrontendClientFilters);
   document.getElementById("groq-settings-form")
     ?.addEventListener("submit", (event) => void saveServiceSettings(event as SubmitEvent, "groq"));
   document.getElementById("model-discovery-list")
@@ -1955,6 +2619,12 @@ function initializeAdminControls(): void {
     ?.addEventListener("submit", (event) => void saveAIProvider(event as SubmitEvent));
   document.getElementById("ollama-scan-button")
     ?.addEventListener("click", () => void scanKnownOllamaServers());
+  document.getElementById("cloud-scan-button")
+    ?.addEventListener("click", () => void scanConfiguredCloudProviders());
+  document.getElementById("cloud-provider-key-form")
+    ?.addEventListener("submit", (event) => void saveCloudProviderCredential(event as SubmitEvent));
+  document.getElementById("cloud-provider-type")
+    ?.addEventListener("change", syncCloudProviderCredentialFields);
   document.getElementById("ai-provider-cancel")
     ?.addEventListener("click", () => {
       resetAIProviderForm();
@@ -1966,12 +2636,47 @@ function initializeAdminControls(): void {
     ?.addEventListener("change", syncAIProviderAuthFields);
   document.getElementById("ai-provider-list")
     ?.addEventListener("click", (event) => void handleAIProviderClick(event));
+  document.getElementById("embedding-connection-mode")
+    ?.addEventListener("change", () => {
+      syncEmbeddingConnectionFields();
+      setInputValue("embedding-provider-id", "");
+    });
+  document.getElementById("embedding-model-select")
+    ?.addEventListener("click", () => void selectEmbeddingModel());
+  for (const id of [
+    "embedding-host", "embedding-port", "embedding-base-url",
+    "embedding-provider", "embedding-model",
+  ]) {
+    document.getElementById(id)?.addEventListener("input", () => {
+      setInputValue("embedding-provider-id", "");
+    });
+  }
   document.getElementById("default-model-id")
     ?.addEventListener("change", (event) => {
       updateDefaultModelPresentation((event.currentTarget as HTMLSelectElement).value);
     });
   document.getElementById("vector-settings-form")
     ?.addEventListener("submit", (event) => void saveServiceSettings(event as SubmitEvent, "vector"));
+  document.getElementById("vector-db-provider-form")
+    ?.addEventListener("submit", (event) => void saveVectorDatabaseProvider(event as SubmitEvent));
+  document.getElementById("vector-db-cancel")
+    ?.addEventListener("click", () => {
+      resetVectorDatabaseForm();
+      setVectorDatabaseMessage("입력을 초기화했습니다.");
+    });
+  document.getElementById("vector-db-connection-mode")
+    ?.addEventListener("change", syncVectorDatabaseConnectionFields);
+  document.getElementById("vector-db-provider-list")
+    ?.addEventListener("click", (event) => void handleVectorDatabaseProviderClick(event));
+  document.getElementById("vector-db-models")
+    ?.addEventListener("change", (event) => {
+      const selected = (event.currentTarget as HTMLSelectElement).selectedOptions[0]?.value || "";
+      const providerId = selected.startsWith("provider:") ? selected.slice(9).split(":", 1)[0] : "";
+      const provider = aiProviders.find((item) => item.provider_id === providerId);
+      if (provider && !inputValue("vector-db-model-path")) {
+        setInputValue("vector-db-model-path", provider.base_url);
+      }
+    });
   document.getElementById("reembed-button")
     ?.addEventListener("click", () => void runReembedding());
   document.getElementById("embedding-artifact-refresh")
@@ -2081,6 +2786,7 @@ async function refreshDashboard(): Promise<void> {
         loadFrontendClients(),
         loadModels(),
         loadAIProviders(),
+        loadVectorDatabaseProviders(),
         loadServiceSettings(),
         loadIndexingJobs(),
         loadEmbeddingArtifacts(),

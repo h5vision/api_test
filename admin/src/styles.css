@@ -361,9 +361,10 @@ select {
 .mock-client-table-head,
 .mock-client-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(8rem, 1fr) minmax(7rem, 0.7fr) auto;
+  grid-template-columns: minmax(11rem, 1.25fr) minmax(9rem, 1fr) minmax(9rem, 0.9fr) minmax(7rem, 0.65fr) auto;
   align-items: center;
   gap: 1rem;
+  min-width: 62rem;
 }
 
 .mock-client-table-head {
@@ -438,10 +439,12 @@ select {
   .mock-client-row {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 0.75rem;
+    min-width: 0;
   }
 
   .mock-client-row > :nth-child(2),
-  .mock-client-row > :nth-child(3) {
+  .mock-client-row > :nth-child(3),
+  .mock-client-row > :nth-child(4) {
     grid-column: 1 / -1;
   }
 

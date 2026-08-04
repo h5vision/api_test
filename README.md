@@ -418,6 +418,9 @@ GET /v1/projects/Vision/metadata?scope=project&limit=100
 
 ### VectorDB 검색
 
+`/v1/search`는 Vision 내부 Qdrant를 직접 검색하지 않고 VectorDB 팀의
+`rag_lab POST /search`를 프록시합니다.
+
 ```http
 POST /v1/search
 Content-Type: application/json
@@ -442,17 +445,19 @@ Content-Type: application/json
   "message": "결제 재시도 횟수를 알려줘",
   "session_id": "my-project",
   "model_id": "backendai-default",
-  "top_k": 5,
   "history": [],
   "stream": false
 }
 ```
 
-Frontend는 `project_id`, `message`, `session_id`, `history`를 필수로 전송합니다. 현재 프로젝트 폴더명을 `project_id`와 `session_id`에 넣고, 첫 질문은 `history: []`로 보냅니다. Backend는 이 식별자를 변경하거나 하드코딩하지 않습니다.
+Frontend는 `project_id`, `message`, `session_id`, `history`를 전송합니다. Backend는
+`rag_lab GET /projects`로 프로젝트를 해석하고 `POST /prompt`에서 받은
+`messages`와 `sources` 순서를 변경하지 않은 채 선택된 생성 모델에 전달합니다.
+`has_evidence=false`이면 LLM을 호출하지 않고 `NO_EVIDENCE`를 반환합니다.
 
-`GET /v1/models`가 현재 선택 가능한 공개 모델 목록과 가용 상태를 반환합니다. 기본 모델은 `backendai-default`, Cloud 대안은 `nvidia-default`와 `groq-default`입니다. 응답에는 `schema_version`, `request_id`, `client_request_id`, `created_at`, `requested_model_id`, `used_model_id`, `provider`, `fallback_used`, `answer`, `sources`, `timing`, `metadata`가 포함됩니다. `sources`에는 답변의 `[1]`과 매칭되는 `citation_id`, PostgreSQL 원본 버전, 경로, 줄 번호, 청크 텍스트와 Qdrant 유사도 점수가 들어갑니다. backendAI 장애 시 NVIDIA로 자동 전환하려면 서버에서만 `ALLOW_CLOUD_FALLBACK=true`를 명시해야 하며 기본값은 자동 전환하지 않는 것입니다. Groq는 자동 fallback 대상이 아니며 frontend가 `groq-default`를 명시적으로 선택할 때 사용합니다.
+`GET /v1/models`가 현재 선택 가능한 공개 모델 목록과 가용 상태를 반환합니다. 기본 모델은 `backendai-default`, Cloud 대안은 `nvidia-default`와 `groq-default`입니다. 현재 VS Code Extension 호환 응답의 최상위 필드는 `answer`, `source[]`, `metadata`입니다. 일반 `/v1/chat` 응답의 `metadata`는 빈 객체이며, 진단이 필요한 요청만 `"debug": true`를 보내면 요청 ID, 프로젝트 해석, 검색·모델·처리시간 정보를 받습니다. `source[]`는 `file`, `chunk`, `score`를 제공하며, 코드 근거 표시는 이 필드를 사용합니다. backendAI 장애 시 NVIDIA로 자동 전환하려면 서버에서만 `ALLOW_CLOUD_FALLBACK=true`를 명시해야 하며 기본값은 자동 전환하지 않는 것입니다. Groq는 자동 fallback 대상이 아니며 frontend가 `groq-default`를 명시적으로 선택할 때 사용합니다.
 
-`backendai-default`는 내부적으로 `BACKENDAI_BASE_URL/api/chat`의 Ollama API를 호출하며 현재 실제 모델은 `gemma3:4b`입니다. frontend 호환을 위해 질문 필드는 `message`와 `prompt`를 모두 받을 수 있지만 v1 정식 필드는 `message`입니다. `schema_version`, `top_k`, `stream`은 `null`일 때 v1 기본값을 사용하고, `client_request_id`, `model_id`의 공백 문자열은 `null`로 정규화합니다. `project_id`, `message`, `session_id`, `history`는 `null`을 허용하지 않습니다. 알 수 없는 필드는 `422 VALIDATION_ERROR`로 거절하며 모든 응답은 `X-Request-ID`와 `X-API-Version: 1.0` 헤더를 반환합니다.
+`backendai-default`는 내부적으로 `BACKENDAI_BASE_URL/api/chat`의 Ollama API를 호출하며 실제 모델은 BackendAI 모델 탐색 결과와 관리자 기본값으로 결정됩니다. frontend 호환을 위해 질문 필드는 `message`와 `prompt`를 모두 받을 수 있지만 v1 정식 필드는 `message`입니다. `top_k`와 `reasoning_mode`는 구버전 호환을 위해 받지만 `rag_lab`이 검색과 evidence gate를 소유하므로 Vision은 무시합니다. `debug`는 기본값 `false`이며, `true`일 때만 JSON 응답 및 SSE `meta`/`done`의 상세 metadata를 반환합니다. `stream: false` 또는 생략은 기존 JSON 응답을 반환하고, `stream: true`는 `meta → delta* → done` 순서의 SSE를 반환하며 도중 실패는 `error` 이벤트로 전달합니다. 모든 응답은 `X-Request-ID`와 `X-API-Version: 1.0` 헤더를 반환합니다.
 
 관리자 페이지의 `AI Provider CRUD · 자동 감지`에서는 추가 생성 서버를
 등록할 수 있습니다. LAN Ollama는 IP/Host와 Port만 입력하면 `/api/tags`에서
@@ -467,13 +472,71 @@ Frontend는 `project_id`, `message`, `session_id`, `history`를 필수로 전송
 통해서만 접근합니다. 저장 API Key는 PostgreSQL에 암호화되며 조회 응답에는
 원문 대신 설정 여부와 끝 4자리 힌트만 포함됩니다.
 
+같은 Provider 탐색 결과에서 Chat 모델과 Embedding 모델을 분리 저장합니다.
+Embedding 모델은 관리자 Vector 설정의 드롭다운 또는 Provider 카드에서
+선택할 수 있으며, 저장 전에 Ollama `/api/embed` 또는 OpenAI 호환
+`/embeddings`를 호출해 실제 벡터 차원을 검증합니다. Provider 연결은 Base URL
+뿐 아니라 `IP/Host + Port + HTTPS 여부`로도 추가·조회·수정·삭제할 수 있고,
+선택된 Provider의 암호화된 API Key를 임베딩 요청에도 재사용합니다. 현재 활성
+임베딩 Provider는 다른 Provider를 선택하기 전에는 비활성화하거나 삭제할 수
+없습니다.
+
+### VectorDB Provider Registry (MVP)
+
+관리자 페이지의 `VectorDB Provider 등록 · 자동 감지`에서 VectorDB 이름,
+DB 종류, Host/Port, TLS, 저장 Namespace/Collection, 임베딩 모델 경로와 사용할
+Embedding 모델 목록을 등록합니다. 관리 API는
+`GET/POST /v1/admin/vector-databases`,
+`PUT/DELETE /v1/admin/vector-databases/{provider_id}` 및
+`POST /v1/admin/vector-databases/{provider_id}/discover`입니다. 최초 조회 시 현재
+활성 Qdrant 설정을 Registry에 자동 등록하며, 등록정보를 삭제해도 실제 VectorDB
+데이터는 삭제하지 않습니다.
+
+MVP 감지기는 Qdrant collection API, Weaviate readiness/schema API, Chroma
+heartbeat/collection API, Milvus REST collection API를 구분합니다. pgvector와
+Custom 대상도 등록할 수 있지만 현재는 별도 Adapter가 필요하다는 상태로
+표시합니다. 실제 Vision RAG의 저장·검색 Adapter는 현재 Qdrant만 활성화할 수
+있습니다. 따라서 다른 DB가 `online`으로 감지되어도 `adapter_available=false`이면
+기존 Qdrant 런타임을 자동 교체하지 않습니다. Embedding 모델은 VectorDB가
+발견하는 값이 아니라 AI Provider Registry에서 감지된 모델을 복수 선택해 연결하며,
+모델·차원·Index version이 바뀌면 새 Namespace와 재인덱싱이 필요합니다.
+
+저장 위치 방식은 `원격/별도 VectorDB 서버`와 `API Server Local 경로`로
+구분합니다. 원격 모드는 Host/Port/TLS를 사용하고, 로컬 모드는 컨테이너의
+`/vector-db-local` 아래 상대 경로를 사용합니다. Windows 호스트에서 실제로
+연결되는 루트는 `.env`의 `VECTOR_DB_LOCAL_ROOT`이며 Compose가 읽기·쓰기로
+마운트합니다. 다른 PC로 옮길 때는 이 환경변수만 새 PC 경로로 바꾸면 됩니다.
+경로 이탈(`..`)이나 마운트 루트 밖의 절대경로는 API가 거부합니다. 로컬
+SQLite 파일은 Vision Adapter를 사용할 수 있지만, Qdrant·Chroma 저장 폴더는
+파일을 직접 읽지 않고 해당 서버 프로세스/Adapter를 통해 접근해야 합니다.
+
+`POST /v1/admin/ai-providers/scan-cloud` 또는 관리자 페이지의
+`.env Cloud Key 다시 탐색` 버튼은 `.env`에 설정된 NVIDIA/Groq 키를
+브라우저에 노출하지 않고 각 `/models` 카탈로그를 조회합니다. 임베딩 모델이
+발견된 Cloud Provider만 PostgreSQL Provider CRUD에 등록하고 API Key는 기존
+Fernet master key로 암호화합니다. 카탈로그 노출 여부와 실제 사용 가능 여부는
+다를 수 있으므로, 모델 선택 시 `/embeddings`로 시험 벡터를 생성해 차원을
+확인한 모델만 Vector 설정에 반영할 수 있습니다. NVIDIA의 `input_type` 및
+`truncate` 확장 필드와 표준 OpenAI Embedding 요청을 모두 지원합니다.
+
+관리자 페이지의 `Cloud API Key 등록` 폼 또는
+`POST /v1/admin/ai-providers/cloud-credentials`를 사용하면 서버를 재시작하거나
+`.env`를 수정하지 않고 Cloud Provider를 추가할 수 있습니다. NVIDIA, Groq,
+OpenAI는 공급자만 선택하면 서버가 해당 카탈로그 Base URL을 결정하므로 관리자는
+API Key만 입력하면 됩니다. 키를 저장하기 전에 `/models` 호출이 성공해야 하며,
+응답 모델은 Chat과 Embedding으로 분리해 Provider CRUD에 즉시 등록됩니다. API
+Key는 발급처나 API 주소를 스스로 표현하지 않는 불투명한 문자열이므로 Custom
+OpenAI-compatible Provider는 예외적으로 Base URL과 인증 방식을 함께 입력해야
+합니다. 등록된 Provider는 같은 화면의 기존 CRUD에서 자동 감지·수정·삭제할 수
+있고, 비밀키 원문은 어떤 조회 응답에도 반환하지 않습니다.
+
 `POST /v1/admin/ai-providers/scan-ollama` 또는 관리자 페이지의
 `등록 PC의 Ollama 자동 탐색` 버튼은 FastAPI가 알고 있는 범위만 병렬 탐색합니다.
 Docker API Server의 Windows host(`host.docker.internal`), 현재 설정된 AI Model
 Server, 활성화된 Frontend Client IP의 `11434` 포트가 대상입니다. 전체 LAN을
 무차별 스캔하지 않습니다. 발견된 Ollama 모델 중 `completion` capability가 있는
-모델만 Chat Provider로 등록하며 `bge-m3`, `nomic-embed-text`처럼
-`embedding` 전용인 모델은 Chat 목록에서 제외합니다. 다른 PC의 Ollama는 기본적으로
+모델은 Chat 목록에, `bge-m3`, `nomic-embed-text`처럼 `embedding` capability가
+있는 모델은 Embedding 목록에 등록합니다. 다른 PC의 Ollama는 기본적으로
 `127.0.0.1:11434`에만 bind되므로 해당 PC에서 `OLLAMA_HOST=0.0.0.0:11434`를
 설정하고 Windows 방화벽에서 Backend API Server의 접근을 허용해야 탐색됩니다.
 Ollama Cloud 모델은 해당 PC에서 로그인한 뒤 `*-cloud` 모델을 pull하면 로컬
@@ -499,14 +562,17 @@ Provider CRUD에서 Base URL과 Bearer API Key를 등록합니다.
 | `EMBEDDING_MODEL` | `bge-m3:latest` |
 | `EMBEDDING_DIMENSION` | BGE-M3 벡터 차원 `1024` |
 | `QDRANT_URL`, `QDRANT_COLLECTION` | Qdrant 주소와 버전별 collection |
+| `RAG_LAB_BASE_URL` | VectorDB 팀 rag_lab API 주소. 기본값 `http://192.168.0.12:8200` |
+| `RAG_LAB_TOKEN` | 선택형 `X-VSS-Token` 인증 값 |
+| `RAG_LAB_TIMEOUT_SECONDS` | `/search`, `/prompt` 서버 간 타임아웃. 기본값 60초 |
 | `INDEX_VERSION` | embedding/index 계약 버전 |
 | `UPLOAD_ROOT`, `UPLOAD_PART_SIZE_BYTES` | 업로드 보관 위치와 part 크기 |
 | `POSTGRES_HOST`, `POSTGRES_PORT` | metadata PostgreSQL 접속 주소와 포트 |
 | `POSTGRES_DB`, `POSTGRES_USER` | metadata 데이터베이스와 사용자 |
 | `POSTGRES_PASSWORD` | 로컬 실행용 PostgreSQL 비밀번호 |
 | `POSTGRES_PASSWORD_FILE` | Docker secret 파일 경로. 설정 시 비밀번호 대신 파일을 읽음 |
-| `ALLOW_LOCAL_FALLBACK` | 외부 API 실패 시 로컬 검색 응답 허용 |
-| `CHUNK_SIZE` | 문서 청크 최대 문자 수 |
+| `ALLOW_LOCAL_FALLBACK` | 해시 기반 로컬 임베딩/응답 fallback 허용. 운영 기본값은 `false` |
+| `CHUNK_SIZE` | 문서 청크 최대 문자 수. 지원 언어는 함수·클래스·Markdown 제목 경계를 우선 사용 |
 | `CHUNK_OVERLAP` | 인접 청크 중첩 문자 수 |
 
 ## 검증
@@ -597,9 +663,9 @@ revision을 비교해 `current`, `different`, `not_indexed`, `unavailable`
 `docs/FRONTEND_GIT_AND_INDEXED_PROJECT_SIDEBAR_API_GUIDE_KO.md`에 정리되어
 있습니다. `file`은 활성 snapshot에 PostgreSQL 원문이 있는 텍스트 파일만
 반환합니다.
-`index-validation`은 활성 Generation의 PostgreSQL 청크 매핑 수와 Qdrant point
-수를 비교합니다. `/v1/search`와 `/v1/chat`은 Active Generation ID를 Qdrant
-filter에 자동으로 추가하므로 빌드 중 세대나 폐기 세대가 검색에 섞이지 않습니다.
+`index-validation`은 기존 Vision 로컬 Generation 진단 API로 유지됩니다.
+현재 `/v1/IngestResponse`, `/v1/search`, `/v1/chat`의 프로젝트 목록·검색·프롬프트는
+외부 `rag_lab` 계약을 기준으로 동작합니다.
 
 ## Docker Compose 인프라
 

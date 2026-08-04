@@ -46,12 +46,10 @@ type ChatResponse = {
       total_ms?: number;
     };
     retrieval?: {
-      requested_reasoning_mode?: "auto" | "fast" | "balanced" | "deep";
-      reasoning_mode?: "fast" | "balanced" | "deep";
-      step_count?: number;
-      max_steps?: number;
-      stop_reason?: string;
-      context_grounded?: boolean;
+      policy?: string;
+      prompt_owner?: string;
+      reason?: string;
+      has_evidence?: boolean;
       degraded?: boolean;
     };
   };
@@ -103,13 +101,7 @@ export function playgroundMarkup(): string {
                 <p id="playground-chat-scope" class="mt-1 truncate pl-9 font-mono text-[9px] text-white/30">프로젝트를 선택하세요</p>
               </div>
               <div class="flex flex-wrap items-center gap-2">
-                <label class="sr-only" for="playground-reasoning">Agentic 모드</label>
-                <select id="playground-reasoning" class="playground-control py-2 text-[11px]" title="Agentic RAG 검색 예산">
-                  <option value="auto" selected>Auto · 질문별 자동</option>
-                  <option value="fast">Fast · 1단계</option>
-                  <option value="balanced">Balanced · 최대 2단계</option>
-                  <option value="deep">Deep · 최대 3단계</option>
-                </select>
+                <span class="rounded-lg border border-mint-300/15 bg-mint-400/5 px-3 py-2 text-[10px] text-mint-300">rag_lab Prompt</span>
                 <label class="sr-only" for="playground-model">모델</label>
                 <select id="playground-model" class="playground-control min-w-48 max-w-full py-2 text-[11px]" disabled><option>모델 목록 불러오는 중</option></select>
                 <button id="playground-new-chat" type="button" class="inline-flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-2 text-[10px] font-semibold text-white/55 transition hover:border-white/20 hover:bg-white/5"><svg viewBox="0 0 24 24" class="size-3.5" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>새 대화</button>
@@ -181,7 +173,6 @@ function errorMessage(data: unknown, fallback: string): string {
 
 export function startPlayground(apiBaseUrl: string): void {
   const form = requiredElement<HTMLFormElement>("playground-form");
-  const reasoningSelect = requiredElement<HTMLSelectElement>("playground-reasoning");
   const modelSelect = requiredElement<HTMLSelectElement>("playground-model");
   const modelDetail = requiredElement<HTMLDivElement>("playground-model-detail");
   const projectInput = requiredElement<HTMLInputElement>("playground-project");
@@ -214,10 +205,6 @@ export function startPlayground(apiBaseUrl: string): void {
   const maxAttachmentFiles = 20;
   const createSessionId = () => `playground-${crypto.randomUUID()}`;
   sessionInput.value = createSessionId();
-  const storedReasoningMode = localStorage.getItem("vision-playground-reasoning-mode");
-  if (storedReasoningMode && ["auto", "fast", "balanced", "deep"].includes(storedReasoningMode)) {
-    reasoningSelect.value = storedReasoningMode;
-  }
   const providerLabel = (provider: string): string => ({
     backendai: "OLLAMA",
     nvidia: "NVIDIA",
@@ -581,13 +568,10 @@ export function startPlayground(apiBaseUrl: string): void {
     footer.className = "mt-3 flex flex-wrap items-center gap-3 text-[9px] text-white/25";
     const meta = document.createElement("span");
     meta.className = "font-mono";
-    const selectedMode = retrieval?.requested_reasoning_mode === "auto"
-      ? `auto→${retrieval.reasoning_mode}`
-      : retrieval?.reasoning_mode;
-    const agentic = selectedMode
-      ? ` · ${selectedMode} ${retrieval?.step_count ?? "-"}/${retrieval?.max_steps ?? "-"}${retrieval?.context_grounded ? " · context" : ""}${retrieval?.degraded ? " · degraded" : ""}`
+    const retrievalLabel = retrieval?.prompt_owner
+      ? ` · ${retrieval.prompt_owner}${retrieval.reason ? `/${retrieval.reason}` : ""}`
       : "";
-    meta.textContent = `${providerLabel(provider)} · ${model}${agentic} · server ${serverMs ?? "-"}ms · total ${elapsed}ms`;
+    meta.textContent = `${providerLabel(provider)} · ${model}${retrievalLabel} · server ${serverMs ?? "-"}ms · total ${elapsed}ms`;
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "transition hover:text-white/60";
@@ -626,7 +610,6 @@ export function startPlayground(apiBaseUrl: string): void {
       session_id: sessionInput.value.trim(),
       model_id: modelSelect.value,
       message: question,
-      reasoning_mode: reasoningSelect.value as "auto" | "fast" | "balanced" | "deep",
       history: history.slice(-20),
       context: attachmentContext,
       stream: false,
@@ -649,7 +632,6 @@ export function startPlayground(apiBaseUrl: string): void {
     submitButton.disabled = true;
     attachButton.disabled = true;
     modelSelect.disabled = true;
-    reasoningSelect.disabled = true;
     errorBox.classList.add("hidden");
     setRequestStatus("RAG 검색 중", "busy");
     appendUserMessage(question, selectedAttachments);
@@ -694,15 +676,11 @@ export function startPlayground(apiBaseUrl: string): void {
       submitButton.disabled = false;
       attachButton.disabled = false;
       modelSelect.disabled = false;
-      reasoningSelect.disabled = false;
       promptInput.focus();
     }
   };
 
   modelSelect.addEventListener("change", updateModelDetail);
-  reasoningSelect.addEventListener("change", () => {
-    localStorage.setItem("vision-playground-reasoning-mode", reasoningSelect.value);
-  });
   projectList.addEventListener("click", (event) => {
     const target = event.target instanceof Element
       ? event.target.closest<HTMLButtonElement>("button[data-project-id]")

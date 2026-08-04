@@ -8,6 +8,23 @@ from backend.schemas import ChatRequest
 
 
 class VSCodeChatCompatibilityTests(unittest.TestCase):
+    def test_stream_true_is_accepted_for_sse_clients(self) -> None:
+        payload = ChatRequest(
+            project_id="h5vision/fest-api",
+            message="stream this",
+            session_id="session-stream",
+            stream=True,
+        )
+
+        self.assertTrue(payload.stream)
+
+    def test_debug_metadata_is_opt_in(self) -> None:
+        normal = ChatRequest(message="일반 요청")
+        diagnostic = ChatRequest(message="진단 요청", debug=True)
+
+        self.assertFalse(normal.debug)
+        self.assertTrue(diagnostic.debug)
+
     def test_frozen_chat_payload_is_preserved(self) -> None:
         payload = ChatRequest.model_validate(
             {
