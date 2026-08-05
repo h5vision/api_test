@@ -336,10 +336,10 @@ class ChatRequest(BaseModel):
                     "content": "prepare_release.py 코드를 설명해줘",
                 },
                 {
-                    "project_id": "h5vision/fest-api",
-                    "message": "이 프로젝트의 실행 구조를 설명해줘",
+                    "project_id": "fest-api",
+                    "message": "현재 선택된 프로젝트의 실행 구조를 설명해줘",
                     "session_id": "9efda536-b502-49e4-926d-53343a428df0",
-                    "reasoning_mode": "balanced",
+                    "reasoning_mode": "auto",
                     "debug": False,
                     "history": [],
                     "context": (
@@ -696,7 +696,7 @@ class ChatResponse(BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "answer": "프로젝트 실행 구조는 다음과 같습니다. [1]",
+                    "answer": "프로젝트 실행 구조는 다음과 같습니다.",
                     "source": [
                         {
                             "file": "backend/app.py",
