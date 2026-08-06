@@ -149,10 +149,8 @@ class PostgresGithubSnapshotRepository:
         tenant_id: str,
         *,
         limit: int = 100,
-        offset: int = 0,
     ) -> list[dict[str, Any]]:
         bounded_limit = max(1, min(limit, 500))
-        bounded_offset = max(0, offset)
         try:
             with self._connect() as connection:
                 rows = connection.execute(
@@ -164,68 +162,14 @@ class PostgresGithubSnapshotRepository:
                       AND visibility = 'public'
                     ORDER BY created_at DESC
                     LIMIT %(limit)s
-                    OFFSET %(offset)s
                     """,
-                    {
-                        "tenant_id": tenant_id,
-                        "limit": bounded_limit,
-                        "offset": bounded_offset,
-                    },
+                    {"tenant_id": tenant_id, "limit": bounded_limit},
                 ).fetchall()
         except psycopg.Error as exc:
             raise SnapshotRepositoryError(
                 f"Failed to list GitHub repositories: {exc}"
             ) from exc
         return list(rows)
-
-
-    def admin_status(self, tenant_id: str) -> dict[str, int]:
-        try:
-            with self._connect() as connection:
-                table_row = connection.execute(
-                    """
-                    SELECT
-                        (CASE WHEN to_regclass('public.snapshot_mvp_repositories') IS NOT NULL THEN 1 ELSE 0 END
-                       + CASE WHEN to_regclass('public.snapshot_mvp_snapshots') IS NOT NULL THEN 1 ELSE 0 END
-                       + CASE WHEN to_regclass('public.snapshot_mvp_locators') IS NOT NULL THEN 1 ELSE 0 END)
-                        AS table_count
-                    """
-                ).fetchone()
-                table_count = int((table_row or {}).get("table_count") or 0)
-                if table_count != 3:
-                    return {
-                        "table_count": table_count,
-                        "repositories": 0,
-                        "snapshots": 0,
-                        "locators": 0,
-                    }
-                count_row = connection.execute(
-                    """
-                    SELECT
-                        (SELECT COUNT(*) FROM snapshot_mvp_repositories
-                         WHERE tenant_id = %(tenant_id)s
-                           AND provider = 'github'
-                           AND visibility = 'public') AS repositories,
-                        (SELECT COUNT(*) FROM snapshot_mvp_snapshots
-                         WHERE tenant_id = %(tenant_id)s
-                           AND snapshot_type = 'commit') AS snapshots,
-                        (SELECT COUNT(*) FROM snapshot_mvp_locators
-                         WHERE tenant_id = %(tenant_id)s
-                           AND provider = 'github'
-                           AND access_mode = 'backend-proxy') AS locators
-                    """,
-                    {"tenant_id": tenant_id},
-                ).fetchone()
-        except psycopg.Error as exc:
-            raise SnapshotRepositoryError(
-                f"Failed to inspect Snapshot storage: {exc}"
-            ) from exc
-        return {
-            "table_count": table_count,
-            "repositories": int((count_row or {}).get("repositories") or 0),
-            "snapshots": int((count_row or {}).get("snapshots") or 0),
-            "locators": int((count_row or {}).get("locators") or 0),
-        }
 
 
     def register_verified_snapshot(
@@ -473,10 +417,8 @@ class PostgresGithubSnapshotRepository:
         tenant_id: str,
         *,
         limit: int = 100,
-        offset: int = 0,
     ) -> list[dict[str, Any]]:
         bounded_limit = max(1, min(limit, 500))
-        bounded_offset = max(0, offset)
         try:
             with self._connect() as connection:
                 rows = connection.execute(
@@ -487,13 +429,8 @@ class PostgresGithubSnapshotRepository:
                       AND snapshot_type = 'commit'
                     ORDER BY created_at DESC
                     LIMIT %(limit)s
-                    OFFSET %(offset)s
                     """,
-                    {
-                        "tenant_id": tenant_id,
-                        "limit": bounded_limit,
-                        "offset": bounded_offset,
-                    },
+                    {"tenant_id": tenant_id, "limit": bounded_limit},
                 ).fetchall()
         except psycopg.Error as exc:
             raise SnapshotRepositoryError(

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 
 import logging
@@ -167,10 +167,12 @@ class GithubSnapshotService:
         )
 
 
-    def _register_public_repository(
-        self,
-        repository_full_name: str,
-    ) -> RepositoryRecord:
+    def register_repository(self, repository_full_name: str) -> RepositoryRecord:
+        if repository_full_name.casefold() not in self._runtime.allowed_repositories:
+            raise GithubSnapshotServiceError(
+                "The repository is not in SNAPSHOT_ALLOWED_REPOSITORIES",
+                status_code=403,
+            )
         info = self._github.get_repository(repository_full_name)
         if info.private:
             raise GithubSnapshotServiceError(
@@ -199,30 +201,6 @@ class GithubSnapshotService:
         return self._repository_record(row)
 
 
-
-
-    def register_repository(self, repository_full_name: str) -> RepositoryRecord:
-        if repository_full_name.casefold() not in self._runtime.allowed_repositories:
-            raise GithubSnapshotServiceError(
-                "The repository is not in SNAPSHOT_ALLOWED_REPOSITORIES",
-                status_code=403,
-            )
-        return self._register_public_repository(repository_full_name)
-
-
-
-
-    def import_public_repository_snapshot(
-        self,
-        repository_full_name: str,
-        ref: str | None = None,
-    ) -> tuple[RepositoryRecord, SnapshotRegistrationResponse, str]:
-        repository = self._register_public_repository(repository_full_name)
-        resolved_ref = (ref or "").strip() or repository.default_branch
-        registration = self.create_snapshot(repository.repository_id, resolved_ref)
-        return repository, registration, resolved_ref
-
-
     def get_repository(self, repository_id: str) -> RepositoryRecord:
         try:
             row = self._repository.get_repository(self.tenant_id, repository_id)
@@ -237,18 +215,9 @@ class GithubSnapshotService:
         return self._repository_record(row)
 
 
-    def list_repositories(
-        self,
-        *,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[RepositoryRecord]:
+    def list_repositories(self, *, limit: int = 100) -> list[RepositoryRecord]:
         try:
-            rows = self._repository.list_repositories(
-                self.tenant_id,
-                limit=limit,
-                offset=offset,
-            )
+            rows = self._repository.list_repositories(self.tenant_id, limit=limit)
         except SnapshotRepositoryError as exc:
             logger.exception("GitHub Snapshot repository listing failed")
             raise GithubSnapshotServiceError(
@@ -258,17 +227,11 @@ class GithubSnapshotService:
         return [self._repository_record(row) for row in rows]
 
 
-    def list_snapshots_for_tenant(
-        self,
-        *,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[SnapshotRecord]:
+    def list_snapshots_for_tenant(self, *, limit: int = 100) -> list[SnapshotRecord]:
         try:
             rows = self._repository.list_snapshots_for_tenant(
                 self.tenant_id,
                 limit=limit,
-                offset=offset,
             )
         except SnapshotRepositoryError as exc:
             logger.exception("GitHub Snapshot tenant listing failed")
@@ -277,17 +240,6 @@ class GithubSnapshotService:
                 status_code=503,
             ) from exc
         return [self._snapshot_record(row) for row in rows]
-
-
-    def admin_status(self) -> dict[str, int]:
-        try:
-            return self._repository.admin_status(self.tenant_id)
-        except SnapshotRepositoryError as exc:
-            logger.exception("GitHub Snapshot admin status failed")
-            raise GithubSnapshotServiceError(
-                "Snapshot storage is unavailable",
-                status_code=503,
-            ) from exc
 
 
     def create_snapshot(
@@ -357,19 +309,6 @@ class GithubSnapshotService:
         if row is None:
             raise GithubSnapshotServiceError("Snapshot was not found", status_code=404)
         return self._snapshot_record(row)
-
-
-    def get_locator(self, snapshot_id: str) -> LocatorRecord | None:
-        self.get_snapshot(snapshot_id)
-        try:
-            row = self._repository.get_github_locator(self.tenant_id, snapshot_id)
-        except SnapshotRepositoryError as exc:
-            logger.exception("GitHub Snapshot locator lookup failed")
-            raise GithubSnapshotServiceError(
-                "Snapshot storage is unavailable",
-                status_code=503,
-            ) from exc
-        return self._locator_record(row)
 
 
     def list_snapshots(

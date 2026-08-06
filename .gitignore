@@ -17,3 +17,4 @@ deploy/traefik/certs/*.key
 .
 docs
 .gitignore
+.txt

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 
 import logging
@@ -167,10 +167,12 @@ class GithubSnapshotService:
         )
 
 
-    def _register_public_repository(
-        self,
-        repository_full_name: str,
-    ) -> RepositoryRecord:
+    def register_repository(self, repository_full_name: str) -> RepositoryRecord:
+        if repository_full_name.casefold() not in self._runtime.allowed_repositories:
+            raise GithubSnapshotServiceError(
+                "The repository is not in SNAPSHOT_ALLOWED_REPOSITORIES",
+                status_code=403,
+            )
         info = self._github.get_repository(repository_full_name)
         if info.private:
             raise GithubSnapshotServiceError(
@@ -197,30 +199,6 @@ class GithubSnapshotService:
                 status_code=503,
             ) from exc
         return self._repository_record(row)
-
-
-
-
-    def register_repository(self, repository_full_name: str) -> RepositoryRecord:
-        if repository_full_name.casefold() not in self._runtime.allowed_repositories:
-            raise GithubSnapshotServiceError(
-                "The repository is not in SNAPSHOT_ALLOWED_REPOSITORIES",
-                status_code=403,
-            )
-        return self._register_public_repository(repository_full_name)
-
-
-
-
-    def import_public_repository_snapshot(
-        self,
-        repository_full_name: str,
-        ref: str | None = None,
-    ) -> tuple[RepositoryRecord, SnapshotRegistrationResponse, str]:
-        repository = self._register_public_repository(repository_full_name)
-        resolved_ref = (ref or "").strip() or repository.default_branch
-        registration = self.create_snapshot(repository.repository_id, resolved_ref)
-        return repository, registration, resolved_ref
 
 
     def get_repository(self, repository_id: str) -> RepositoryRecord:

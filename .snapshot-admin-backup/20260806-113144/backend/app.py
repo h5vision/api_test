@@ -55,7 +55,7 @@ from .project_resolution import resolve_project_id
 from .rag_lab import RagLabClient, RagLabError
 from .repository_indexer import RepositoryIndexer
 from .repository_store import PostgresRepositoryStore, RepositoryStoreError
-from .admin_snapshots import create_admin_snapshot_router
+from .snapshots.service import GithubSnapshotService, GithubSnapshotServiceError
 from .schemas import (
     ChatRequest,
     ChatResponse,
@@ -1867,7 +1867,101 @@ def ai_communication_probe(
     )
 
 
-app.include_router(create_admin_snapshot_router(settings, _require_admin_proxy))
+@app.get(
+    "/v1/admin/snapshots",
+    response_model=dict[str, Any],
+    tags=["System"],
+    include_in_schema=False,
+)
+def list_snapshot_admin_data(request: Request) -> dict[str, Any]:
+    _require_admin_proxy(request)
+    try:
+        service = GithubSnapshotService(settings)
+        repositories = service.list_repositories(limit=50)
+        snapshots = service.list_snapshots_for_tenant(limit=100)
+    except GithubSnapshotServiceError as exc:
+        return {
+            "repositories": [],
+            "snapshots": [],
+            "total_repositories": 0,
+            "total_snapshots": 0,
+            "error": str(exc),
+        }
+
+    repository_index: dict[str, dict[str, Any]] = {
+        repository.repository_id: {
+            "repository_id": repository.repository_id,
+            "provider": repository.provider,
+            "provider_repository_id": repository.provider_repository_id,
+            "repository_full_name": repository.repository_full_name,
+            "repository_url": repository.repository_url,
+            "default_branch": repository.default_branch,
+            "visibility": repository.visibility,
+            "created_at": repository.created_at,
+            "updated_at": repository.updated_at,
+            "snapshot_count": 0,
+            "snapshots": [],
+        }
+        for repository in repositories
+    }
+
+    for snapshot in snapshots:
+        entry = repository_index.setdefault(
+            snapshot.repository_id,
+            {
+                "repository_id": snapshot.repository_id,
+                "provider": "github",
+                "provider_repository_id": None,
+                "repository_full_name": snapshot.repository_id,
+                "repository_url": None,
+                "default_branch": None,
+                "visibility": "public",
+                "created_at": None,
+                "updated_at": None,
+                "snapshot_count": 0,
+                "snapshots": [],
+            },
+        )
+        entry["snapshot_count"] += 1
+        entry["snapshots"].append(
+            {
+                "snapshot_id": snapshot.snapshot_id,
+                "repository_id": snapshot.repository_id,
+                "snapshot_type": snapshot.snapshot_type,
+                "commit_sha": snapshot.commit_sha,
+                "tree_sha": snapshot.tree_sha,
+                "fingerprint": snapshot.fingerprint,
+                "verified_by": snapshot.verified_by,
+                "verified_at": snapshot.verified_at,
+                "created_at": snapshot.created_at,
+            }
+        )
+
+    repositories_payload = list(repository_index.values())
+    repositories_payload.sort(
+        key=lambda item: item.get("updated_at") or item.get("created_at") or "",
+        reverse=True,
+    )
+    return {
+        "repositories": repositories_payload,
+        "snapshots": [
+            {
+                "snapshot_id": snapshot.snapshot_id,
+                "repository_id": snapshot.repository_id,
+                "snapshot_type": snapshot.snapshot_type,
+                "commit_sha": snapshot.commit_sha,
+                "tree_sha": snapshot.tree_sha,
+                "fingerprint": snapshot.fingerprint,
+                "verified_by": snapshot.verified_by,
+                "verified_at": snapshot.verified_at,
+                "created_at": snapshot.created_at,
+            }
+            for snapshot in snapshots
+        ],
+        "total_repositories": len(repositories_payload),
+        "total_snapshots": len(snapshots),
+        "error": None,
+    }
 
 
 @app.get(
