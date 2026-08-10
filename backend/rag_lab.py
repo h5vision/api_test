@@ -29,6 +29,18 @@ class RagLabSearchResult:
 @dataclass(frozen=True)
 class RagLabPromptResult(RagLabSearchResult):
     messages: list[dict[str, str]]
+    provenance: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RagLabProjectBinding:
+    requested_project_id: str
+    external_project_id: str
+    binding_strength: str
+    verification_state: str
+    revision: str | None
+    indexed_at: str | None
+    fingerprint: dict[str, Any]
 
 
 class RagLabClient:
@@ -62,6 +74,8 @@ class RagLabClient:
         *,
         timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
+        if not self.base_url:
+            raise RagLabError("rag_lab base URL is not configured", 503)
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json; charset=utf-8",
@@ -136,6 +150,108 @@ class RagLabClient:
         query = urllib.parse.urlencode({"project_id": project_id})
         return self._request("GET", f"/index/exists?{query}", timeout_seconds=10)
 
+    def briefing(self, project_id: str) -> dict[str, Any]:
+        query = urllib.parse.urlencode({"project_id": project_id})
+        value = self._request("GET", f"/briefing?{query}", timeout_seconds=15)
+        if str(value.get("project_id") or "").strip() != project_id.strip():
+            raise RagLabError("rag_lab /briefing returned a mismatched project_id", 502)
+        if not isinstance(value.get("briefing"), str) or not value["briefing"].strip():
+            raise RagLabError("rag_lab /briefing response has no briefing text", 502)
+        for key in ("references", "reference_files", "mentioned_files"):
+            if value.get(key) is not None and not isinstance(value[key], list):
+                raise RagLabError(f"rag_lab /briefing response has invalid {key}", 502)
+        if value.get("structure") is not None and not isinstance(value["structure"], dict):
+            raise RagLabError("rag_lab /briefing response has invalid structure", 502)
+        return value
+
+    def resolve_project(
+        self,
+        project_id: str,
+        *,
+        revision: str | None = None,
+    ) -> RagLabProjectBinding:
+        """Map Vision identity to an external project without guessing ambiguously."""
+
+        requested = project_id.strip()
+        requested_leaf = requested.rsplit("/", 1)[-1].casefold()
+        normalized_revision = (revision or "").strip().casefold()
+        ready = [
+            item
+            for item in self.projects()
+            if str(item.get("state") or "done").casefold() == "done"
+            and str(item.get("project_id") or "").strip()
+        ]
+        revision_matches = [
+            item
+            for item in ready
+            if normalized_revision
+            and str(item.get("commit") or "").strip().casefold()
+            == normalized_revision
+        ]
+        exact_matches = [
+            item
+            for item in ready
+            if str(item.get("project_id") or "").strip().casefold()
+            == requested.casefold()
+        ]
+        leaf_matches = [
+            item
+            for item in ready
+            if str(item.get("project_id") or "").strip().casefold()
+            == requested_leaf
+        ]
+
+        selected: dict[str, Any] | None = None
+        strength = "project_only"
+        verification = "unverified"
+        if len(revision_matches) == 1:
+            selected = revision_matches[0]
+        elif len(exact_matches) == 1:
+            selected = exact_matches[0]
+        elif len(leaf_matches) == 1:
+            selected = leaf_matches[0]
+        if selected is not None and normalized_revision:
+            external_revision = str(selected.get("commit") or "").strip().casefold()
+            if external_revision == normalized_revision:
+                strength = "revision_matched"
+                verification = "compatible"
+            elif exact_matches or leaf_matches:
+                raise RagLabError(
+                    "external VectorDB project revision does not match the active Snapshot",
+                    409,
+                )
+        if selected is None:
+            if len(revision_matches) > 1:
+                raise RagLabError(
+                    "external VectorDB project mapping is ambiguous for the Snapshot revision",
+                    409,
+                )
+            raise RagLabError(
+                f"external VectorDB has no compatible project for {requested}",
+                409,
+            )
+        return RagLabProjectBinding(
+            requested_project_id=requested,
+            external_project_id=str(selected["project_id"]).strip(),
+            binding_strength=strength,
+            verification_state=verification,
+            revision=(
+                str(selected["commit"]).strip()
+                if selected.get("commit")
+                else None
+            ),
+            indexed_at=(
+                str(selected["indexed_at"]).strip()
+                if selected.get("indexed_at")
+                else None
+            ),
+            fingerprint=(
+                dict(selected["fingerprint"])
+                if isinstance(selected.get("fingerprint"), dict)
+                else {}
+            ),
+        )
+
     def search(
         self,
         project_id: str,
@@ -184,6 +300,19 @@ class RagLabClient:
             threshold=base.threshold,
             reason=base.reason,
             messages=messages,
+            provenance={
+                key: value.get(key)
+                for key in (
+                    "project_id",
+                    "snapshot_id",
+                    "index_id",
+                    "index_version",
+                    "commit",
+                    "timing",
+                    "stage",
+                )
+                if value.get(key) is not None
+            },
         )
 
     def _search_result(
@@ -225,6 +354,8 @@ class RagLabClient:
         document_id = str(item.get("document_id") or f"ragdoc_{digest[:24]}")
         chunk_id = str(item.get("chunk_id") or f"ragchunk_{digest[:32]}")
         metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
+        if item.get("_id") is not None:
+            metadata["external_source_id"] = str(item["_id"])
         for key in ("type", "section"):
             if item.get(key) is not None:
                 metadata[key] = item[key]

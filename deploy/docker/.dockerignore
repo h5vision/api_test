@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+node_modules
+admin/node_modules
+admin/dist
+data
+projects
+embedding-results
+.env
+*.sqlite3
+*.log

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import math
-import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -25,6 +22,7 @@ def _post_json(
     api_key: str,
     timeout: int,
     auth_type: str = "bearer",
+    extra_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     headers = {
         "Content-Type": "application/json",
@@ -35,6 +33,8 @@ def _post_json(
         headers["X-API-Key"] = api_key
     elif api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    if extra_headers:
+        headers.update(extra_headers)
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -71,7 +71,7 @@ class EmbeddingService:
         self._provider_resolver = provider_resolver
 
     def _provider_connection(self) -> tuple[str, str, str, str]:
-        provider_id = self.settings.embedding_provider_id
+        provider_id = str(getattr(self.settings, "embedding_provider_id", "") or "")
         if not provider_id:
             return (
                 self.settings.embedding_provider,
@@ -86,7 +86,9 @@ class EmbeddingService:
         except Exception as exc:
             raise ServiceError("Embedding Provider 설정 조회에 실패했습니다.", 503) from exc
         if provider is None or not getattr(provider, "enabled", False):
-            raise ServiceError("선택된 Embedding Provider가 없거나 비활성화되어 있습니다.", 503)
+            raise ServiceError(
+                "선택된 Embedding Provider가 없거나 비활성화되어 있습니다.", 503
+            )
         return (
             str(provider.protocol),
             str(provider.base_url).rstrip("/"),
@@ -100,79 +102,62 @@ class EmbeddingService:
     def embed_many(self, texts: list[str], input_type: str) -> list[EmbeddingResult]:
         if not texts or any(not text.strip() for text in texts):
             raise ServiceError("임베딩할 텍스트가 비어 있습니다.", status_code=400)
-        protocol, base_url, api_key, auth_type = self._provider_connection()
-        if protocol == "ollama":
+        provider, base_url, api_key, auth_type = self._provider_connection()
+        provider = provider.strip().lower()
+        if provider == "ollama":
             return self._ollama_embeddings(
                 texts,
                 base_url=base_url,
                 api_key=api_key,
                 auth_type=auth_type,
             )
-        if protocol == "local":
-            return [self._local_embedding(text) for text in texts]
+        if provider not in {"openai", "nvidia"}:
+            raise ServiceError(
+                f"지원하지 않는 embedding provider입니다: {provider}",
+                status_code=422,
+            )
         if not api_key:
-            if self.settings.allow_local_fallback:
-                return [self._local_embedding(text) for text in texts]
-            raise ServiceError("EMBEDDING_API_KEY 또는 NVIDIA_API_KEY가 필요합니다.", 503)
+            raise ServiceError(
+                "선택한 embedding provider의 API key가 구성되어 있지 않습니다.",
+                503,
+            )
 
-        try:
-            payload = {
-                "input": texts,
-                "model": self.settings.embedding_model,
-                "input_type": input_type,
-                "encoding_format": "float",
-                "truncate": "END",
-            }
-            try:
-                data = _post_json(
-                    f"{base_url}/embeddings",
-                    payload,
-                    api_key,
-                    self.settings.request_timeout_seconds,
-                    auth_type,
+        payload = {
+            "input": texts,
+            "model": self.settings.embedding_model,
+            "input_type": input_type,
+            "encoding_format": "float",
+            "truncate": "END",
+        }
+        data = _post_json(
+            f"{base_url}/embeddings",
+            payload,
+            api_key,
+            self.settings.request_timeout_seconds,
+            auth_type,
+        )
+        rows = data.get("data")
+        if not isinstance(rows, list) or len(rows) != len(texts):
+            raise ServiceError("임베딩 API 응답 개수가 요청과 일치하지 않습니다.")
+        results: list[EmbeddingResult] = []
+        for row in rows:
+            embedding = row.get("embedding") if isinstance(row, dict) else None
+            if not isinstance(embedding, list) or not embedding:
+                raise ServiceError("임베딩 API 응답에 벡터가 없습니다.")
+            vector = [float(value) for value in embedding]
+            if len(vector) != self.settings.embedding_dimension:
+                raise ServiceError(
+                    "Embedding 차원이 관리자 설정과 일치하지 않습니다: "
+                    f"expected={self.settings.embedding_dimension}, actual={len(vector)}"
                 )
-            except ServiceError as exc:
-                if "HTTP 400" not in str(exc) and "HTTP 422" not in str(exc):
-                    raise
-                # Generic OpenAI-compatible providers can reject NVIDIA's
-                # input_type/truncate extensions. Retry with the standard body.
-                data = _post_json(
-                    f"{base_url}/embeddings",
-                    {
-                        "input": texts,
-                        "model": self.settings.embedding_model,
-                        "encoding_format": "float",
-                    },
-                    api_key,
-                    self.settings.request_timeout_seconds,
-                    auth_type,
+            results.append(
+                EmbeddingResult(
+                    vector=vector,
+                    provider=provider,
+                    model=self.settings.embedding_model,
                 )
-            rows = data.get("data")
-            if not isinstance(rows, list) or len(rows) != len(texts):
-                raise ServiceError("임베딩 API 응답 개수가 요청과 일치하지 않습니다.")
-            results: list[EmbeddingResult] = []
-            for row in rows:
-                embedding = row.get("embedding") if isinstance(row, dict) else None
-                if not isinstance(embedding, list) or not embedding:
-                    raise ServiceError("임베딩 API 응답에 벡터가 없습니다.")
-                if len(embedding) != self.settings.embedding_dimension:
-                    raise ServiceError(
-                        "Embedding API 차원이 설정과 일치하지 않습니다: "
-                        f"expected={self.settings.embedding_dimension}, "
-                        f"actual={len(embedding)}"
-                    )
-                results.append(
-                    EmbeddingResult(
-                        vector=[float(value) for value in embedding],
-                        provider=protocol,
-                        model=self.settings.embedding_model,
-                    )
-                )
-            return results
-        except ServiceError:
-            if self.settings.allow_local_fallback:
-                return [self._local_embedding(text) for text in texts]
-            raise
+            )
+        return results
 
     def _ollama_embeddings(
         self,
@@ -216,21 +201,6 @@ class EmbeddingService:
             )
         return results
 
-    @staticmethod
-    def _local_embedding(text: str) -> EmbeddingResult:
-        dimensions = 1024
-        vector = [0.0] * dimensions
-        tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[가-힣]+|\d+", text.lower())
-        for token in tokens:
-            digest = hashlib.sha256(token.encode("utf-8")).digest()
-            bucket = int.from_bytes(digest[:4], "big") % dimensions
-            sign = 1.0 if digest[4] % 2 == 0 else -1.0
-            vector[bucket] += sign
-        norm = math.sqrt(sum(value * value for value in vector))
-        if norm:
-            vector = [value / norm for value in vector]
-        return EmbeddingResult(vector=vector, provider="local", model="hashed-lexical-v1")
-
 
 class ChatService:
     def __init__(self, settings: Settings) -> None:
@@ -249,27 +219,12 @@ class ChatService:
                 return self._local_answer(question, sources), "local-fallback"
             raise ServiceError("AI_API_KEY 또는 NVIDIA_API_KEY가 필요합니다.", 503)
 
-        context_parts = []
-        for index, source in enumerate(sources, start=1):
-            label = source.path or source.document_id
-            context_parts.append(f"[{index}] {label}\n{source.text}")
-        context = "\n\n".join(context_parts) or "검색된 프로젝트 문서가 없습니다."
-        messages: list[dict[str, str]] = [
-            {
-                "role": "system",
-                "content": (
-                    "당신은 VS Code 안에서 동작하는 프로젝트 코드 어시스턴트입니다. "
-                ),
-            }
-        ]
+        # Legacy hidden endpoint: forward only client-authored conversation data.
+        # Vision no longer owns or injects an AI system/RAG prompt.
+        messages: list[dict[str, str]] = []
         for item in history[-10:]:
             messages.append({"role": item.role, "content": item.content})
-        messages.append(
-            {
-                "role": "user",
-                "content": f"프로젝트 검색 결과:\n{context}\n\n질문:\n{question}",
-            }
-        )
+        messages.append({"role": "user", "content": question})
         try:
             data = _post_json(
                 f"{self.settings.ai_base_url}/chat/completions",

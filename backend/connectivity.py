@@ -3,16 +3,130 @@ from __future__ import annotations
 import threading
 from datetime import datetime
 from typing import Any
+from urllib.parse import unquote
 
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .config import Settings
+from .schema_guard import SchemaStateError, require_schema
 
 
 class ConnectivityStoreError(RuntimeError):
     pass
+
+
+def group_chat_session_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the administrator user -> session -> message hierarchy.
+
+    Chat audit rows stay the durable source of truth.  The hierarchy is built
+    at read time so the Playground does not create a second conversation store
+    that can drift away from the operational audit log.
+    """
+
+    users: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        client_id = str(row.get("client_id") or "anonymous")
+        encoded_admin_user = (
+            client_id.removeprefix("admin-playground:")
+            if client_id.startswith("admin-playground:")
+            else ""
+        )
+        declared_user = str(row.get("declared_user") or "").strip()
+        client_name = str(row.get("client_name") or "").strip()
+        display_name = (
+            declared_user
+            or (unquote(encoded_admin_user).strip() if encoded_admin_user else "")
+            or client_name
+            or ("미식별 사용자" if client_id == "anonymous" else client_id)
+        )
+        user = users.setdefault(
+            client_id,
+            {
+                "user_key": client_id,
+                "display_name": display_name,
+                "client_id": None if client_id == "anonymous" else client_id,
+                "last_message_at": row["received_at"],
+                "sessions": {},
+            },
+        )
+        if row["received_at"] > user["last_message_at"]:
+            user["last_message_at"] = row["received_at"]
+
+        session_id = str(row.get("session_id") or "stateless")
+        sessions = user["sessions"]
+        session = sessions.setdefault(
+            session_id,
+            {
+                "session_id": session_id,
+                "title": "새 대화",
+                "project_id": str(row.get("project_id") or "__unscoped__"),
+                "last_message_at": row["received_at"],
+                "message_count": 0,
+                "status": str(row.get("status") or "received"),
+                "model_id": row.get("used_model_id")
+                or row.get("requested_model_id"),
+                "provider": row.get("provider"),
+                "messages": [],
+            },
+        )
+        if row["received_at"] >= session["last_message_at"]:
+            session["last_message_at"] = row["received_at"]
+            session["status"] = str(row.get("status") or "received")
+            session["model_id"] = row.get("used_model_id") or row.get(
+                "requested_model_id"
+            )
+            session["provider"] = row.get("provider")
+            session["project_id"] = str(
+                row.get("project_id") or "__unscoped__"
+            )
+        session["message_count"] += 1
+        session["messages"].append(
+            {
+                "request_id": str(row["request_id"]),
+                "received_at": row["received_at"],
+                "completed_at": row.get("completed_at"),
+                "question": row.get("message"),
+                "question_truncated": bool(row.get("message_truncated")),
+                "answer": row.get("answer"),
+                "answer_truncated": bool(row.get("answer_truncated")),
+                "status": str(row.get("status") or "received"),
+                "status_code": row.get("status_code"),
+                "requested_model_id": row.get("requested_model_id"),
+                "used_model_id": row.get("used_model_id"),
+                "provider": row.get("provider"),
+                "source_count": row.get("source_count"),
+                "duration_ms": row.get("duration_ms"),
+                "error": row.get("error"),
+            }
+        )
+
+    result: list[dict[str, Any]] = []
+    for user in users.values():
+        sessions = list(user.pop("sessions").values())
+        for session in sessions:
+            session["messages"].sort(key=lambda item: item["received_at"])
+            first_question = next(
+                (
+                    str(item.get("question") or "").strip()
+                    for item in session["messages"]
+                    if str(item.get("question") or "").strip()
+                ),
+                "새 대화",
+            )
+            session["title"] = (
+                first_question[:57] + "..."
+                if len(first_question) > 60
+                else first_question
+            )
+        sessions.sort(key=lambda item: item["last_message_at"], reverse=True)
+        user["sessions"] = sessions
+        result.append(user)
+    result.sort(key=lambda item: item["last_message_at"], reverse=True)
+    return result
 
 
 class PostgresConnectivityStore:
@@ -42,162 +156,11 @@ class PostgresConnectivityStore:
                 return
             try:
                 with self._connect() as connection:
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS client_connections (
-                            client_id TEXT PRIMARY KEY,
-                            client_type TEXT NOT NULL,
-                            project_id TEXT,
-                            client_version TEXT,
-                            last_event TEXT NOT NULL,
-                            details JSONB NOT NULL DEFAULT '{}'::jsonb,
-                            first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_client_connections_type_seen
-                        ON client_connections (client_type, last_seen_at DESC)
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS frontend_api_activity (
-                            client_id TEXT NOT NULL,
-                            method TEXT NOT NULL,
-                            path TEXT NOT NULL,
-                            request_count BIGINT NOT NULL DEFAULT 0,
-                            success_count BIGINT NOT NULL DEFAULT 0,
-                            error_count BIGINT NOT NULL DEFAULT 0,
-                            last_status_code INTEGER,
-                            last_request_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            last_response_at TIMESTAMPTZ,
-                            last_success_at TIMESTAMPTZ,
-                            last_duration_ms INTEGER,
-                            last_request_id TEXT,
-                            PRIMARY KEY (client_id, method, path)
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_frontend_api_activity_path_response
-                        ON frontend_api_activity (method, path, last_response_at DESC)
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS communication_events (
-                            event_id BIGSERIAL PRIMARY KEY,
-                            occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            request_id TEXT NOT NULL,
-                            channel TEXT NOT NULL,
-                            direction TEXT NOT NULL,
-                            phase TEXT NOT NULL,
-                            status TEXT NOT NULL,
-                            method TEXT,
-                            path TEXT,
-                            client_id TEXT,
-                            project_id TEXT,
-                            status_code INTEGER,
-                            duration_ms INTEGER,
-                            provider TEXT,
-                            model TEXT,
-                            source_count INTEGER,
-                            error TEXT,
-                            details JSONB NOT NULL DEFAULT '{}'::jsonb
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_communication_events_occurred
-                        ON communication_events (occurred_at DESC, event_id DESC)
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_communication_events_request
-                        ON communication_events (request_id, occurred_at)
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS chat_audit_logs (
-                            request_id TEXT PRIMARY KEY,
-                            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            completed_at TIMESTAMPTZ,
-                            client_id TEXT,
-                            project_id TEXT,
-                            session_id TEXT,
-                            requested_model_id TEXT,
-                            message TEXT,
-                            message_truncated BOOLEAN NOT NULL DEFAULT FALSE,
-                            history_count INTEGER NOT NULL DEFAULT 0,
-                            context_chars INTEGER NOT NULL DEFAULT 0,
-                            status TEXT NOT NULL DEFAULT 'received',
-                            status_code INTEGER,
-                            answer TEXT,
-                            answer_truncated BOOLEAN NOT NULL DEFAULT FALSE,
-                            used_model_id TEXT,
-                            provider TEXT,
-                            source_count INTEGER,
-                            duration_ms INTEGER,
-                            error TEXT
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_chat_audit_logs_received
-                        ON chat_audit_logs (received_at DESC)
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS frontend_registration_events (
-                            event_id BIGSERIAL PRIMARY KEY,
-                            occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            request_id TEXT NOT NULL,
-                            event_type TEXT NOT NULL,
-                            status TEXT NOT NULL,
-                            client_id TEXT,
-                            instance_id TEXT,
-                            client_name TEXT,
-                            declared_user TEXT,
-                            client_version TEXT,
-                            source_ip TEXT,
-                            registration_type TEXT,
-                            identification_method TEXT,
-                            is_first_connection BOOLEAN NOT NULL DEFAULT FALSE,
-                            reason TEXT
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS
-                        idx_frontend_registration_events_occurred
-                        ON frontend_registration_events (
-                            occurred_at DESC, event_id DESC
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS
-                        idx_frontend_registration_events_request
-                        ON frontend_registration_events (
-                            request_id, occurred_at, event_id
-                        )
-                        """
-                    )
+                    require_schema(connection)
                 self._initialized = True
-            except (psycopg.Error, OSError) as exc:
+            except (psycopg.Error, OSError, SchemaStateError) as exc:
                 raise ConnectivityStoreError(
-                    "PostgreSQL connectivity schema is unavailable"
+                    "PostgreSQL schema is not on the required Alembic baseline"
                 ) from exc
 
     def touch(
@@ -696,6 +659,115 @@ class PostgresConnectivityStore:
         except (psycopg.Error, OSError) as exc:
             raise ConnectivityStoreError(
                 "PostgreSQL Chat audit log read failed"
+            ) from exc
+
+    def latest_chat_sessions(
+        self,
+        *,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return recent Chat history grouped by resolved user and session."""
+
+        self._ensure_schema()
+        safe_limit = min(max(1, limit), 1_000)
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT logs.request_id, logs.received_at,
+                           logs.completed_at, logs.client_id,
+                           logs.project_id, logs.session_id,
+                           logs.requested_model_id, logs.message,
+                           logs.message_truncated, logs.status,
+                           logs.status_code, logs.answer,
+                           logs.answer_truncated, logs.used_model_id,
+                           logs.provider, logs.source_count,
+                           logs.duration_ms, logs.error,
+                           clients.name AS client_name,
+                           registration.declared_user
+                    FROM chat_audit_logs AS logs
+                    LEFT JOIN frontend_clients AS clients
+                      ON clients.client_id = logs.client_id
+                    LEFT JOIN LATERAL (
+                        SELECT events.declared_user
+                        FROM frontend_registration_events AS events
+                        WHERE events.client_id = logs.client_id
+                          AND events.declared_user IS NOT NULL
+                        ORDER BY events.occurred_at DESC, events.event_id DESC
+                        LIMIT 1
+                    ) AS registration ON TRUE
+                    WHERE logs.received_at >= NOW() - INTERVAL '7 days'
+                    ORDER BY logs.received_at DESC
+                    LIMIT %s
+                    """,
+                    (safe_limit,),
+                ).fetchall()
+            users = group_chat_session_rows(rows)
+            for user in users:
+                for session in user["sessions"]:
+                    session["messages"] = []
+            return users
+        except (psycopg.Error, OSError) as exc:
+            raise ConnectivityStoreError(
+                "PostgreSQL Chat session history read failed"
+            ) from exc
+
+    def chat_session(
+        self,
+        *,
+        client_id: str,
+        session_id: str,
+        limit: int = 200,
+    ) -> dict[str, Any] | None:
+        """Return one user's session with its chronological messages."""
+
+        self._ensure_schema()
+        safe_limit = min(max(1, limit), 200)
+        anonymous = client_id == "anonymous"
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT logs.request_id, logs.received_at,
+                           logs.completed_at, logs.client_id,
+                           logs.project_id, logs.session_id,
+                           logs.requested_model_id, logs.message,
+                           logs.message_truncated, logs.status,
+                           logs.status_code, logs.answer,
+                           logs.answer_truncated, logs.used_model_id,
+                           logs.provider, logs.source_count,
+                           logs.duration_ms, logs.error,
+                           clients.name AS client_name,
+                           registration.declared_user
+                    FROM chat_audit_logs AS logs
+                    LEFT JOIN frontend_clients AS clients
+                      ON clients.client_id = logs.client_id
+                    LEFT JOIN LATERAL (
+                        SELECT events.declared_user
+                        FROM frontend_registration_events AS events
+                        WHERE events.client_id = logs.client_id
+                          AND events.declared_user IS NOT NULL
+                        ORDER BY events.occurred_at DESC, events.event_id DESC
+                        LIMIT 1
+                    ) AS registration ON TRUE
+                    WHERE logs.session_id = %s
+                      AND (
+                        (%s AND logs.client_id IS NULL)
+                        OR (NOT %s AND logs.client_id = %s)
+                      )
+                      AND logs.received_at >= NOW() - INTERVAL '7 days'
+                    ORDER BY logs.received_at DESC
+                    LIMIT %s
+                    """,
+                    (session_id[:255], anonymous, anonymous, client_id[:255], safe_limit),
+                ).fetchall()
+            users = group_chat_session_rows(rows)
+            if not users or not users[0]["sessions"]:
+                return None
+            return users[0]["sessions"][0]
+        except (psycopg.Error, OSError) as exc:
+            raise ConnectivityStoreError(
+                "PostgreSQL Chat session message read failed"
             ) from exc
 
     def delete(self, client_id: str) -> None:

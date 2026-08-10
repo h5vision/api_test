@@ -17,6 +17,7 @@ from .snapshots.contracts import (
     LocatorRecord,
     RepositoryRecord,
     SnapshotFileResponse,
+    SnapshotListResponse,
     SnapshotRegistrationResponse,
     SnapshotRecord,
     SnapshotTreeResponse,
@@ -157,6 +158,14 @@ class SnapshotAdminService(Protocol):
         limit: int = 100,
         offset: int = 0,
     ) -> list[SnapshotRecord]: ...
+
+
+    def list_snapshots(
+        self,
+        repository_id: str,
+        *,
+        limit: int = 100,
+    ) -> SnapshotListResponse: ...
 
 
     def get_repository(self, repository_id: str) -> RepositoryRecord: ...
@@ -402,6 +411,22 @@ def create_admin_snapshot_router(
             < status_payload.counts.repositories,
             has_more_snapshots=offset + len(snapshots) < status_payload.counts.snapshots,
         )
+
+
+    @router.get(
+        "/repositories/{repository_id}/snapshots",
+        response_model=SnapshotListResponse,
+    )
+    def snapshot_admin_repository_snapshots(
+        repository_id: str,
+        request: Request,
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> SnapshotListResponse:
+        require_admin_proxy(request)
+        try:
+            return service().list_snapshots(repository_id, limit=limit)
+        except GithubSnapshotServiceError as exc:
+            _raise_service_error(exc)
 
 
     @router.get("/{snapshot_id}", response_model=SnapshotAdminDetailResponse)

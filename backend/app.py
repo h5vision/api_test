@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
-from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_network
-from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
+
+import psycopg
+from psycopg.rows import dict_row
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
@@ -20,23 +23,42 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from .agentic_rag import AgenticRAGOrchestrator, ConversationAwareQueryPlanner
+from .briefings import build_project_briefing_response
 from .ai_providers import (
     AIProvider,
     AIProviderRegistry,
     AIProviderStoreError,
     PostgresAIProviderStore,
 )
-from .config import settings
-from .chat_progress import ChatStreamEvent, simulated_chat_progress
+from .admin_snapshots import create_admin_snapshot_router
+from .config import settings as bootstrap_settings
 from .connectivity import ConnectivityStoreError, PostgresConnectivityStore
+from .chat_contexts import ChatContextError, ChatContextRecord, ChatContextService
+from .chat_progress import simulated_chat_progress
+from .chat_streaming import wants_chat_sse
 from .distributed import DistributedStateError, RedisCoordinator
 from .frontend_clients import (
     FrontendClient,
     FrontendClientStoreError,
     PostgresFrontendClientStore,
 )
+from .chat_intake import (
+    ChatIntakeSettingsError,
+    PostgresChatIntakeSettingsStore,
+    normalize_chat_intake,
+    resolve_deep_normalization,
+)
+from .canonical_context import (
+    CANONICAL_CONTEXT_SCHEMA_VERSION,
+    CanonicalContext,
+    CanonicalContextRetrieval,
+    build_canonical_context,
+)
 from .generation import GenerationRouter
+from .chat_routing import classify_chat_request
 from .metadata_store import MetadataStoreError, PostgresMetadataStore
+from .model_catalog import model_catalog_revision
 from .model_access import (
     ModelAccessPolicyError,
     PostgresModelAccessPolicyStore,
@@ -50,15 +72,38 @@ from .local_projects import (
     LocalProjectRegistry,
     fingerprint_frontend_tree,
 )
+from .language_registry import LanguageDetectRequest, language_registry
 from .project_store import PostgresProjectStore, ProjectStoreError
 from .project_resolution import resolve_project_id
+from .retrieval import AdaptiveReranker
 from .rag_lab import RagLabClient, RagLabError
 from .repository_indexer import RepositoryIndexer
 from .repository_store import PostgresRepositoryStore, RepositoryStoreError
-from .admin_snapshots import create_admin_snapshot_router
+from .schema_guard import CURRENT_REVISION, BASELINE_TABLE_COLUMNS, inspect_schema
+from .project_snapshots.contracts import (
+    SnapshotImportRequest,
+    SnapshotImportResponse,
+    snapshot_fingerprint,
+)
+from .project_snapshots.repository import (
+    PostgresSnapshotRepository,
+    SnapshotRepositoryError,
+)
+from .project_snapshots.service import SnapshotService, SnapshotServiceError
+from .snapshots.service import GithubSnapshotService
+from .snapshot_compare import (
+    SnapshotCompareRequest,
+    SnapshotCompareResponse,
+    SnapshotComparisonError,
+    SnapshotComparisonService,
+)
 from .schemas import (
     ChatRequest,
     ChatResponse,
+    ChatContextRegistrationRequest,
+    ChatContextResponse,
+    ChatIntakeSettingsResponse,
+    ChatIntakeSettingsUpdateRequest,
     SourceDocument,
     BackendAIConnectivityStatus,
     ClientHeartbeatRequest,
@@ -72,13 +117,11 @@ from .schemas import (
     AIProviderListResponse,
     AIProviderRecord,
     AIProviderWriteRequest,
-    CloudProviderCredentialRequest,
-    CloudProviderScanResponse,
-    CloudProviderScanTarget,
-    EmbeddingModelProbeRequest,
-    EmbeddingModelProbeResponse,
     ChatAuditLog,
     ChatAuditLogListResponse,
+    ChatSessionListResponse,
+    ChatSessionSummary,
+    ChatSessionUser,
     CommunicationEvent,
     CommunicationEventListResponse,
     FrontendRegistrationEvent,
@@ -114,6 +157,7 @@ from .schemas import (
     OfflineEmbeddingArtifactSummary,
     RuntimeServiceSettingsResponse,
     RuntimeServiceSettingsUpdateRequest,
+    RuntimeSetupStatusResponse,
     RuntimeGroqSettingsResponse,
     RuntimeVectorSettingsResponse,
     ErrorResponse,
@@ -131,6 +175,7 @@ from .schemas import (
     IndexingJobListResponse,
     IndexingJobSummary,
     ProjectFileResponse,
+    ProjectBriefingResponse,
     ProjectTreeEntry,
     ProjectTreeResponse,
     RepositoryIndexJobResponse,
@@ -142,11 +187,38 @@ from .schemas import (
     RepositorySourceRecord,
     RepositorySourceWriteRequest,
     VectorIndexValidationResponse,
-    VectorDatabaseProviderListResponse,
-    VectorDatabaseProviderRecord,
-    VectorDatabaseProviderWriteRequest,
+    VectorIndexRecordResponse,
+    VectorIndexListResponse,
+    ExternalVectorIndexDiscoveryItem,
+    ExternalVectorIndexDiscoveryResponse,
+    ExternalVectorIndexAttachRequest,
+    ExternalVectorIndexVerifyRequest,
+    ExternalVectorIndexVerificationResponse,
+    ExternalVectorIndexAttachResponse,
+    ExternalSnapshotVectorBindingVerifyRequest,
+    SnapshotVectorBindingRecordResponse,
+    SnapshotVectorBindingListResponse,
+    VectorTargetWriteRequest,
+    VectorTargetRecordResponse,
+    VectorTargetListResponse,
+    ProjectVectorRouteCandidateResponse,
+    ProjectVectorRouteCandidateListResponse,
+    ProjectVectorRouteRecordResponse,
+    ProjectVectorRouteWriteRequest,
+    ProjectVectorRouteClearRequest,
+    ProjectVectorRouteEventResponse,
+    ProjectVectorRouteEventListResponse,
+    EmbeddingProfileWriteRequest,
+    EmbeddingProfileRecordResponse,
+    EmbeddingProfileListResponse,
 )
 from .services import ChatService, EmbeddingService, ServiceError
+from .embedding_profiles import (
+    EmbeddingProfileRecord,
+    EmbeddingProfileStoreError,
+    PostgresEmbeddingProfileStore,
+)
+from .runtime_authority import RuntimeSettingsProxy, RuntimeSettingsResolver
 from .runtime_config import (
     PostgresRuntimeNetworkSettingsStore,
     RuntimeNetworkSettings,
@@ -157,23 +229,55 @@ from .runtime_services import (
     RuntimeServiceSettings,
     RuntimeServiceSettingsError,
 )
-from .text import chunk_text_with_metadata, classify_index_path
+from .text import chunk_text_with_metadata
 from .uploads import UploadError, UploadManager
-from .vector_store import QdrantVectorStore, SQLiteVectorStore, VectorStoreError
-from .vector_db_registry import (
-    PostgresVectorDatabaseRegistry,
-    VectorDatabaseDetector,
-    VectorDatabaseProvider,
-    VectorDatabaseRegistryError,
+from .vector_gateway import (
+    RuntimeVectorStore,
+    build_vector_store,
+    build_vector_store_for_index,
+    settings_for_vector_index,
+)
+from .vector_contract import vector_service_contract
+from .vector_store import (
+    QdrantVectorAdapter,
+    VectorIndexRef,
+    VectorSelector,
+    VectorStoreError,
+)
+from .vector_targets import PostgresVectorTargetStore, VectorTargetRecord, VectorTargetStoreError
+from .vector_indexes import PostgresVectorIndexStore, VectorIndexRecord, VectorIndexStoreError
+from .external_vector_indexes import (
+    ExternalVectorIndexVerificationRecord,
+    ExternalVectorIndexVerificationStoreError,
+    PostgresExternalVectorIndexVerificationStore,
+    evaluate_external_index_probe,
+    evaluate_external_snapshot_probe,
+    sample_payload_keys,
+)
+from .snapshot_vector_bindings import (
+    PostgresSnapshotVectorBindingStore,
+    SnapshotVectorBindingRecord,
+    SnapshotVectorBindingStoreError,
+)
+from .project_vector_routes import (
+    PostgresProjectVectorRouteStore,
+    ProjectVectorRouteConflict,
+    ProjectVectorRouteRecord,
+    ProjectVectorRouteStoreError,
+    RouteCandidateContext,
 )
 
+
+# Deployment/bootstrap configuration is available before PostgreSQL can be read.
+# Runtime model/vector routing is replaced below by the administrator authority.
+settings = bootstrap_settings
 
 app = FastAPI(
     title="VS Code AI Assistant Backend",
     version="3.0.0",
     description=(
-        "Frozen public API v1 for VS Code repository ingest, BGE-M3/Qdrant RAG, "
-        "and BackendAI, NVIDIA, or Groq answer generation. Canonical schema version: 1.0."
+        "Frozen public API v1 for VS Code repository ingest, configurable vector retrieval, "
+        "and replaceable model-runtime generation. Canonical schema version: 1.0."
     ),
     openapi_tags=[
         {"name": "System", "description": "Health, model discovery, and connectivity."},
@@ -190,7 +294,13 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID", "X-API-Version"],
+    expose_headers=[
+        "X-Request-ID",
+        "X-API-Version",
+        "X-Client-ID",
+        "X-Client-Auto-Registered",
+        "X-Vision-Chat-Transport",
+    ],
 )
 
 logger = logging.getLogger(__name__)
@@ -206,15 +316,21 @@ ERROR_RESPONSES = {
 MONITORED_FRONTEND_ENDPOINTS = (
     ("GET", "/v1/health"),
     ("GET", "/v1/models"),
+    ("GET", "/v1/languages"),
+    ("POST", "/v1/languages/detect"),
     ("GET", "/v1/IngestResponse"),
     ("GET", "/v1/repositories"),
     ("GET", "/v1/repositories/{source_id}/tree"),
     ("GET", "/v1/projects/{project_id}/tree"),
+    ("GET", "/v1/projects/{project_id}/briefing"),
+    ("GET", "/v1/briefing"),
     ("GET", "/v1/indexing-jobs"),
     ("POST", "/v1/client-heartbeat"),
     ("POST", "/v1/documents/ingest"),
     ("POST", "/v1/projects/{project_id}/version/check"),
+    ("POST", "/v1/snapshots/compare"),
     ("POST", "/v1/chat"),
+    ("POST", "/v1/chat/contexts"),
 )
 
 
@@ -256,6 +372,8 @@ def _normalize_activity_path(path: str) -> str:
         return "/v1/repositories/{source_id}/tree"
     if re.fullmatch(r"/v1/projects/.+/tree", path):
         return "/v1/projects/{project_id}/tree"
+    if re.fullmatch(r"/v1/projects/.+/briefing", path):
+        return "/v1/projects/{project_id}/briefing"
     return path
 
 
@@ -352,20 +470,24 @@ async def request_context(request: Request, call_next: Any) -> Any:
     ).strip()
     auto_enrollment_request = (
         request.method == "POST"
-        and path.rstrip("/") == "/v1/chat"
+        and path.rstrip("/")
+        in {"/v1/chat", "/v1/chat/contexts", "/v1/snapshots/compare"}
         and client_type not in {"admin-dashboard", "admin-playground"}
     )
+    dashboard_request = client_type in {"admin-dashboard", "admin-playground"}
     managed_frontend_request = (
-        bool(client_id)
-        or bool(instance_id)
-        or client_type == "vscode-extension"
-        or auto_enrollment_request
+        not dashboard_request
+        and (
+            bool(client_id)
+            or bool(instance_id)
+            or client_type == "vscode-extension"
+            or auto_enrollment_request
+        )
     )
     monitored_frontend_endpoint = (
         request.method,
         normalized_activity_path,
     ) in MONITORED_FRONTEND_ENDPOINTS
-    dashboard_request = client_type in {"admin-dashboard", "admin-playground"}
     source_host = _frontend_source_ip(request)
     client_name = (
         request.headers.get("x-client-name")
@@ -389,6 +511,7 @@ async def request_context(request: Request, call_next: Any) -> Any:
     )
     request.state.frontend_client_id = None
     request.state.frontend_client_auto_registered = False
+    request.state.chat_deep_normalization_mode = "inherit"
     metrics_started = False
     if path != "/v1/admin/runtime-metrics":
         try:
@@ -474,9 +597,22 @@ async def request_context(request: Request, call_next: Any) -> Any:
 
     guard_exempt = (
         request.method == "OPTIONS"
-        or path in {"/", "/v1/health", "/openapi.json", "/docs", "/redoc"}
+        or path in {"/", "/v1/health", "/v1/live", "/v1/ready", "/openapi.json", "/docs", "/redoc"}
         or path.startswith("/v1/admin/")
     )
+    if not guard_exempt:
+        setup_state = runtime_settings_resolver.setup_state(refresh=False)
+        if not setup_state.configured:
+            return await finalize_response(
+                _error_response(
+                    request,
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "Administrator runtime configuration is required: "
+                    + ", ".join(setup_state.missing),
+                    code="RUNTIME_CONFIGURATION_REQUIRED",
+                )
+            )
+
     if managed_frontend_request and not guard_exempt:
         if trace_initial_registration:
             await run_in_threadpool(
@@ -492,7 +628,7 @@ async def request_context(request: Request, call_next: Any) -> Any:
                 identification_method=(
                     "instance_id" if instance_id else "legacy_source_ip"
                 ),
-                reason="POST /v1/chat arrived without X-Client-ID",
+                reason=f"POST {path.rstrip('/')} arrived without X-Client-ID",
             )
         try:
             decision = await run_in_threadpool(
@@ -569,6 +705,9 @@ async def request_context(request: Request, call_next: Any) -> Any:
             )
         if decision.client is not None:
             request.state.frontend_client_id = decision.client.client_id
+            request.state.chat_deep_normalization_mode = (
+                decision.client.chat_deep_normalization_mode
+            )
             request.state.frontend_client_auto_registered = (
                 decision.auto_registered
             )
@@ -669,24 +808,51 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         "Internal server error",
     )
 
-runtime_service_store = PostgresRuntimeServiceSettingsStore(settings)
-settings = runtime_service_store.effective_settings(settings)
-ai_provider_store = PostgresAIProviderStore(settings)
-vector_database_store = PostgresVectorDatabaseRegistry(settings)
-vector_database_detector = VectorDatabaseDetector()
-embedding_service = EmbeddingService(
-    settings,
-    provider_resolver=lambda provider_id: ai_provider_store.get(
-        provider_id,
-        with_secret=True,
-    ),
+runtime_service_store = PostgresRuntimeServiceSettingsStore(bootstrap_settings)
+runtime_network_store = PostgresRuntimeNetworkSettingsStore(bootstrap_settings)
+vector_target_store = PostgresVectorTargetStore(bootstrap_settings)
+embedding_profile_store = PostgresEmbeddingProfileStore(bootstrap_settings)
+vector_index_store = PostgresVectorIndexStore(bootstrap_settings)
+external_vector_index_verification_store = PostgresExternalVectorIndexVerificationStore(bootstrap_settings)
+snapshot_vector_binding_store = PostgresSnapshotVectorBindingStore(bootstrap_settings)
+project_vector_route_store = PostgresProjectVectorRouteStore(bootstrap_settings)
+runtime_settings_resolver = RuntimeSettingsResolver(
+    bootstrap_settings,
+    runtime_service_store,
+    runtime_network_store,
+    vector_target_store,
+    embedding_profile_store,
 )
+settings = RuntimeSettingsProxy(runtime_settings_resolver)
+embedding_service = EmbeddingService(settings)
 chat_service = ChatService(settings)
-runtime_network_store = PostgresRuntimeNetworkSettingsStore(settings)
-model_access_store = PostgresModelAccessPolicyStore(settings)
+rag_lab_client = RagLabClient(
+    bootstrap_settings.rag_lab_base_url,
+    bootstrap_settings.rag_lab_token,
+    bootstrap_settings.rag_lab_timeout_seconds,
+)
+rag_reranker = AdaptiveReranker(
+    min_sources=settings.rag_min_sources,
+    max_sources=settings.rag_max_sources,
+    max_context_chars=settings.rag_context_max_chars,
+    min_score=settings.rag_min_score,
+    score_window=settings.rag_score_window,
+)
+agentic_query_planner = ConversationAwareQueryPlanner(
+    balanced_steps=settings.agentic_rag_balanced_steps,
+    deep_steps=settings.agentic_rag_deep_steps,
+)
+agentic_rag = AgenticRAGOrchestrator(
+    rag_reranker,
+    min_evidence=settings.rag_min_sources,
+    min_coverage=settings.agentic_rag_min_coverage,
+    min_novelty_ratio=settings.agentic_rag_min_novelty_ratio,
+)
+model_access_store = PostgresModelAccessPolicyStore(bootstrap_settings)
+ai_provider_store = PostgresAIProviderStore(bootstrap_settings)
 ai_provider_registry = AIProviderRegistry(
     ai_provider_store,
-    settings,
+    bootstrap_settings,
     model_access_store.is_enabled,
 )
 generation_router = GenerationRouter(
@@ -696,66 +862,74 @@ generation_router = GenerationRouter(
     model_enabled_provider=model_access_store.is_enabled,
     custom_provider_registry=ai_provider_registry,
 )
-def _registered_rag_lab_provider() -> VectorDatabaseProvider | None:
-    try:
-        providers = vector_database_store.list()
-    except VectorDatabaseRegistryError:
-        return None
-    for provider in providers:
-        if (
-            provider.enabled
-            and provider.connection_mode == "remote"
-            and (provider.detected_engine == "rag_lab" or provider.engine == "rag_lab")
-        ):
-            return provider
-    return None
-
-
-def _active_rag_lab_base_url() -> str:
-    provider = _registered_rag_lab_provider()
-    if provider is not None:
-        return provider.base_url
-    return settings.rag_lab_base_url
-
-
-rag_lab_client = RagLabClient(
-    settings.rag_lab_base_url,
-    settings.rag_lab_token,
-    settings.rag_lab_timeout_seconds,
-    base_url_provider=_active_rag_lab_base_url,
-)
-if settings.vector_db_provider == "sqlite":
-    vector_store = SQLiteVectorStore(settings.vector_db_path)
-elif settings.vector_db_provider == "qdrant":
-    vector_store = QdrantVectorStore(
-        settings.qdrant_url,
-        settings.qdrant_api_key,
-        settings.qdrant_collection,
-        settings.embedding_dimension,
-        settings.index_version,
-        settings.request_timeout_seconds,
-    )
-else:
-    raise RuntimeError(f"지원하지 않는 VECTOR_DB_PROVIDER: {settings.vector_db_provider}")
+vector_store = RuntimeVectorStore(runtime_settings_resolver.current)
 metadata_store = PostgresMetadataStore(settings)
 project_store = PostgresProjectStore(settings)
 repository_store = PostgresRepositoryStore(settings)
+snapshot_repository = PostgresSnapshotRepository(settings)
+snapshot_service = SnapshotService(settings, repository=snapshot_repository)
+github_snapshot_service = GithubSnapshotService(bootstrap_settings)
+snapshot_comparison_service = SnapshotComparisonService(
+    github_snapshot_service,
+    repository_store,
+)
 offline_embedding_importer = OfflineEmbeddingImporter(
     settings,
     repository_store,
     vector_store,
+    vector_index_store,
+    snapshot_vector_binding_store,
+    project_vector_route_store,
 )
-local_project_registry = LocalProjectRegistry(settings.project_db_local_root)
-upload_manager = UploadManager(settings)
+local_project_registry = LocalProjectRegistry(bootstrap_settings.project_db_local_root)
+redis_coordinator = RedisCoordinator(bootstrap_settings)
+chat_context_service = ChatContextService(redis_coordinator, repository_store)
+upload_manager = UploadManager(
+    bootstrap_settings,
+    lock_factory=redis_coordinator.lock,
+)
 connectivity_store = PostgresConnectivityStore(settings)
 frontend_client_store = PostgresFrontendClientStore(settings)
-redis_coordinator = RedisCoordinator(settings)
+chat_intake_settings_store = PostgresChatIntakeSettingsStore(settings)
 repository_indexer = RepositoryIndexer(
     settings,
     repository_store,
     embedding_service,
     vector_store,
+    vector_index_store,
+    snapshot_vector_binding_store,
+    project_vector_route_store,
 )
+
+
+def current_runtime_settings(*, force: bool = False):
+    """Return an immutable snapshot of the current administrator-owned runtime config."""
+    return runtime_settings_resolver.current(force=force)
+
+
+def repository_indexer_for_current_runtime() -> RepositoryIndexer:
+    """Freeze one runtime profile for the lifetime of a single index generation."""
+    snapshot = current_runtime_settings(force=True)
+    store = PostgresRepositoryStore(snapshot)
+    return RepositoryIndexer(
+        snapshot,
+        store,
+        EmbeddingService(snapshot),
+        build_vector_store(snapshot),
+        PostgresVectorIndexStore(snapshot),
+        PostgresSnapshotVectorBindingStore(snapshot),
+        PostgresProjectVectorRouteStore(snapshot),
+    )
+
+
+def offline_embedding_importer_for_current_runtime() -> OfflineEmbeddingImporter:
+    """Freeze one runtime profile for a single offline import job."""
+    snapshot = current_runtime_settings(force=True)
+    store = PostgresRepositoryStore(snapshot)
+    return OfflineEmbeddingImporter(
+        snapshot, store, build_vector_store(snapshot), PostgresVectorIndexStore(snapshot),
+        PostgresSnapshotVectorBindingStore(snapshot), PostgresProjectVectorRouteStore(snapshot)
+    )
 
 
 def _safe_finish_request_metric() -> None:
@@ -800,18 +974,28 @@ def _enqueue_worker_task(
 
 
 def _network_settings_response(
-    value: RuntimeNetworkSettings,
+    value: RuntimeNetworkSettings | None,
 ) -> NetworkSettingsResponse:
+    if value is None:
+        return NetworkSettingsResponse(
+            configured=False,
+            setup_required=True,
+            frontend={
+                "ip": bootstrap_settings.frontend_host,
+                "port": bootstrap_settings.frontend_port,
+            },
+            backendai={"ip": "", "port": 0},
+            updated_at=None,
+            frontend_reachable=False,
+            frontend_latency_ms=0,
+            frontend_error="not_configured",
+        )
     frontend_probe = runtime_network_store.probe_frontend()
     return NetworkSettingsResponse(
-        frontend=NetworkEndpointSettings(
-            ip=value.frontend.ip,
-            port=value.frontend.port,
-        ),
-        backendai=NetworkEndpointSettings(
-            ip=value.backendai.ip,
-            port=value.backendai.port,
-        ),
+        configured=True,
+        setup_required=False,
+        frontend={"ip": value.frontend.ip, "port": value.frontend.port},
+        backendai={"ip": value.backendai.ip, "port": value.backendai.port},
         updated_at=value.updated_at,
         frontend_reachable=frontend_probe["reachable"],
         frontend_latency_ms=frontend_probe["latency_ms"],
@@ -820,79 +1004,116 @@ def _network_settings_response(
 
 
 def _runtime_service_settings_response(
-    value: RuntimeServiceSettings,
+    value: RuntimeServiceSettings | None,
 ) -> RuntimeServiceSettingsResponse:
-    active_vector_url = urlsplit(settings.qdrant_url)
-    active_host = active_vector_url.hostname or "qdrant"
+    if value is None:
+        return RuntimeServiceSettingsResponse(
+            configured=False,
+            setup_required=True,
+            missing=[
+                "default_model_id",
+                "vector_target",
+                "embedding_profile",
+                "vector_index_settings",
+            ],
+            groq=RuntimeGroqSettingsResponse(
+                enabled=False,
+                base_url="",
+                model="",
+                public_model_id=bootstrap_settings.groq_public_model_id,
+                api_key_configured=bool(bootstrap_settings.groq_api_key),
+            ),
+            default_model_id="",
+            vector=RuntimeVectorSettingsResponse(provider="qdrant"),
+            updated_at=None,
+        )
+
+    target = None
+    if value.vector.vector_target_id:
+        try:
+            target = vector_target_store.get(value.vector.vector_target_id)
+        except VectorTargetStoreError:
+            target = None
+
+    profile = None
+    if value.vector.embedding_profile_id:
+        try:
+            profile = embedding_profile_store.get(value.vector.embedding_profile_id)
+        except EmbeddingProfileStoreError:
+            profile = None
+
+    active = runtime_settings_resolver.current(force=True)
+    active_vector_url = urlsplit(target.endpoint if target is not None else "")
+    active_host = active_vector_url.hostname or ""
     active_port = active_vector_url.port or (
-        443 if active_vector_url.scheme == "https" else 6333
+        443 if active_vector_url.scheme == "https" else (80 if active_vector_url.scheme == "http" else 0)
     )
-    vector_restart_required = any(
-        (
-            value.vector.host != active_host,
-            value.vector.port != active_port,
-            value.vector.collection != settings.qdrant_collection,
-            value.vector.embedding_deployment
-            != settings.embedding_deployment,
-            value.vector.embedding_provider != settings.embedding_provider,
-            (value.vector.embedding_provider_id or "")
-            != settings.embedding_provider_id,
-            value.vector.embedding_base_url != settings.embedding_base_url,
-            value.vector.embedding_model != settings.embedding_model,
-            value.vector.embedding_model_id != settings.embedding_model_id,
-            value.vector.embedding_dimension != settings.embedding_dimension,
-            value.vector.embedding_batch_size
-            != settings.embedding_batch_size,
-            value.vector.index_version != settings.index_version,
-        )
-    )
-    vector_reindex_required = any(
-        (
-            value.vector.collection != settings.qdrant_collection,
-            value.vector.embedding_model_id != settings.embedding_model_id,
-            value.vector.embedding_model != settings.embedding_model,
-            value.vector.embedding_dimension != settings.embedding_dimension,
-            value.vector.index_version != settings.index_version,
-        )
-    )
+
+    vector_reindex_required = False
+    try:
+        for project in project_store.list_projects():
+            if str(project.get("index_status") or "").lower() not in {"ready", "active"}:
+                continue
+            if profile is None or (
+                str(project.get("embedding_model_id") or project.get("embedding_model") or "")
+                != profile.model_id
+                or str(project.get("index_version") or "") != value.vector.index_version
+            ):
+                vector_reindex_required = True
+                break
+    except (ProjectStoreError, NameError):
+        vector_reindex_required = False
+
+    missing: list[str] = []
+    if target is None or not target.enabled:
+        missing.append("vector_target")
+    if profile is None or not profile.enabled:
+        missing.append("embedding_profile")
+    if not value.groq.default_model_id:
+        missing.append("default_model_id")
+    if not (value.vector.collection and value.vector.index_version):
+        missing.append("vector_index_settings")
+    configured = not missing
+
     return RuntimeServiceSettingsResponse(
+        configured=configured,
+        setup_required=not configured,
+        missing=missing,
         groq=RuntimeGroqSettingsResponse(
             enabled=value.groq.enabled,
             base_url=value.groq.base_url,
             model=value.groq.model,
-            public_model_id=settings.groq_public_model_id,
-            api_key_configured=bool(settings.groq_api_key),
+            public_model_id=active.groq_public_model_id,
+            api_key_configured=bool(active.groq_api_key),
         ),
         default_model_id=value.groq.default_model_id,
         vector=RuntimeVectorSettingsResponse(
-            provider=settings.vector_db_provider,
-            host=value.vector.host,
-            port=value.vector.port,
+            provider=(target.engine if target is not None else "qdrant"),
+            vector_target_id=value.vector.vector_target_id,
+            embedding_profile_id=value.vector.embedding_profile_id,
+            host=active_host,
+            port=active_port,
             collection=value.vector.collection,
-            embedding_deployment=value.vector.embedding_deployment,
-            embedding_provider=value.vector.embedding_provider,
-            embedding_provider_id=value.vector.embedding_provider_id,
-            embedding_base_url=value.vector.embedding_base_url,
-            embedding_model=value.vector.embedding_model,
-            embedding_model_id=value.vector.embedding_model_id,
-            embedding_dimension=value.vector.embedding_dimension,
-            embedding_batch_size=value.vector.embedding_batch_size,
+            embedding_deployment=(profile.deployment if profile is not None else ""),
+            embedding_provider=(profile.provider if profile is not None else ""),
+            embedding_base_url=(profile.base_url if profile is not None else ""),
+            embedding_model=(profile.model if profile is not None else ""),
+            embedding_model_id=(profile.model_id if profile is not None else ""),
+            embedding_dimension=(profile.dimension if profile is not None else 0),
+            embedding_batch_size=(profile.batch_size if profile is not None else 0),
             index_version=value.vector.index_version,
             active_host=active_host,
             active_port=active_port,
-            active_collection=settings.qdrant_collection,
-            active_embedding_deployment=settings.embedding_deployment,
-            active_embedding_provider=settings.embedding_provider,
-            active_embedding_provider_id=(
-                settings.embedding_provider_id or None
-            ),
-            active_embedding_base_url=settings.embedding_base_url,
-            active_embedding_model=settings.embedding_model,
-            active_embedding_model_id=settings.embedding_model_id,
-            active_embedding_dimension=settings.embedding_dimension,
-            active_embedding_batch_size=settings.embedding_batch_size,
-            active_index_version=settings.index_version,
-            restart_required=vector_restart_required,
+            active_collection=active.qdrant_collection,
+            active_embedding_deployment=active.embedding_deployment,
+            active_embedding_provider=active.embedding_provider,
+            active_embedding_base_url=active.embedding_base_url,
+            active_embedding_model=active.embedding_model,
+            active_embedding_model_id=active.embedding_model_id,
+            active_embedding_dimension=active.embedding_dimension,
+            active_embedding_batch_size=active.embedding_batch_size,
+            active_index_version=active.index_version,
+            restart_required=False,
             reindex_required=vector_reindex_required,
         ),
         updated_at=value.updated_at,
@@ -911,6 +1132,7 @@ def _frontend_client_record(
         ip=client.ip,
         port=client.port,
         enabled=client.enabled,
+        chat_deep_normalization_mode=client.chat_deep_normalization_mode,
         registration_type=client.registration_type,
         last_seen_ip=client.last_seen_ip,
         last_seen_at=client.last_seen_at,
@@ -934,6 +1156,62 @@ def _frontend_client_store_error(exc: FrontendClientStoreError) -> HTTPException
     )
 
 
+def _chat_intake_settings_error(exc: ChatIntakeSettingsError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=str(exc),
+    )
+
+
+PERSISTENCE_CAPABILITY_GROUPS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "source_history",
+        "role": "소스 · Snapshot 원장",
+        "description": "Repository 등록, immutable Snapshot, 파일 엔트리의 기준 이력을 보존합니다.",
+        "tables": ("repository_sources", "project_snapshots", "snapshot_entries"),
+    },
+    {
+        "id": "index_provenance",
+        "role": "인덱싱 · 검색 근거 이력",
+        "description": "인덱싱 세대, chunk provenance, 작업 진행 상태와 기존 vector mapping을 보존합니다.",
+        "tables": (
+            "index_generations", "generation_chunks", "repository_index_jobs",
+            "document_versions", "document_chunks", "vector_mappings",
+        ),
+    },
+    {
+        "id": "runtime_routing",
+        "role": "실행 · 라우팅 설정",
+        "description": "모델 실행 선택, VectorTarget registry, 임베딩/인덱스 전환 설정과 네트워크 기준을 보존합니다.",
+        "tables": ("vector_targets", "runtime_service_settings", "runtime_network_settings"),
+    },
+    {
+        "id": "model_gateway",
+        "role": "모델 연결 · 접근 정책",
+        "description": "교체 가능한 모델 실행 연결, 발견된 모델과 관리자 사용 정책을 보존합니다.",
+        "tables": ("ai_provider_configs", "ai_provider_models", "model_access_policies"),
+    },
+    {
+        "id": "client_access",
+        "role": "클라이언트 접근 · 연결 상태",
+        "description": "Frontend 등록, 접근 허용 여부, heartbeat와 API 활동 상태를 보존합니다.",
+        "tables": ("frontend_clients", "client_connections", "frontend_api_activity"),
+    },
+    {
+        "id": "audit_history",
+        "role": "통신 · 대화 감사 이력",
+        "description": "요청/응답 경로, 대화 결과와 최초 등록 과정을 관리자 감사 이력으로 보존합니다.",
+        "tables": ("communication_events", "chat_audit_logs", "frontend_registration_events"),
+    },
+    {
+        "id": "project_metadata",
+        "role": "프로젝트 메타데이터",
+        "description": "Frontend가 전달한 프로젝트/문서 메타데이터와 문서 참조를 보존합니다.",
+        "tables": ("frontend_metadata", "frontend_documents", "projects"),
+    },
+)
+
+
 def _require_admin_proxy(request: Request) -> None:
     source_ip = request.client.host if request.client is not None else ""
     local_development = (
@@ -950,53 +1228,21 @@ def _require_admin_proxy(request: Request) -> None:
         )
 
 
+# The Snapshot dashboard consumes the GitHub Commit Control Plane contract.
+# Keep the older project-snapshot diagnostics on a separate legacy path below.
+app.include_router(
+    create_admin_snapshot_router(
+        bootstrap_settings,
+        _require_admin_proxy,
+        service_factory=lambda: github_snapshot_service,
+    )
+)
+
+
 def _service_error(exc: Exception) -> HTTPException:
     return HTTPException(
         status_code=getattr(exc, "status_code", 503), detail=str(exc)
     )
-
-
-def _sse_event(event: str, payload: dict[str, Any]) -> str:
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    return f"event: {event}\ndata: {encoded}\n\n"
-
-
-def _chat_stream_event(
-    event: ChatStreamEvent,
-    request_id: str,
-    payload: dict[str, Any] | None = None,
-) -> str:
-    """Attach the temporary display state to every public chat SSE event."""
-
-    return _sse_event(
-        event,
-        {
-            **(payload or {}),
-            **simulated_chat_progress(request_id, event),
-        },
-    )
-
-
-_ANSWER_CITATION_PATTERN = re.compile(r"\[(?:[1-9]|[1-9][0-9]+)\]")
-
-
-def _ensure_answer_citations(answer: str, sources: list[Any]) -> tuple[str, bool]:
-    if not sources or _ANSWER_CITATION_PATTERN.search(answer):
-        return answer, bool(_ANSWER_CITATION_PATTERN.search(answer))
-    labels = ", ".join(
-        f"[{index}] {source.path or source.document_id}"
-        for index, source in enumerate(sources, start=1)
-    )
-    return f"{answer.rstrip()}\n\n근거 문서: {labels}", False
-
-
-def _client_chat_metadata(
-    payload: ChatRequest,
-    internal_metadata: dict[str, Any],
-) -> dict[str, Any]:
-    """Keep operational details out of ordinary extension chat responses."""
-
-    return dict(internal_metadata) if payload.debug else {}
 
 
 def _metadata_store_error() -> HTTPException:
@@ -1150,6 +1396,58 @@ def _frontend_client_id(request: Request, project_id: str) -> str | None:
     if client_type == "vscode-extension":
         return f"vscode:{project_id}"[:255]
     return None
+
+
+def _chat_owner_id(request: Request) -> str:
+    """Stable owner key for cross-request Context and citation isolation."""
+
+    client_id = _frontend_client_id(request, "__unscoped__")
+    if client_id:
+        return client_id
+    return f"source-ip:{_frontend_source_ip(request)}"
+
+
+def _apply_registered_chat_context(
+    payload: ChatRequest,
+    request: Request,
+) -> ChatRequest:
+    context_id = (request.headers.get("x-vision-context-id") or "").strip()
+    if not context_id:
+        request.state.vision_chat_context = None
+        return payload
+    if len(context_id) > 128 or not context_id.startswith("ctx_"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="X-Vision-Context-ID 형식이 올바르지 않습니다.",
+        )
+    try:
+        record = chat_context_service.get(
+            context_id,
+            owner_client_id=_chat_owner_id(request),
+        )
+    except ChatContextError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    explicit_project = payload.project_id not in {"__auto__", "auto", "default"}
+    if explicit_project and record.project_id and payload.project_id != record.project_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Chat Body project_id와 X-Vision-Context-ID의 프로젝트가 다릅니다.",
+        )
+    if payload.snapshot_id and record.snapshot_id and payload.snapshot_id != record.snapshot_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Chat Body snapshot_id와 X-Vision-Context-ID의 Snapshot이 다릅니다.",
+        )
+    request.state.vision_chat_context = record
+    if not record.grounding_available:
+        return payload
+    return payload.model_copy(
+        update={
+            "project_id": record.project_id or payload.project_id,
+            "snapshot_id": record.snapshot_id or payload.snapshot_id,
+        }
+    )
 
 
 def _has_usable_frontend_context(
@@ -1412,30 +1710,129 @@ def root() -> dict[str, str]:
     }
 
 
+@app.get("/v1/live", tags=["System"], include_in_schema=False)
+def liveness() -> dict[str, str]:
+    """Process-only probe. Downstream outages must not trigger a restart loop."""
+    return {"status": "ok", "service": "vision-api"}
+
+
+@app.get("/v1/ready", tags=["System"], include_in_schema=False)
+def readiness() -> Response:
+    """Replica readiness for orchestrators such as Kubernetes.
+
+    Readiness covers only shared control-plane dependencies required to safely
+    accept work: Redis coordination, the Alembic-managed persistence schema, and
+    the shared upload workspace. AI/embedding/vector targets are intentionally
+    excluded because they are replaceable runtime providers, not Pod lifecycle
+    dependencies.
+    """
+    checks: dict[str, Any] = {}
+    ready = True
+    try:
+        checks["coordination"] = {"ready": redis_coordinator.ping()}
+    except DistributedStateError as exc:
+        checks["coordination"] = {"ready": False, "error": type(exc).__name__}
+        ready = False
+
+    try:
+        with psycopg.connect(
+            host=settings.postgres_host,
+            port=settings.postgres_port,
+            dbname=settings.postgres_db,
+            user=settings.postgres_user,
+            password=settings.postgres_password,
+            connect_timeout=settings.postgres_connect_timeout_seconds,
+        ) as connection:
+            inspection = inspect_schema(connection)
+        persistence_ready = bool(
+            inspection.baseline_compatible and inspection.revision is not None
+        )
+        checks["persistence"] = {
+            "ready": persistence_ready,
+            "revision": inspection.revision,
+            "expected_revision": CURRENT_REVISION,
+        }
+        ready = ready and persistence_ready
+    except (psycopg.Error, OSError) as exc:
+        checks["persistence"] = {"ready": False, "error": type(exc).__name__}
+        ready = False
+
+    storage = upload_manager.storage_status()
+    storage_ready = bool(storage["exists"] and storage["writable"] and storage["distributed_lock"])
+    checks["shared_workspace"] = {**storage, "ready": storage_ready}
+    ready = ready and storage_ready
+
+    runtime_setup = runtime_settings_resolver.setup_state(refresh=False)
+    checks["runtime_configuration"] = {
+        "configured": runtime_setup.configured,
+        "missing": list(runtime_setup.missing),
+        "errors": list(runtime_setup.errors),
+        "lifecycle_blocking": False,
+    }
+
+    payload = {"status": "ready" if ready else "not_ready", "checks": checks}
+    return JSONResponse(status_code=200 if ready else 503, content=payload)
+
+
 @app.get("/v1/health", tags=["System"])
 def health() -> dict[str, Any]:
-    rag_provider = _registered_rag_lab_provider()
-    local_vector_stats = vector_store.stats()
-    rag_status = rag_provider.status if rag_provider is not None else "unknown"
+    runtime_setup = runtime_settings_resolver.setup_state(refresh=False)
+    vector_status: dict[str, Any]
+    if runtime_setup.configured:
+        try:
+            vector_status = vector_store.stats()
+        except VectorStoreError as exc:
+            vector_status = {"status": "unavailable", "error": type(exc).__name__}
+    else:
+        vector_status = {
+            "status": "setup_required",
+            "missing": list(runtime_setup.missing),
+        }
     return {
         "status": "ok",
         "service": "vs-code-ai-assistant-backend",
         "version": "3.0.0",
         "instance_id": settings.instance_id,
         "configuration": settings.public_status(),
-        "vector_store": {
-            "provider": "rag_lab",
-            "status": "ok" if rag_status == "online" else "unavailable",
-            "registered_status": rag_status,
-            "base_url": rag_provider.base_url if rag_provider else settings.rag_lab_base_url,
-            "projects": len(rag_provider.collections) if rag_provider else 0,
-            "chunks": 0,
+        "runtime_setup": {
+            "configured": runtime_setup.configured,
+            "missing": list(runtime_setup.missing),
+            "errors": list(runtime_setup.errors),
         },
-        "local_vector_store": local_vector_stats,
+        "vector_store": vector_status,
         "metadata_store": metadata_store.status(),
         "project_store": project_store.status(),
-        "message": "백엔드 API 서버에서 응답중 입니다."
+        "message": "백엔드 API 서버에서 응답중 입니다.",
     }
+
+
+@app.get(
+    "/v1/languages",
+    tags=["System"],
+    summary="List the VS Code-compatible language registry",
+)
+def list_languages(response: Response) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    return language_registry().catalog()
+
+
+@app.post(
+    "/v1/languages/detect",
+    tags=["System"],
+    summary="Detect or normalize one VS Code document language",
+)
+def detect_language(payload: LanguageDetectRequest) -> dict[str, Any]:
+    return language_registry().detect(
+        explicit_language_id=payload.language_id,
+        file_name=payload.file_name,
+        path=payload.path,
+        content=payload.content,
+        workspace_languages=payload.workspace_languages,
+        session_languages=payload.session_languages,
+        workspace_history_languages=payload.workspace_history_languages,
+        global_history_languages=payload.global_history_languages,
+    ).public_dict()
+
 # @app.get("/v1/health")
 # def health_check():
 #     return {
@@ -1456,8 +1853,10 @@ def list_models(response: Response) -> ModelListResponse:
         model for model in generation_router.models()
         if model.enabled
     ]
+    default_model_id = generation_router.default_model_id
     return ModelListResponse(
-        default_model_id=generation_router.default_model_id,
+        catalog_revision=model_catalog_revision(default_model_id, models),
+        default_model_id=default_model_id,
         checked_at=datetime.now(timezone.utc),
         models=models,
     )
@@ -1496,41 +1895,41 @@ def list_indexed_projects(
 ) -> IndexedProjectListResponse | JSONResponse:
     response.headers["Cache-Control"] = "no-store"
     try:
-        rows = rag_lab_client.projects()
-    except RagLabError as exc:
+        rows = project_store.list_projects()
+    except ProjectStoreError:
         return _error_response(
             request,
-            exc.status_code,
-            str(exc),
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "프로젝트 목록을 불러올 수 없습니다.",
             code="PROJECT_REGISTRY_UNAVAILABLE",
             headers={"Cache-Control": "no-store"},
         )
 
     projects: list[IndexedProjectItem] = []
     for row in rows:
-        project_id = str(row.get("project_id") or "").strip()
-        if not project_id:
-            continue
-        commit_sha = str(row.get("commit") or "").strip() or None
-        public_status = {
-            "none": "not_indexed",
-            "running": "indexing",
-            "done": "ready",
-            "failed": "failed",
-            "aborted": "failed",
-        }.get(str(row.get("state") or "none").lower(), "stale")
+        commit_sha = (row.get("git_commit_sha") or "").strip() or None
+        public_status = _public_index_status(row.get("index_status"))
+        project_id = row["project_id"]
+        project_name = row.get("display_name") or project_id
+        if project_name == project_id and "/" in project_id:
+            project_name = project_id.rsplit("/", 1)[-1]
+        indexed_at = row.get("index_completed_at")
+        if indexed_at is None and public_status == "ready":
+            # Existing rows created before index_completed_at was introduced
+            # retain their last known successful update time.
+            indexed_at = row.get("updated_at")
         projects.append(
             IndexedProjectItem(
                 project_id=project_id,
-                project_name=project_id.rsplit("/", 1)[-1],
+                project_name=project_name,
                 git_commit_sha=commit_sha,
                 git_short_sha=commit_sha[:7] if commit_sha else None,
-                git_branch=None,
-                git_dirty=(bool(row["dirty"]) if row.get("dirty") is not None else None),
-                git_committed_at=None,
-                active_snapshot_id=commit_sha,
+                git_branch=row.get("git_branch"),
+                git_dirty=row.get("git_dirty"),
+                git_committed_at=row.get("git_committed_at"),
+                active_snapshot_id=row.get("current_snapshot_id"),
                 index_status=public_status,
-                indexed_at=row.get("indexed_at"),
+                indexed_at=indexed_at,
             )
         )
 
@@ -1572,6 +1971,138 @@ def client_heartbeat(
         project_id=row["project_id"],
         last_seen_at=row["last_seen_at"],
     )
+
+
+@app.get(
+    "/v1/admin/persistence-status",
+    response_model=dict[str, Any],
+    tags=["System"],
+    include_in_schema=False,
+)
+def persistence_status(request: Request) -> dict[str, Any]:
+    """Expose database capabilities by role without making the engine the UI concept."""
+    _require_admin_proxy(request)
+    checked_at = datetime.now(timezone.utc)
+    unavailable_capabilities = [
+        {
+            "id": group["id"],
+            "role": group["role"],
+            "description": group["description"],
+            "status": "unavailable",
+            "tables": list(group["tables"]),
+            "table_count": len(group["tables"]),
+            "records_estimate": None,
+        }
+        for group in PERSISTENCE_CAPABILITY_GROUPS
+    ]
+    if not settings.postgres_password:
+        return {
+            "checked_at": checked_at.isoformat(),
+            "status": "unavailable",
+            "implementation": {"engine": "postgresql", "schema": "public"},
+            "schema": {
+                "managed": False,
+                "revision": None,
+                "expected_revision": CURRENT_REVISION,
+                "baseline_compatible": False,
+                "missing_tables": list(BASELINE_TABLE_COLUMNS),
+                "missing_columns": [],
+            },
+            "capabilities": unavailable_capabilities,
+            "error": "persistence credentials are not configured",
+        }
+
+    try:
+        with psycopg.connect(
+            host=settings.postgres_host,
+            port=settings.postgres_port,
+            dbname=settings.postgres_db,
+            user=settings.postgres_user,
+            password=settings.postgres_password,
+            connect_timeout=settings.postgres_connect_timeout_seconds,
+            row_factory=dict_row,
+        ) as connection:
+            inspection = inspect_schema(connection)
+            stats_rows = connection.execute(
+                """
+                SELECT relname AS table_name, COALESCE(n_live_tup, 0)::BIGINT AS rows_estimate
+                FROM pg_stat_user_tables
+                WHERE schemaname = 'public'
+                """
+            ).fetchall()
+    except (psycopg.Error, OSError) as exc:
+        return {
+            "checked_at": checked_at.isoformat(),
+            "status": "unavailable",
+            "implementation": {"engine": "postgresql", "schema": "public"},
+            "schema": {
+                "managed": False,
+                "revision": None,
+                "expected_revision": CURRENT_REVISION,
+                "baseline_compatible": False,
+                "missing_tables": [],
+                "missing_columns": [],
+            },
+            "capabilities": unavailable_capabilities,
+            "error": type(exc).__name__,
+        }
+
+    row_estimates = {
+        str(row["table_name"]): int(row["rows_estimate"] or 0)
+        for row in stats_rows
+    }
+    missing_tables = set(inspection.missing_tables)
+    missing_columns = tuple(inspection.missing_columns)
+    capabilities: list[dict[str, Any]] = []
+    for group in PERSISTENCE_CAPABILITY_GROUPS:
+        tables = tuple(group["tables"])
+        group_missing_tables = sorted(table for table in tables if table in missing_tables)
+        group_missing_columns = sorted(
+            column
+            for column in missing_columns
+            if column.split(".", 1)[0] in tables
+        )
+        ready = not group_missing_tables and not group_missing_columns
+        capabilities.append(
+            {
+                "id": group["id"],
+                "role": group["role"],
+                "description": group["description"],
+                "status": "ready" if ready else "degraded",
+                "tables": list(tables),
+                "table_count": len(tables),
+                "records_estimate": (
+                    sum(row_estimates.get(table, 0) for table in tables) if ready else None
+                ),
+                "missing_tables": group_missing_tables,
+                "missing_columns": group_missing_columns,
+            }
+        )
+
+    managed = inspection.revision is not None
+    if not inspection.baseline_compatible:
+        overall = "degraded"
+    elif inspection.revision is None:
+        overall = "migration_required"
+    elif inspection.revision == CURRENT_REVISION:
+        overall = "ready"
+    else:
+        overall = "revision_mismatch"
+    return {
+        "checked_at": checked_at.isoformat(),
+        "status": overall,
+        "implementation": {"engine": "postgresql", "schema": "public"},
+        "schema": {
+            "managed": managed,
+            "revision": inspection.revision,
+            "expected_revision": CURRENT_REVISION,
+            "baseline_compatible": inspection.baseline_compatible,
+            "missing_tables": list(inspection.missing_tables),
+            "missing_columns": list(inspection.missing_columns),
+        },
+        "capabilities": capabilities,
+        "error": None,
+    }
 
 
 @app.get(
@@ -1623,6 +2154,95 @@ def connectivity_status(request: Request) -> ConnectivityStatusResponse:
         frontend=frontend,
         backendai=backendai,
     )
+
+
+@app.get(
+    "/v1/admin/project-snapshots/status",
+    response_model=dict[str, Any],
+    tags=["System"],
+    include_in_schema=False,
+)
+def snapshot_admin_status(request: Request) -> dict[str, Any]:
+    _require_admin_proxy(request)
+    return {
+        "tenant_id": settings.snapshot_tenant_id,
+        "github_authentication": (
+            "authenticated" if snapshot_service.github_authenticated else "anonymous"
+        ),
+        "github_token_configured": bool(settings.snapshot_github_token),
+        "allowed_repositories": sorted(settings.snapshot_allowed_repositories),
+        "token_exposed": False,
+    }
+
+
+@app.post(
+    "/v1/admin/project-snapshots/import",
+    response_model=SnapshotImportResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def import_snapshot(
+    payload: SnapshotImportRequest,
+    request: Request,
+) -> SnapshotImportResponse:
+    _require_admin_proxy(request)
+    try:
+        return snapshot_service.import_github_snapshot(
+            payload.repository_url,
+            payload.ref,
+        )
+    except SnapshotServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
+
+
+@app.get(
+    "/v1/admin/project-snapshots",
+    response_model=dict[str, Any],
+    tags=["System"],
+    include_in_schema=False,
+)
+def list_snapshots(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    _require_admin_proxy(request)
+    try:
+        snapshots = snapshot_repository.list_snapshots(limit=limit)
+        repositories = snapshot_repository.list_repositories(limit=limit)
+    except SnapshotRepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    return {
+        "snapshots": [item.model_dump(mode="json") for item in snapshots],
+        "repositories": [item.model_dump(mode="json") for item in repositories],
+        "total_snapshots": len(snapshots),
+        "total_repositories": len(repositories),
+    }
+
+
+@app.get(
+    "/v1/admin/project-snapshots/{snapshot_id}",
+    response_model=dict[str, Any],
+    tags=["System"],
+    include_in_schema=False,
+)
+def get_snapshot(snapshot_id: str, request: Request) -> dict[str, Any]:
+    _require_admin_proxy(request)
+    try:
+        snapshot = snapshot_repository.get_snapshot(snapshot_id)
+    except SnapshotRepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Snapshot was not found")
+    return snapshot.model_dump(mode="json")
 
 
 @app.get(
@@ -1752,6 +2372,64 @@ def chat_audit_logs(
 
 
 @app.get(
+    "/v1/admin/chat-sessions",
+    response_model=ChatSessionListResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def chat_sessions(
+    request: Request,
+    limit: int = Query(default=500, ge=1, le=1_000),
+) -> ChatSessionListResponse:
+    """Return the audit-backed user/session hierarchy for the Playground."""
+
+    _require_admin_proxy(request)
+    try:
+        users = connectivity_store.latest_chat_sessions(limit=limit)
+    except ConnectivityStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL Chat session history is unavailable",
+        ) from exc
+    typed_users = [ChatSessionUser(**user) for user in users]
+    return ChatSessionListResponse(
+        checked_at=datetime.now(timezone.utc),
+        users=typed_users,
+        total_users=len(typed_users),
+        total_sessions=sum(len(user.sessions) for user in typed_users),
+    )
+
+
+@app.get(
+    "/v1/admin/chat-session",
+    response_model=ChatSessionSummary,
+    tags=["System"],
+    include_in_schema=False,
+)
+def chat_session(
+    request: Request,
+    client_id: str = Query(..., min_length=1, max_length=255),
+    session_id: str = Query(..., min_length=1, max_length=255),
+    limit: int = Query(default=200, ge=1, le=200),
+) -> ChatSessionSummary:
+    _require_admin_proxy(request)
+    try:
+        result = connectivity_store.chat_session(
+            client_id=client_id,
+            session_id=session_id,
+            limit=limit,
+        )
+    except ConnectivityStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL Chat session messages are unavailable",
+        ) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return ChatSessionSummary(**result)
+
+
+@app.get(
     "/v1/admin/frontend-registration-logs",
     response_model=FrontendRegistrationEventListResponse,
     tags=["System"],
@@ -1806,12 +2484,12 @@ def ai_communication_probe(
     try:
         generation = generation_router.generate(
             requested_model_id,
-            [
-                {
-                    "role": "user",
-                    "content": "Reply with exactly VISION_AI_OK.",
-                }
-            ],
+            "Reply with exactly VISION_AI_OK.",
+            [],
+            [],
+            "",
+            "system-diagnostic",
+            "system-diagnostic",
             request_id=request_id,
         )
     except ServiceError as exc:
@@ -1867,9 +2545,6 @@ def ai_communication_probe(
     )
 
 
-app.include_router(create_admin_snapshot_router(settings, _require_admin_proxy))
-
-
 @app.get(
     "/v1/admin/frontend-clients",
     response_model=FrontendClientListResponse,
@@ -1912,6 +2587,7 @@ def create_frontend_client(
             ip=payload.ip,
             port=payload.port,
             enabled=payload.enabled,
+            chat_deep_normalization_mode=payload.chat_deep_normalization_mode,
         )
     except FrontendClientStoreError as exc:
         raise _frontend_client_store_error(exc) from exc
@@ -1937,6 +2613,7 @@ def update_frontend_client(
             ip=payload.ip,
             port=payload.port,
             enabled=payload.enabled,
+            chat_deep_normalization_mode=payload.chat_deep_normalization_mode,
         )
     except FrontendClientStoreError as exc:
         raise _frontend_client_store_error(exc) from exc
@@ -1965,6 +2642,71 @@ def delete_frontend_client(client_id: str, request: Request) -> None:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Frontend client was not found",
         )
+
+
+@app.get(
+    "/v1/admin/chat-intake-settings",
+    response_model=ChatIntakeSettingsResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def get_chat_intake_settings(request: Request) -> ChatIntakeSettingsResponse:
+    _require_admin_proxy(request)
+    try:
+        value = chat_intake_settings_store.get()
+    except ChatIntakeSettingsError as exc:
+        raise _chat_intake_settings_error(exc) from exc
+    return ChatIntakeSettingsResponse(
+        deep_normalization_enabled=value.deep_normalization_enabled,
+        fallback_mode=value.fallback_mode,
+        updated_at=value.updated_at,
+    )
+
+
+@app.put(
+    "/v1/admin/chat-intake-settings",
+    response_model=ChatIntakeSettingsResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def update_chat_intake_settings(
+    payload: ChatIntakeSettingsUpdateRequest,
+    request: Request,
+) -> ChatIntakeSettingsResponse:
+    _require_admin_proxy(request)
+    try:
+        value = chat_intake_settings_store.update(
+            deep_normalization_enabled=payload.deep_normalization_enabled,
+            fallback_mode=payload.fallback_mode,
+        )
+    except ChatIntakeSettingsError as exc:
+        raise _chat_intake_settings_error(exc) from exc
+    return ChatIntakeSettingsResponse(
+        deep_normalization_enabled=value.deep_normalization_enabled,
+        fallback_mode=value.fallback_mode,
+        updated_at=value.updated_at,
+    )
+
+
+@app.get(
+    "/v1/admin/setup-status",
+    response_model=RuntimeSetupStatusResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def get_runtime_setup_status(request: Request) -> RuntimeSetupStatusResponse:
+    _require_admin_proxy(request)
+    state = runtime_settings_resolver.setup_state(refresh=True)
+    return RuntimeSetupStatusResponse(
+        status="configured" if state.configured else "setup_required",
+        configured=state.configured,
+        missing=list(state.missing),
+        errors=list(state.errors),
+        service_settings_configured=state.service_settings_configured,
+        network_settings_configured=state.network_settings_configured,
+        vector_target_configured=state.vector_target_configured,
+        embedding_profile_configured=state.embedding_profile_configured,
+    )
 
 
 @app.get(
@@ -2008,249 +2750,351 @@ def update_network_settings(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="PostgreSQL runtime network settings are unavailable",
         ) from exc
+    runtime_settings_resolver.invalidate()
     generation_router.invalidate_backendai_status()
     return _network_settings_response(value)
 
 
-def _vector_database_record(
-    provider: VectorDatabaseProvider,
-) -> VectorDatabaseProviderRecord:
-    return VectorDatabaseProviderRecord(
-        provider_id=provider.provider_id,
-        name=provider.name,
-        engine=provider.engine,
-        detected_engine=provider.detected_engine,
-        connection_mode=provider.connection_mode,
-        host=provider.host if provider.connection_mode == "remote" else None,
-        port=provider.port if provider.connection_mode == "remote" else None,
-        base_url=provider.base_url,
-        use_tls=provider.use_tls,
-        storage_namespace=provider.storage_namespace,
-        local_path=provider.local_path,
-        embedding_model_path=provider.embedding_model_path,
-        embedding_models=provider.embedding_models,
-        enabled=provider.enabled,
-        status=provider.status,
-        collections=provider.collections,
-        adapter_available=provider.adapter_available,
-        error=provider.error,
-        latency_ms=provider.latency_ms,
-        last_checked_at=provider.last_checked_at,
-        created_at=provider.created_at,
-        updated_at=provider.updated_at,
+def _vector_target_response(
+    target: VectorTargetRecord,
+    *,
+    active_vector_target_id: str | None = None,
+) -> VectorTargetRecordResponse:
+    return VectorTargetRecordResponse(
+        vector_target_id=target.vector_target_id,
+        tenant_id=target.tenant_id,
+        name=target.name,
+        engine=target.engine,
+        endpoint=target.endpoint,
+        credential_ref=target.credential_ref,
+        deployment_type=target.deployment_type,
+        capabilities=target.capabilities,
+        status=target.status,
+        error=target.error,
+        latency_ms=target.latency_ms,
+        last_checked_at=target.last_checked_at,
+        active=target.vector_target_id == active_vector_target_id,
+        created_at=target.created_at,
+        updated_at=target.updated_at,
     )
 
 
-def _vector_database_probe(provider: VectorDatabaseProvider) -> VectorDatabaseProvider:
-    configured_url = settings.qdrant_url.rstrip("/")
-    if provider.base_url.rstrip("/") == configured_url:
-        api_key = settings.qdrant_api_key
-    elif provider.engine == "rag_lab" or provider.detected_engine == "rag_lab":
-        api_key = settings.rag_lab_token
-    else:
-        api_key = ""
-    result = vector_database_detector.probe(provider, api_key=api_key)
-    return vector_database_store.update_probe(provider.provider_id, result)
-
-
-def _prepare_vector_database_target(
-    payload: VectorDatabaseProviderWriteRequest,
-) -> tuple[str, int, str | None]:
-    if payload.connection_mode == "remote":
-        return str(payload.host), int(payload.port), None
-    root = settings.vector_db_local_root.resolve()
-    requested = Path(str(payload.local_path))
-    candidate = requested.resolve() if requested.is_absolute() else (root / requested).resolve()
+def _active_vector_target_id() -> str | None:
     try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"local_path must stay under the mounted root: {root}",
-        ) from exc
-    try:
-        if payload.engine == "sqlite" or candidate.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-        else:
-            candidate.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"local_path is not writable: {candidate}",
-        ) from exc
-    return "local", 1, str(candidate)
-
-
-def _ensure_default_vector_database_provider() -> None:
-    if vector_database_store.list():
-        return
-    parsed = urlsplit(settings.qdrant_url)
-    provider = vector_database_store.create(
-        name="Vision Active VectorDB",
-        engine=("qdrant" if settings.vector_db_provider == "qdrant" else "custom"),
-        connection_mode="remote",
-        host=parsed.hostname or "qdrant",
-        port=parsed.port or (443 if parsed.scheme == "https" else 6333),
-        use_tls=parsed.scheme == "https",
-        storage_namespace=settings.qdrant_collection,
-        local_path=None,
-        embedding_model_path=settings.embedding_base_url,
-        embedding_models=[settings.embedding_model],
-        enabled=True,
-    )
-    _vector_database_probe(provider)
-
-
-def _vector_database_store_error(
-    exc: VectorDatabaseRegistryError,
-) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=str(exc),
-    )
+        runtime = runtime_service_store.get(refresh=True)
+    except RuntimeServiceSettingsError:
+        runtime = runtime_service_store.cached()
+    if runtime is None or not runtime.vector.vector_target_id:
+        return None
+    return runtime.vector.vector_target_id
 
 
 @app.get(
-    "/v1/admin/vector-databases",
-    response_model=VectorDatabaseProviderListResponse,
+    "/v1/admin/vector-targets",
+    response_model=VectorTargetListResponse,
     tags=["System"],
-    summary="List registered VectorDB targets and adapter readiness",
+    include_in_schema=False,
 )
-def list_vector_databases(
-    request: Request,
-    refresh: bool = Query(default=False),
-) -> VectorDatabaseProviderListResponse:
+def list_vector_targets(request: Request) -> VectorTargetListResponse:
     _require_admin_proxy(request)
     try:
-        _ensure_default_vector_database_provider()
-        providers = vector_database_store.list()
-        if refresh:
-            with ThreadPoolExecutor(max_workers=min(8, len(providers))) as executor:
-                list(executor.map(_vector_database_probe, providers))
-            providers = vector_database_store.list()
-    except VectorDatabaseRegistryError as exc:
-        raise _vector_database_store_error(exc) from exc
-    records = [_vector_database_record(provider) for provider in providers]
-    return VectorDatabaseProviderListResponse(
-        providers=records,
-        total=len(records),
-        online=sum(record.status == "online" for record in records),
-        adapter_ready=sum(record.adapter_available for record in records),
+        targets = vector_target_store.list()
+    except VectorTargetStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL VectorTarget registry is unavailable",
+        ) from exc
+    active_id = _active_vector_target_id()
+    return VectorTargetListResponse(
+        targets=[_vector_target_response(target, active_vector_target_id=active_id) for target in targets],
+        active_vector_target_id=active_id,
     )
 
 
 @app.post(
-    "/v1/admin/vector-databases",
-    response_model=VectorDatabaseProviderRecord,
-    status_code=status.HTTP_201_CREATED,
+    "/v1/admin/vector-targets",
+    response_model=VectorTargetRecordResponse,
     tags=["System"],
-    summary="Register and detect a VectorDB target",
+    include_in_schema=False,
 )
-def create_vector_database(
-    payload: VectorDatabaseProviderWriteRequest,
+def create_vector_target(
+    payload: VectorTargetWriteRequest,
     request: Request,
-) -> VectorDatabaseProviderRecord:
+) -> VectorTargetRecordResponse:
     _require_admin_proxy(request)
     try:
-        host, port, local_path = _prepare_vector_database_target(payload)
-        provider = vector_database_store.create(
+        target = vector_target_store.upsert_qdrant(
+            endpoint=payload.endpoint,
             name=payload.name,
-            engine=payload.engine,
-            connection_mode=payload.connection_mode,
-            host=host,
-            port=port,
-            use_tls=payload.use_tls,
-            storage_namespace=payload.storage_namespace,
-            local_path=local_path,
-            embedding_model_path=payload.embedding_model_path,
-            embedding_models=payload.embedding_models,
-            enabled=payload.enabled,
+            credential_ref=payload.credential_ref,
         )
-        provider = _vector_database_probe(provider)
-        return _vector_database_record(provider)
-    except VectorDatabaseRegistryError as exc:
-        raise _vector_database_store_error(exc) from exc
-
-
-@app.put(
-    "/v1/admin/vector-databases/{provider_id}",
-    response_model=VectorDatabaseProviderRecord,
-    tags=["System"],
-    summary="Update and redetect a VectorDB target",
-)
-def update_vector_database(
-    provider_id: str,
-    payload: VectorDatabaseProviderWriteRequest,
-    request: Request,
-) -> VectorDatabaseProviderRecord:
-    _require_admin_proxy(request)
-    try:
-        host, port, local_path = _prepare_vector_database_target(payload)
-        provider = vector_database_store.update(
-            provider_id,
-            name=payload.name,
-            engine=payload.engine,
-            connection_mode=payload.connection_mode,
-            host=host,
-            port=port,
-            use_tls=payload.use_tls,
-            storage_namespace=payload.storage_namespace,
-            local_path=local_path,
-            embedding_model_path=payload.embedding_model_path,
-            embedding_models=payload.embedding_models,
-            enabled=payload.enabled,
-        )
-        if provider is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="VectorDB provider was not found",
-            )
-        provider = _vector_database_probe(provider)
-        return _vector_database_record(provider)
-    except VectorDatabaseRegistryError as exc:
-        raise _vector_database_store_error(exc) from exc
+    except (VectorTargetStoreError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return _vector_target_response(target, active_vector_target_id=_active_vector_target_id())
 
 
 @app.post(
-    "/v1/admin/vector-databases/{provider_id}/discover",
-    response_model=VectorDatabaseProviderRecord,
+    "/v1/admin/vector-targets/{vector_target_id}/verify",
+    response_model=VectorTargetRecordResponse,
     tags=["System"],
-    summary="Repeat VectorDB engine and collection discovery",
+    include_in_schema=False,
 )
-def discover_vector_database(
-    provider_id: str,
+def verify_vector_target(
+    vector_target_id: str,
     request: Request,
-) -> VectorDatabaseProviderRecord:
+) -> VectorTargetRecordResponse:
     _require_admin_proxy(request)
     try:
-        provider = vector_database_store.get(provider_id)
-        if provider is None:
+        target = vector_target_store.get(vector_target_id)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VectorTarget not found")
+        health = QdrantVectorAdapter(
+            target.endpoint,
+            bootstrap_settings.qdrant_api_key,
+            bootstrap_settings.request_timeout_seconds,
+        ).health()
+        target = vector_target_store.set_status(
+            vector_target_id,
+            status="healthy" if health.reachable else "unavailable",
+            error=health.detail,
+            latency_ms=(round(health.latency_ms) if health.latency_ms is not None else None),
+            checked=True,
+        )
+    except VectorTargetStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="VectorTarget verification failed",
+        ) from exc
+    runtime_settings_resolver.invalidate()
+    return _vector_target_response(target, active_vector_target_id=_active_vector_target_id())
+
+
+@app.post(
+    "/v1/admin/vector-targets/{vector_target_id}/select",
+    response_model=RuntimeServiceSettingsResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def select_vector_target(
+    vector_target_id: str,
+    request: Request,
+) -> RuntimeServiceSettingsResponse:
+    _require_admin_proxy(request)
+    try:
+        target = vector_target_store.get(vector_target_id)
+        if (
+            target is None
+            or not target.enabled
+            or target.tenant_id != (bootstrap_settings.snapshot_tenant_id.strip() or "vision-default")
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Enabled VectorTarget not found")
+        value = runtime_service_store.select_vector_target(vector_target_id)
+    except VectorTargetStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="VectorTarget registry is unavailable",
+        ) from exc
+    except RuntimeServiceSettingsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    runtime_settings_resolver.invalidate()
+    return _runtime_service_settings_response(value)
+
+
+def _embedding_profile_response(
+    profile: EmbeddingProfileRecord,
+    *,
+    active_embedding_profile_id: str | None = None,
+) -> EmbeddingProfileRecordResponse:
+    return EmbeddingProfileRecordResponse(
+        embedding_profile_id=profile.embedding_profile_id,
+        tenant_id=profile.tenant_id,
+        name=profile.name,
+        deployment=profile.deployment,
+        provider=profile.provider,
+        base_url=profile.base_url,
+        model=profile.model,
+        model_id=profile.model_id,
+        dimension=profile.dimension,
+        batch_size=profile.batch_size,
+        credential_ref=profile.credential_ref,
+        status=profile.status,
+        error=profile.error,
+        latency_ms=profile.latency_ms,
+        last_checked_at=profile.last_checked_at,
+        active=profile.embedding_profile_id == active_embedding_profile_id,
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+    )
+
+
+def _active_embedding_profile_id() -> str | None:
+    try:
+        runtime = runtime_service_store.get(refresh=True)
+    except RuntimeServiceSettingsError:
+        runtime = runtime_service_store.cached()
+    if runtime is None or not runtime.vector.embedding_profile_id:
+        return None
+    return runtime.vector.embedding_profile_id
+
+
+@app.get(
+    "/v1/admin/embedding-profiles",
+    response_model=EmbeddingProfileListResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def list_embedding_profiles(request: Request) -> EmbeddingProfileListResponse:
+    _require_admin_proxy(request)
+    try:
+        profiles = embedding_profile_store.list()
+    except EmbeddingProfileStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL EmbeddingProfile registry is unavailable",
+        ) from exc
+    active_id = _active_embedding_profile_id()
+    return EmbeddingProfileListResponse(
+        profiles=[
+            _embedding_profile_response(profile, active_embedding_profile_id=active_id)
+            for profile in profiles
+        ],
+        active_embedding_profile_id=active_id,
+    )
+
+
+@app.post(
+    "/v1/admin/embedding-profiles",
+    response_model=EmbeddingProfileRecordResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def create_embedding_profile(
+    payload: EmbeddingProfileWriteRequest,
+    request: Request,
+) -> EmbeddingProfileRecordResponse:
+    _require_admin_proxy(request)
+    try:
+        profile = embedding_profile_store.upsert(
+            name=payload.name,
+            deployment=payload.deployment,
+            provider=payload.provider,
+            base_url=payload.base_url,
+            model=payload.model,
+            model_id=payload.model_id,
+            dimension=payload.dimension,
+            batch_size=payload.batch_size,
+            credential_ref=payload.credential_ref,
+        )
+    except (EmbeddingProfileStoreError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return _embedding_profile_response(
+        profile, active_embedding_profile_id=_active_embedding_profile_id()
+    )
+
+
+@app.post(
+    "/v1/admin/embedding-profiles/{embedding_profile_id}/verify",
+    response_model=EmbeddingProfileRecordResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def verify_embedding_profile(
+    embedding_profile_id: str,
+    request: Request,
+) -> EmbeddingProfileRecordResponse:
+    _require_admin_proxy(request)
+    try:
+        profile = embedding_profile_store.get(embedding_profile_id)
+        if profile is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="EmbeddingProfile not found"
+            )
+        probe_settings = replace(
+            bootstrap_settings,
+            embedding_profile_id=profile.embedding_profile_id,
+            embedding_deployment=profile.deployment,
+            embedding_provider=profile.provider,
+            embedding_base_url=profile.base_url,
+            embedding_model=profile.model,
+            embedding_model_id=profile.model_id,
+            embedding_dimension=profile.dimension,
+            embedding_batch_size=profile.batch_size,
+        )
+        started = perf_counter()
+        try:
+            EmbeddingService(probe_settings).embed("vision embedding profile verification", "query")
+            latency_ms = round((perf_counter() - started) * 1000)
+            profile = embedding_profile_store.set_status(
+                embedding_profile_id,
+                status="healthy",
+                error=None,
+                latency_ms=latency_ms,
+                checked=True,
+            )
+        except ServiceError as exc:
+            latency_ms = round((perf_counter() - started) * 1000)
+            profile = embedding_profile_store.set_status(
+                embedding_profile_id,
+                status="unavailable",
+                error=str(exc),
+                latency_ms=latency_ms,
+                checked=True,
+            )
+    except EmbeddingProfileStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="EmbeddingProfile verification failed",
+        ) from exc
+    runtime_settings_resolver.invalidate()
+    return _embedding_profile_response(
+        profile, active_embedding_profile_id=_active_embedding_profile_id()
+    )
+
+
+@app.post(
+    "/v1/admin/embedding-profiles/{embedding_profile_id}/select",
+    response_model=RuntimeServiceSettingsResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def select_embedding_profile(
+    embedding_profile_id: str,
+    request: Request,
+) -> RuntimeServiceSettingsResponse:
+    _require_admin_proxy(request)
+    try:
+        profile = embedding_profile_store.get(embedding_profile_id)
+        if (
+            profile is None
+            or not profile.enabled
+            or profile.tenant_id != (bootstrap_settings.snapshot_tenant_id.strip() or "vision-default")
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="VectorDB provider was not found",
+                detail="Enabled EmbeddingProfile not found",
             )
-        return _vector_database_record(_vector_database_probe(provider))
-    except VectorDatabaseRegistryError as exc:
-        raise _vector_database_store_error(exc) from exc
-
-
-@app.delete(
-    "/v1/admin/vector-databases/{provider_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    tags=["System"],
-    summary="Remove a VectorDB registration without deleting its data",
-)
-def delete_vector_database(provider_id: str, request: Request) -> None:
-    _require_admin_proxy(request)
-    try:
-        deleted = vector_database_store.delete(provider_id)
-    except VectorDatabaseRegistryError as exc:
-        raise _vector_database_store_error(exc) from exc
-    if not deleted:
+        value = runtime_service_store.select_embedding_profile(embedding_profile_id)
+    except EmbeddingProfileStoreError as exc:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="VectorDB provider was not found",
-        )
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="EmbeddingProfile registry is unavailable",
+        ) from exc
+    except RuntimeServiceSettingsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    runtime_settings_resolver.invalidate()
+    return _runtime_service_settings_response(value)
 
 
 @app.get(
@@ -2273,6 +3117,825 @@ def get_runtime_service_settings(
     return _runtime_service_settings_response(value)
 
 
+def _vector_index_response(record: VectorIndexRecord) -> VectorIndexRecordResponse:
+    return VectorIndexRecordResponse(
+        vector_index_id=record.vector_index_id,
+        tenant_id=record.tenant_id,
+        name=record.name,
+        vector_target_id=record.vector_target_id,
+        embedding_profile_id=record.embedding_profile_id,
+        collection=record.collection,
+        selector=record.selector,
+        index_version=record.index_version,
+        distance_metric=record.distance_metric,
+        ownership_mode=record.ownership_mode,
+        query_strategy=record.query_strategy,
+        status=record.status,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+@app.get(
+    "/v1/admin/vector-indexes",
+    response_model=VectorIndexListResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def list_vector_indexes(request: Request) -> VectorIndexListResponse:
+    _require_admin_proxy(request)
+    try:
+        records = vector_index_store.list(
+            tenant_id=bootstrap_settings.snapshot_tenant_id.strip() or "vision-default"
+        )
+    except VectorIndexStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL VectorIndex registry is unavailable",
+        ) from exc
+    return VectorIndexListResponse(
+        indexes=[_vector_index_response(record) for record in records],
+        total=len(records),
+    )
+
+
+@app.get(
+    "/v1/admin/vector-indexes/{vector_index_id}",
+    response_model=VectorIndexRecordResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def get_vector_index(
+    vector_index_id: str, request: Request
+) -> VectorIndexRecordResponse:
+    _require_admin_proxy(request)
+    try:
+        record = vector_index_store.get(vector_index_id)
+    except VectorIndexStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL VectorIndex registry is unavailable",
+        ) from exc
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VectorIndex not found")
+    return _vector_index_response(record)
+
+
+def _external_vector_index_verification_response(
+    record: ExternalVectorIndexVerificationRecord,
+) -> ExternalVectorIndexVerificationResponse:
+    return ExternalVectorIndexVerificationResponse(
+        vector_index_id=record.vector_index_id,
+        tenant_id=record.tenant_id,
+        verification_state=record.verification_state,
+        verification_method=record.verification_method,
+        embedding_profile_attested=record.embedding_profile_attested,
+        expected_dimension=record.expected_dimension,
+        observed_dimension=record.observed_dimension,
+        expected_distance_metric=record.expected_distance_metric,
+        observed_distance_metric=record.observed_distance_metric,
+        observed_vector_type=record.observed_vector_type,
+        observed_points_count=record.observed_points_count,
+        selector_points_count=record.selector_points_count,
+        sample_size=record.sample_size,
+        sample_payload_keys=record.sample_payload_keys,
+        last_verified_at=record.last_verified_at,
+        error=record.error,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+def _external_adapter(target: VectorTargetRecord) -> QdrantVectorAdapter:
+    if target.engine != "qdrant":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"External VectorIndex discovery is unsupported for engine={target.engine}",
+        )
+    if not target.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="VectorTarget is disabled",
+        )
+    return QdrantVectorAdapter(
+        target.endpoint,
+        bootstrap_settings.qdrant_api_key,
+        bootstrap_settings.request_timeout_seconds,
+    )
+
+
+@app.get(
+    "/v1/admin/vector-targets/{vector_target_id}/indexes/discover",
+    response_model=ExternalVectorIndexDiscoveryResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def discover_external_vector_indexes(
+    vector_target_id: str,
+    request: Request,
+) -> ExternalVectorIndexDiscoveryResponse:
+    """Discover physical collections without attaching or trusting them."""
+    _require_admin_proxy(request)
+    try:
+        target = vector_target_store.get(vector_target_id)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VectorTarget not found")
+        states = _external_adapter(target).discover_indexes()
+    except VectorTargetStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="VectorTarget registry is unavailable",
+        ) from exc
+    except VectorStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"External VectorIndex discovery failed: {exc}",
+        ) from exc
+    items = [
+        ExternalVectorIndexDiscoveryItem(
+            collection=item.collection,
+            dimension=item.dimension,
+            distance_metric=item.distance_metric,
+            vector_type=item.vector_type,
+            points_count=item.points_count,
+            status=item.status,
+        )
+        for item in states
+    ]
+    return ExternalVectorIndexDiscoveryResponse(
+        vector_target_id=vector_target_id,
+        indexes=items,
+        total=len(items),
+    )
+
+
+@app.post(
+    "/v1/admin/vector-indexes/attach",
+    response_model=ExternalVectorIndexAttachResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def attach_external_vector_index(
+    payload: ExternalVectorIndexAttachRequest,
+    request: Request,
+) -> ExternalVectorIndexAttachResponse:
+    """Attach an existing collection as unverified external logical data."""
+    _require_admin_proxy(request)
+    try:
+        target = vector_target_store.get(payload.vector_target_id)
+        profile = embedding_profile_store.get(payload.embedding_profile_id)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VectorTarget not found")
+        if profile is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EmbeddingProfile not found")
+        if not profile.enabled:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EmbeddingProfile is disabled")
+        adapter = _external_adapter(target)
+        state = adapter.describe_index(VectorIndexRef(collection=payload.collection))
+        if not state.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"External collection does not exist: {payload.collection}",
+            )
+        distance_metric = payload.distance_metric or state.distance_metric
+        if not distance_metric:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="External collection distance metric cannot be determined; specify distance_metric explicitly",
+            )
+        index = vector_index_store.register_external(
+            tenant_id=bootstrap_settings.snapshot_tenant_id.strip() or "vision-default",
+            name=payload.name or payload.collection,
+            vector_target_id=target.vector_target_id,
+            embedding_profile_id=profile.embedding_profile_id,
+            collection=payload.collection,
+            selector=payload.selector,
+            index_version=payload.index_version,
+            distance_metric=distance_metric,
+            query_strategy=payload.query_strategy,
+        )
+        verification = external_vector_index_verification_store.get(index.vector_index_id)
+        if verification is None:
+            verification = external_vector_index_verification_store.upsert_probe(
+                vector_index_id=index.vector_index_id,
+                tenant_id=index.tenant_id,
+                verification_state="unverified",
+                embedding_profile_attested=False,
+                expected_dimension=profile.dimension,
+                observed_dimension=state.dimension,
+                expected_distance_metric=index.distance_metric,
+                observed_distance_metric=state.distance_metric,
+                observed_vector_type=state.vector_type,
+                observed_points_count=state.points_count,
+                selector_points_count=None,
+                sample_size=0,
+                sample_payload_keys=[],
+                error="External collection attached; explicit compatibility verification is required",
+                checked=False,
+            )
+    except (VectorTargetStoreError, EmbeddingProfileStoreError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vector target/profile registry is unavailable",
+        ) from exc
+    except (VectorIndexStoreError, ExternalVectorIndexVerificationStoreError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except VectorStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"External collection probe failed: {exc}",
+        ) from exc
+    return ExternalVectorIndexAttachResponse(
+        index=_vector_index_response(index),
+        verification=_external_vector_index_verification_response(verification),
+    )
+
+
+@app.get(
+    "/v1/admin/vector-indexes/{vector_index_id}/verification",
+    response_model=ExternalVectorIndexVerificationResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def get_external_vector_index_verification(
+    vector_index_id: str,
+    request: Request,
+) -> ExternalVectorIndexVerificationResponse:
+    _require_admin_proxy(request)
+    try:
+        verification = external_vector_index_verification_store.get(vector_index_id)
+    except ExternalVectorIndexVerificationStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="External VectorIndex verification registry is unavailable",
+        ) from exc
+    if verification is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="External VectorIndex verification not found")
+    return _external_vector_index_verification_response(verification)
+
+
+@app.post(
+    "/v1/admin/vector-indexes/{vector_index_id}/verify",
+    response_model=ExternalVectorIndexVerificationResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def verify_external_vector_index(
+    vector_index_id: str,
+    payload: ExternalVectorIndexVerifyRequest,
+    request: Request,
+) -> ExternalVectorIndexVerificationResponse:
+    """Probe structural compatibility and separately require embedding-space attestation."""
+    _require_admin_proxy(request)
+    try:
+        index = vector_index_store.get(vector_index_id)
+        if index is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VectorIndex not found")
+        if index.ownership_mode != "external_attached":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Only external_attached VectorIndexes use P2-H verification",
+            )
+        target = vector_target_store.get(index.vector_target_id)
+        profile = embedding_profile_store.get(index.embedding_profile_id)
+        if target is None or profile is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="VectorIndex target/profile reference cannot be resolved",
+            )
+        previous = external_vector_index_verification_store.get(vector_index_id)
+        attested = bool(payload.embedding_profile_attested or (previous and previous.embedding_profile_attested))
+        adapter = _external_adapter(target)
+        health = adapter.health()
+        if not health.reachable:
+            verification = external_vector_index_verification_store.upsert_probe(
+                vector_index_id=index.vector_index_id,
+                tenant_id=index.tenant_id,
+                verification_state="unavailable",
+                embedding_profile_attested=attested,
+                expected_dimension=profile.dimension,
+                observed_dimension=None,
+                expected_distance_metric=index.distance_metric,
+                observed_distance_metric=None,
+                observed_vector_type=None,
+                observed_points_count=None,
+                selector_points_count=None,
+                sample_size=0,
+                sample_payload_keys=[],
+                error=health.detail or "VectorTarget is unavailable",
+            )
+            vector_index_store.update_status(vector_index_id, "unavailable")
+            return _external_vector_index_verification_response(verification)
+
+        ref = VectorIndexRef(
+            collection=index.collection,
+            selector=VectorSelector(dict(index.selector)),
+        )
+        state = adapter.describe_index(ref)
+        selector_count = adapter.count(ref) if state.exists else None
+        samples = (
+            adapter.sample(ref, limit=payload.sample_limit, include_vectors=False)
+            if state.exists
+            else []
+        )
+        evaluation = evaluate_external_index_probe(
+            state=state,
+            expected_dimension=profile.dimension,
+            expected_distance_metric=index.distance_metric,
+            embedding_profile_attested=attested,
+        )
+        verification = external_vector_index_verification_store.upsert_probe(
+            vector_index_id=index.vector_index_id,
+            tenant_id=index.tenant_id,
+            verification_state=evaluation.verification_state,
+            embedding_profile_attested=attested,
+            expected_dimension=profile.dimension,
+            observed_dimension=state.dimension,
+            expected_distance_metric=index.distance_metric,
+            observed_distance_metric=state.distance_metric,
+            observed_vector_type=state.vector_type,
+            observed_points_count=state.points_count,
+            selector_points_count=selector_count,
+            sample_size=len(samples),
+            sample_payload_keys=sample_payload_keys(samples),
+            error=evaluation.error,
+        )
+        vector_index_store.update_status(
+            vector_index_id,
+            "ready" if evaluation.verification_state == "compatible" else "unavailable",
+        )
+    except (VectorIndexStoreError, ExternalVectorIndexVerificationStoreError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except (VectorTargetStoreError, EmbeddingProfileStoreError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vector target/profile registry is unavailable",
+        ) from exc
+    except VectorStoreError as exc:
+        try:
+            index = vector_index_store.get(vector_index_id)
+            profile = embedding_profile_store.get(index.embedding_profile_id) if index else None
+            if index and profile:
+                external_vector_index_verification_store.upsert_probe(
+                    vector_index_id=index.vector_index_id,
+                    tenant_id=index.tenant_id,
+                    verification_state="unavailable",
+                    embedding_profile_attested=bool(payload.embedding_profile_attested),
+                    expected_dimension=profile.dimension,
+                    observed_dimension=None,
+                    expected_distance_metric=index.distance_metric,
+                    observed_distance_metric=None,
+                    observed_vector_type=None,
+                    observed_points_count=None,
+                    selector_points_count=None,
+                    sample_size=0,
+                    sample_payload_keys=[],
+                    error=str(exc),
+                )
+                vector_index_store.update_status(vector_index_id, "unavailable")
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"External VectorIndex verification probe failed: {exc}",
+        ) from exc
+    return _external_vector_index_verification_response(verification)
+
+
+@app.post(
+    "/v1/admin/snapshot-vector-bindings/external/verify",
+    response_model=SnapshotVectorBindingRecordResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def verify_external_snapshot_vector_binding(
+    payload: ExternalSnapshotVectorBindingVerifyRequest,
+    request: Request,
+) -> SnapshotVectorBindingRecordResponse:
+    """Verify or explicitly attest that an external logical index represents one Snapshot."""
+    _require_admin_proxy(request)
+    try:
+        index = vector_index_store.get(payload.vector_index_id)
+        if index is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VectorIndex not found")
+        if index.ownership_mode != "external_attached":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="External Snapshot binding requires an external_attached VectorIndex",
+            )
+        verification = external_vector_index_verification_store.get(index.vector_index_id)
+        if verification is None or verification.verification_state != "compatible" or index.status != "ready":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="External VectorIndex must be compatible and ready before Snapshot binding",
+            )
+        snapshot = repository_store.get_snapshot(payload.snapshot_id)
+        if snapshot is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Snapshot not found")
+        if str(snapshot.get("status") or "") != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Only completed immutable Snapshots can be bound to an external VectorIndex",
+            )
+
+        if payload.mode == "manual":
+            if not payload.snapshot_attested:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="manual external Snapshot binding requires snapshot_attested=true",
+                )
+            evidence = {
+                "proof_mode": "manual_attestation",
+                "snapshot_attested": True,
+                "external_index_verification_state": verification.verification_state,
+                "embedding_profile_attested": verification.embedding_profile_attested,
+            }
+            method = "manual"
+        else:
+            target = vector_target_store.get(index.vector_target_id)
+            if target is None:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VectorTarget not found")
+            adapter = _external_adapter(target)
+            ref = VectorIndexRef(
+                collection=index.collection,
+                selector=VectorSelector(dict(index.selector)),
+            )
+            selector_count = adapter.count(ref)
+            samples = adapter.sample(ref, limit=payload.sample_limit, include_vectors=False)
+            entries = repository_store.list_snapshot_indexable_entries(payload.snapshot_id)
+            evaluation = evaluate_external_snapshot_probe(
+                snapshot_id=payload.snapshot_id,
+                project_id=str(snapshot.get("project_id") or ""),
+                selector=index.selector,
+                samples=samples,
+                snapshot_entries=entries,
+                selector_points_count=selector_count,
+            )
+            if not evaluation.compatible:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"EXTERNAL_SNAPSHOT_BINDING_UNVERIFIED: {evaluation.error}",
+                )
+            evidence = evaluation.evidence
+            method = "external_probe"
+
+        binding = snapshot_vector_binding_store.register_external_verification(
+            snapshot_id=payload.snapshot_id,
+            vector_index_id=index.vector_index_id,
+            verification_method=method,
+            verification_evidence=evidence,
+        )
+    except RepositoryStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Repository Snapshot registry is unavailable",
+        ) from exc
+    except (VectorIndexStoreError, ExternalVectorIndexVerificationStoreError, SnapshotVectorBindingStoreError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except VectorTargetStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="VectorTarget registry is unavailable",
+        ) from exc
+    except VectorStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"External Snapshot binding probe failed: {exc}",
+        ) from exc
+    return _snapshot_vector_binding_response(binding)
+
+
+def _snapshot_vector_binding_response(
+    record: SnapshotVectorBindingRecord,
+) -> SnapshotVectorBindingRecordResponse:
+    return SnapshotVectorBindingRecordResponse(
+        binding_id=record.binding_id,
+        tenant_id=record.tenant_id,
+        snapshot_id=record.snapshot_id,
+        vector_index_id=record.vector_index_id,
+        generation_id=record.generation_id,
+        binding_source=record.binding_source,
+        verification_state=record.verification_state,
+        verification_method=record.verification_method,
+        snapshot_fingerprint=record.snapshot_fingerprint,
+        vector_index_identity_key=record.vector_index_identity_key,
+        verification_evidence=record.verification_evidence,
+        verified_at=record.verified_at,
+        error=record.error,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+@app.get(
+    "/v1/admin/snapshot-vector-bindings",
+    response_model=SnapshotVectorBindingListResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def list_snapshot_vector_bindings(request: Request) -> SnapshotVectorBindingListResponse:
+    _require_admin_proxy(request)
+    try:
+        records = snapshot_vector_binding_store.list(
+            tenant_id=bootstrap_settings.snapshot_tenant_id.strip() or "vision-default"
+        )
+    except SnapshotVectorBindingStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL SnapshotVectorBinding registry is unavailable",
+        ) from exc
+    return SnapshotVectorBindingListResponse(
+        bindings=[_snapshot_vector_binding_response(record) for record in records],
+        total=len(records),
+    )
+
+
+@app.get(
+    "/v1/admin/snapshot-vector-bindings/{binding_id}",
+    response_model=SnapshotVectorBindingRecordResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def get_snapshot_vector_binding(
+    binding_id: str, request: Request
+) -> SnapshotVectorBindingRecordResponse:
+    _require_admin_proxy(request)
+    try:
+        record = snapshot_vector_binding_store.get(binding_id)
+    except SnapshotVectorBindingStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL SnapshotVectorBinding registry is unavailable",
+        ) from exc
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="SnapshotVectorBinding not found",
+        )
+    return _snapshot_vector_binding_response(record)
+
+
+
+def _project_vector_route_actor(request: Request) -> str:
+    return str(
+        getattr(request.state, "frontend_client_id", None)
+        or getattr(request.state, "client_id", None)
+        or "admin-dashboard"
+    )
+
+
+def _project_vector_route_candidate_response(
+    project_id: str,
+    candidate: RouteCandidateContext,
+    *,
+    active_binding_id: str | None,
+) -> ProjectVectorRouteCandidateResponse:
+    eligible = True
+    reason: str | None = None
+    try:
+        project_vector_route_store.validate_candidate(project_id, candidate)
+    except ProjectVectorRouteStoreError as exc:
+        eligible = False
+        reason = str(exc)
+    routable = eligible and project_vector_route_store.current_runtime_routable(candidate)
+    if eligible and not routable:
+        reason = (
+            "Current Vision runtime requires external payload keys: "
+            "content, document_id, chunk_id. P3 hydration may later lift this restriction."
+        )
+    return ProjectVectorRouteCandidateResponse(
+        binding_id=candidate.binding_id,
+        snapshot_id=candidate.snapshot_id,
+        generation_id=candidate.generation_id,
+        generation_status=candidate.generation_status,
+        vector_index_id=candidate.vector_index_id,
+        ownership_mode=candidate.ownership_mode,
+        binding_source=candidate.binding_source,
+        verification_method=candidate.verification_method,
+        vector_target_id=candidate.vector_target_id,
+        embedding_profile_id=candidate.embedding_profile_id,
+        vector_index_status=candidate.vector_index_status,
+        vector_target_status=candidate.vector_target_status,
+        embedding_profile_status=candidate.embedding_profile_status,
+        external_verification_state=candidate.external_verification_state,
+        payload_keys=list(candidate.sample_payload_keys),
+        eligible=eligible,
+        routable=routable,
+        active=candidate.binding_id == active_binding_id,
+        reason=reason,
+    )
+
+
+def _project_vector_route_response(
+    record: ProjectVectorRouteRecord,
+) -> ProjectVectorRouteRecordResponse:
+    active = None
+    if record.active_binding_id:
+        candidate = project_vector_route_store.candidate_context(record.active_binding_id)
+        if candidate is not None:
+            active = _project_vector_route_candidate_response(
+                record.project_id, candidate, active_binding_id=record.active_binding_id
+            )
+    return ProjectVectorRouteRecordResponse(
+        project_id=record.project_id,
+        tenant_id=record.tenant_id,
+        active_binding_id=record.active_binding_id,
+        routing_mode=record.routing_mode,
+        revision=record.revision,
+        selected_by=record.selected_by,
+        selected_at=record.selected_at,
+        reason=record.reason,
+        active=active,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+def _require_vector_route_live_preflight(candidate: RouteCandidateContext) -> None:
+    try:
+        target = vector_target_store.get(candidate.vector_target_id)
+    except VectorTargetStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="VectorTarget registry is unavailable",
+        ) from exc
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VectorTarget not found")
+    health = _external_adapter(target).health()
+    if not health.reachable:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"VECTOR_ROUTE_TARGET_UNAVAILABLE: {health.detail or 'Qdrant is unreachable'}",
+        )
+
+
+@app.get(
+    "/v1/admin/projects/{project_id:path}/vector-route",
+    response_model=ProjectVectorRouteRecordResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def get_project_vector_route(project_id: str, request: Request) -> ProjectVectorRouteRecordResponse:
+    _require_admin_proxy(request)
+    try:
+        record = project_vector_route_store.get(project_id)
+    except ProjectVectorRouteStoreError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="PROJECT_VECTOR_ROUTE_REQUIRED: project has no P2-I retrieval route",
+        )
+    return _project_vector_route_response(record)
+
+
+@app.get(
+    "/v1/admin/projects/{project_id:path}/vector-route/candidates",
+    response_model=ProjectVectorRouteCandidateListResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def list_project_vector_route_candidates(
+    project_id: str, request: Request
+) -> ProjectVectorRouteCandidateListResponse:
+    _require_admin_proxy(request)
+    try:
+        route = project_vector_route_store.get(project_id)
+        bindings = snapshot_vector_binding_store.list(
+            tenant_id=bootstrap_settings.snapshot_tenant_id.strip() or "vision-default"
+        )
+        candidates: list[ProjectVectorRouteCandidateResponse] = []
+        for binding in bindings:
+            candidate = project_vector_route_store.candidate_context(binding.binding_id)
+            if candidate is None or candidate.snapshot_project_id != project_id:
+                continue
+            candidates.append(
+                _project_vector_route_candidate_response(
+                    project_id,
+                    candidate,
+                    active_binding_id=route.active_binding_id if route else None,
+                )
+            )
+    except (ProjectVectorRouteStoreError, SnapshotVectorBindingStoreError) as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return ProjectVectorRouteCandidateListResponse(
+        project_id=project_id,
+        active_binding_id=route.active_binding_id if route else None,
+        routing_mode=route.routing_mode if route else "managed_auto",
+        revision=route.revision if route else 0,
+        candidates=candidates,
+    )
+
+
+@app.put(
+    "/v1/admin/projects/{project_id:path}/vector-route",
+    response_model=ProjectVectorRouteRecordResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def set_project_vector_route(
+    project_id: str,
+    payload: ProjectVectorRouteWriteRequest,
+    request: Request,
+) -> ProjectVectorRouteRecordResponse:
+    _require_admin_proxy(request)
+    try:
+        candidate = project_vector_route_store.candidate_context(payload.binding_id)
+        if candidate is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SnapshotVectorBinding not found")
+        project_vector_route_store.validate_candidate(project_id, candidate)
+        if not project_vector_route_store.current_runtime_routable(candidate):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="VECTOR_ROUTE_NOT_ROUTABLE: current Vision runtime cannot consume this external payload contract",
+            )
+        _require_vector_route_live_preflight(candidate)
+        record = project_vector_route_store.set_route(
+            project_id=project_id,
+            binding_id=payload.binding_id,
+            routing_mode=payload.routing_mode,
+            expected_revision=payload.expected_revision,
+            actor=_project_vector_route_actor(request),
+            reason=payload.reason,
+        )
+    except ProjectVectorRouteConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ProjectVectorRouteStoreError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return _project_vector_route_response(record)
+
+
+@app.delete(
+    "/v1/admin/projects/{project_id:path}/vector-route",
+    response_model=ProjectVectorRouteRecordResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def clear_project_vector_route(
+    project_id: str,
+    payload: ProjectVectorRouteClearRequest,
+    request: Request,
+) -> ProjectVectorRouteRecordResponse:
+    _require_admin_proxy(request)
+    try:
+        record = project_vector_route_store.clear_route(
+            project_id=project_id,
+            expected_revision=payload.expected_revision,
+            actor=_project_vector_route_actor(request),
+            reason=payload.reason,
+        )
+    except ProjectVectorRouteConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ProjectVectorRouteStoreError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return _project_vector_route_response(record)
+
+
+@app.get(
+    "/v1/admin/projects/{project_id:path}/vector-route/events",
+    response_model=ProjectVectorRouteEventListResponse,
+    tags=["System"],
+    include_in_schema=False,
+)
+def list_project_vector_route_events(
+    project_id: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> ProjectVectorRouteEventListResponse:
+    _require_admin_proxy(request)
+    try:
+        events = project_vector_route_store.list_events(project_id, limit=limit)
+    except ProjectVectorRouteStoreError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return ProjectVectorRouteEventListResponse(
+        project_id=project_id,
+        events=[
+            ProjectVectorRouteEventResponse(
+                event_id=item.event_id,
+                project_id=item.project_id,
+                tenant_id=item.tenant_id,
+                from_binding_id=item.from_binding_id,
+                to_binding_id=item.to_binding_id,
+                routing_mode=item.routing_mode,
+                actor=item.actor,
+                reason=item.reason,
+                revision=item.revision,
+                created_at=item.created_at,
+            )
+            for item in events
+        ],
+    )
+
+
 @app.get(
     "/v1/admin/models",
     response_model=ModelListResponse,
@@ -2281,10 +3944,13 @@ def get_runtime_service_settings(
 )
 def list_admin_models(request: Request) -> ModelListResponse:
     _require_admin_proxy(request)
+    models = generation_router.models()
+    default_model_id = generation_router.default_model_id
     return ModelListResponse(
-        default_model_id=generation_router.default_model_id,
+        catalog_revision=model_catalog_revision(default_model_id, models),
+        default_model_id=default_model_id,
         checked_at=datetime.now(timezone.utc),
-        models=generation_router.models(),
+        models=models,
     )
 
 
@@ -2292,11 +3958,6 @@ def _ai_provider_record(provider: AIProvider) -> AIProviderRecord:
     models = [
         item.model_name
         for item in ai_provider_store.discovered_models()
-        if item.provider_id == provider.provider_id
-    ]
-    embedding_models = [
-        item.model_name
-        for item in ai_provider_store.discovered_embedding_models()
         if item.provider_id == provider.provider_id
     ]
     return AIProviderRecord(
@@ -2309,13 +3970,12 @@ def _ai_provider_record(provider: AIProvider) -> AIProviderRecord:
         api_key_hint=provider.api_key_hint,
         enabled=provider.enabled,
         deployment_type=provider.deployment_type,
+        chat_processing_mode=provider.chat_processing_mode,
         status=provider.status,
         error=provider.error,
         latency_ms=provider.latency_ms,
         model_count=provider.model_count,
         models=models,
-        embedding_model_count=len(embedding_models),
-        embedding_models=embedding_models,
         last_checked_at=provider.last_checked_at,
         created_at=provider.created_at,
         updated_at=provider.updated_at,
@@ -2389,6 +4049,7 @@ def create_ai_provider(
             api_key=payload.api_key,
             enabled=payload.enabled,
             deployment_type=payload.deployment_type,
+            chat_processing_mode=payload.chat_processing_mode,
         )
         if provider.enabled:
             provider = ai_provider_registry.discover(provider.provider_id)
@@ -2401,35 +4062,28 @@ def create_ai_provider(
     "/v1/admin/ai-providers/scan-ollama",
     response_model=OllamaScanResponse,
     tags=["System"],
-    summary="Scan known machines for Ollama and register chat-capable servers",
+    summary="Refresh administrator-configured Ollama-compatible model runtimes",
 )
 def scan_known_ollama_servers(request: Request) -> OllamaScanResponse:
-    """Scan explicit, known hosts only; this never sweeps the whole LAN."""
+    """Probe only endpoints already saved by an administrator; never guess LAN hosts or ports."""
 
     _require_admin_proxy(request)
-    candidates: dict[str, str] = {
-        "http://host.docker.internal:11434": "API Server Windows host",
-        "http://127.0.0.1:11434": "FastAPI process host",
-    }
     legacy_backendai_url = runtime_network_store.backendai_base_url().rstrip("/")
-    candidates[legacy_backendai_url] = "Configured AI Model Server"
+    candidates: dict[str, str] = {
+        legacy_backendai_url: "관리자 저장 기본 모델 실행 대상",
+    }
     try:
-        for client in frontend_client_store.list(refresh=True):
-            if client.enabled:
-                candidates.setdefault(
-                    f"http://{client.ip}:11434",
-                    f"Frontend Client · {client.name}",
-                )
-    except FrontendClientStoreError:
-        # Local and configured AI Server discovery remains useful even if the
-        # optional frontend registry is temporarily unavailable.
-        pass
-
-    try:
+        existing_provider_rows = ai_provider_store.list()
         existing_providers = {
             provider.base_url.rstrip("/"): provider
-            for provider in ai_provider_store.list()
+            for provider in existing_provider_rows
         }
+        for provider in existing_provider_rows:
+            if provider.enabled and provider.protocol == "ollama":
+                candidates.setdefault(
+                    provider.base_url.rstrip("/"),
+                    f"등록된 모델 실행 대상 · {provider.name}",
+                )
     except AIProviderStoreError as exc:
         raise _provider_store_unavailable(exc) from exc
 
@@ -2455,7 +4109,7 @@ def scan_known_ollama_servers(request: Request) -> OllamaScanResponse:
         result = results[base_url]
         provider_id: str | None = None
         registered = False
-        if result.models or result.embedding_models:
+        if result.models:
             existing = existing_providers.get(base_url)
             try:
                 if existing is not None:
@@ -2465,7 +4119,7 @@ def scan_known_ollama_servers(request: Request) -> OllamaScanResponse:
                     )
                     provider_id = existing.provider_id
                     registered = True
-                elif base_url == legacy_backendai_url and not result.embedding_models:
+                elif base_url == legacy_backendai_url:
                     provider_id = settings.backendai_public_model_id
                     registered = True
                 else:
@@ -2506,7 +4160,6 @@ def scan_known_ollama_servers(request: Request) -> OllamaScanResponse:
                 base_url=base_url,
                 status=result.status,
                 models=result.models,
-                embedding_models=result.embedding_models,
                 skipped_non_chat_models=result.skipped_models,
                 latency_ms=result.latency_ms,
                 error=result.error,
@@ -2522,240 +4175,7 @@ def scan_known_ollama_servers(request: Request) -> OllamaScanResponse:
         ),
         registered_providers=registered_count,
         chat_models=sum(len(target.models) for target in targets),
-        embedding_models=sum(
-            len(target.embedding_models) for target in targets
-        ),
     )
-
-
-@app.post(
-    "/v1/admin/ai-providers/scan-cloud",
-    response_model=CloudProviderScanResponse,
-    tags=["System"],
-    summary="Discover embedding models from configured Cloud API credentials",
-)
-def scan_configured_cloud_providers(
-    request: Request,
-) -> CloudProviderScanResponse:
-    _require_admin_proxy(request)
-    groq_runtime = runtime_service_store.groq_settings()
-    candidates = (
-        (
-            "NVIDIA API Catalog",
-            settings.ai_base_url.rstrip("/"),
-            settings.ai_api_key,
-        ),
-        (
-            "Groq Cloud",
-            groq_runtime.base_url.rstrip("/"),
-            settings.groq_api_key,
-        ),
-    )
-    try:
-        existing_by_url = {
-            provider.base_url.rstrip("/"): provider
-            for provider in ai_provider_store.list()
-        }
-    except AIProviderStoreError as exc:
-        raise _provider_store_unavailable(exc) from exc
-
-    targets: list[CloudProviderScanTarget] = []
-    registered_count = 0
-    for name, base_url, api_key in candidates:
-        if not api_key:
-            targets.append(
-                CloudProviderScanTarget(
-                    name=name,
-                    base_url=base_url,
-                    configured=False,
-                    status="not_configured",
-                    error="api_key_not_configured",
-                )
-            )
-            continue
-        result = ai_provider_registry.probe_openai_catalog(
-            base_url,
-            auth_type="bearer",
-            api_key=api_key,
-            timeout_seconds=10,
-        )
-        existing = existing_by_url.get(base_url)
-        provider_id: str | None = existing.provider_id if existing else None
-        registered = existing is not None
-        try:
-            if existing is not None:
-                # The configured Cloud credential is authoritative for its
-                # canonical Base URL. Refresh the encrypted copy without ever
-                # returning the secret to the browser.
-                refreshed = ai_provider_store.update(
-                    existing.provider_id,
-                    name=existing.name,
-                    protocol="openai",
-                    base_url=base_url,
-                    auth_type="bearer",
-                    api_key=api_key,
-                    clear_api_key=False,
-                    enabled=existing.enabled,
-                    deployment_type="cloud",
-                )
-                if refreshed is not None:
-                    ai_provider_store.update_discovery(
-                        refreshed.provider_id,
-                        result,
-                    )
-                    provider_id = refreshed.provider_id
-                    registered = True
-            elif result.embedding_models:
-                created = ai_provider_store.create(
-                    name=f"Cloud · {name}",
-                    protocol="openai",
-                    base_url=base_url,
-                    auth_type="bearer",
-                    api_key=api_key,
-                    enabled=True,
-                    deployment_type="cloud",
-                )
-                ai_provider_store.update_discovery(created.provider_id, result)
-                existing_by_url[base_url] = created
-                provider_id = created.provider_id
-                registered = True
-        except AIProviderStoreError as exc:
-            raise _provider_store_unavailable(exc) from exc
-        if registered:
-            registered_count += 1
-        targets.append(
-            CloudProviderScanTarget(
-                name=name,
-                base_url=base_url,
-                configured=True,
-                status=result.status,
-                chat_models=result.models,
-                embedding_models=result.embedding_models,
-                skipped_models=result.skipped_models,
-                latency_ms=result.latency_ms,
-                error=result.error,
-                registered=registered,
-                provider_id=provider_id,
-            )
-        )
-    return CloudProviderScanResponse(
-        checked_at=datetime.now(timezone.utc),
-        targets=targets,
-        configured_providers=sum(target.configured for target in targets),
-        registered_providers=registered_count,
-        chat_models=sum(len(target.chat_models) for target in targets),
-        embedding_models=sum(
-            len(target.embedding_models) for target in targets
-        ),
-    )
-
-
-@app.post(
-    "/v1/admin/ai-providers/cloud-credentials",
-    response_model=AIProviderRecord,
-    status_code=status.HTTP_201_CREATED,
-    tags=["System"],
-    summary="Register a Cloud API credential and discover chat/embedding models",
-)
-def register_cloud_provider_credential(
-    payload: CloudProviderCredentialRequest,
-    request: Request,
-) -> AIProviderRecord:
-    """Validate a Cloud credential before storing its encrypted value.
-
-    Known providers use their server-side canonical catalog URL, so the
-    administrator only supplies the provider type and API key. A custom
-    OpenAI-compatible service still requires an explicit Base URL because an
-    opaque API key cannot identify its issuer or endpoint.
-    """
-
-    _require_admin_proxy(request)
-    groq_runtime = runtime_service_store.groq_settings()
-    presets: dict[str, tuple[str, str]] = {
-        "nvidia": (
-            "Cloud · NVIDIA API Catalog",
-            settings.ai_base_url.rstrip("/"),
-        ),
-        "groq": (
-            "Cloud · Groq",
-            groq_runtime.base_url.rstrip("/"),
-        ),
-        "openai": (
-            "Cloud · OpenAI",
-            "https://api.openai.com/v1",
-        ),
-    }
-    if payload.provider_type == "custom":
-        default_name = "Cloud · Custom OpenAI Compatible"
-        base_url = str(payload.base_url).rstrip("/")
-        auth_type = payload.auth_type
-    else:
-        default_name, base_url = presets[payload.provider_type]
-        auth_type = "bearer"
-
-    result = ai_provider_registry.probe_openai_catalog(
-        base_url,
-        auth_type=auth_type,
-        api_key=payload.api_key,
-        timeout_seconds=10,
-    )
-    if result.status == "offline":
-        invalid_credential = result.error in {"http_401", "http_403"}
-        raise HTTPException(
-            status_code=(
-                status.HTTP_422_UNPROCESSABLE_ENTITY
-                if invalid_credential
-                else status.HTTP_502_BAD_GATEWAY
-            ),
-            detail=(
-                "The API key was rejected by the selected Cloud provider"
-                if invalid_credential
-                else f"Cloud provider model discovery failed: {result.error}"
-            ),
-        )
-    if not result.models and not result.embedding_models:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="The Cloud provider returned no recognizable chat or embedding models",
-        )
-
-    try:
-        existing = next(
-            (
-                provider
-                for provider in ai_provider_store.list()
-                if provider.base_url.rstrip("/") == base_url
-            ),
-            None,
-        )
-        if existing is None:
-            provider = ai_provider_store.create(
-                name=payload.name or default_name,
-                protocol="openai",
-                base_url=base_url,
-                auth_type=auth_type,
-                api_key=payload.api_key,
-                enabled=payload.enabled,
-                deployment_type="cloud",
-            )
-        else:
-            provider = ai_provider_store.update(
-                existing.provider_id,
-                name=payload.name or existing.name or default_name,
-                protocol="openai",
-                base_url=base_url,
-                auth_type=auth_type,
-                api_key=payload.api_key,
-                clear_api_key=False,
-                enabled=payload.enabled,
-                deployment_type="cloud",
-            )
-            if provider is None:
-                raise AIProviderStoreError("AI provider was not found")
-        provider = ai_provider_store.update_discovery(provider.provider_id, result)
-        return _ai_provider_record(provider)
-    except AIProviderStoreError as exc:
-        raise _provider_store_unavailable(exc) from exc
 
 
 @app.put(
@@ -2787,24 +4207,6 @@ def update_ai_provider(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Select another default model before disabling this provider",
             )
-        if not payload.enabled:
-            try:
-                selected_embedding_provider_id = runtime_service_store.get(
-                    refresh=True
-                ).vector.embedding_provider_id
-            except RuntimeServiceSettingsError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Runtime service settings are unavailable",
-                ) from exc
-            if selected_embedding_provider_id == provider_id:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=(
-                        "Select another embedding provider before disabling "
-                        "this provider"
-                    ),
-                )
         if (
             payload.auth_type != "none"
             and not payload.api_key
@@ -2839,6 +4241,7 @@ def update_ai_provider(
             clear_api_key=payload.clear_api_key or payload.auth_type == "none",
             enabled=payload.enabled,
             deployment_type=payload.deployment_type,
+            chat_processing_mode=payload.chat_processing_mode,
         )
         if provider is None:
             raise HTTPException(
@@ -2873,42 +4276,6 @@ def discover_ai_provider(
         raise _provider_store_unavailable(exc) from exc
 
 
-@app.post(
-    "/v1/admin/embedding-models/probe",
-    response_model=EmbeddingModelProbeResponse,
-    tags=["System"],
-    summary="Validate one discovered embedding model and return its dimension",
-)
-def probe_embedding_model(
-    payload: EmbeddingModelProbeRequest,
-    request: Request,
-) -> EmbeddingModelProbeResponse:
-    _require_admin_proxy(request)
-    try:
-        result = ai_provider_registry.probe_embedding(
-            payload.provider_id,
-            payload.model_name,
-        )
-    except AIProviderStoreError as exc:
-        detail = str(exc)
-        status_code = (
-            status.HTTP_404_NOT_FOUND
-            if "not found" in detail.casefold()
-            else status.HTTP_502_BAD_GATEWAY
-        )
-        raise HTTPException(status_code=status_code, detail=detail) from exc
-    return EmbeddingModelProbeResponse(
-        provider_id=result.provider_id,
-        provider_name=result.provider_name,
-        protocol=result.protocol,
-        base_url=result.base_url,
-        deployment_type=result.deployment_type,
-        model_name=result.model_name,
-        dimension=result.dimension,
-        latency_ms=result.latency_ms,
-    )
-
-
 @app.delete(
     "/v1/admin/ai-providers/{provider_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -2921,20 +4288,6 @@ def delete_ai_provider(provider_id: str, request: Request) -> Response:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Select another default model before deleting this provider",
-        )
-    try:
-        selected_embedding_provider_id = runtime_service_store.get(
-            refresh=True
-        ).vector.embedding_provider_id
-    except RuntimeServiceSettingsError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Runtime service settings are unavailable",
-        ) from exc
-    if selected_embedding_provider_id == provider_id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Select another embedding provider before deleting this provider",
         )
     try:
         deleted = ai_provider_store.delete(provider_id)
@@ -3024,99 +4377,72 @@ def update_runtime_service_settings(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="groq-default cannot be selected while Groq is disabled",
         )
-    if payload.vector.embedding_provider_id:
-        try:
-            embedding_provider = ai_provider_store.get(
-                payload.vector.embedding_provider_id,
-                with_secret=False,
-            )
-            embedding_models = {
-                item.model_name
-                for item in ai_provider_store.discovered_embedding_models()
-                if item.provider_id == payload.vector.embedding_provider_id
-            }
-        except AIProviderStoreError as exc:
-            raise _provider_store_unavailable(exc) from exc
-        if embedding_provider is None or not embedding_provider.enabled:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="embedding_provider_id must reference an enabled provider",
-            )
-        if payload.vector.embedding_model not in embedding_models:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    "embedding_model must be a discovered embedding model of "
-                    "embedding_provider_id"
-                ),
-            )
-        if payload.vector.embedding_provider != embedding_provider.protocol:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="embedding_provider must match the selected provider protocol",
-            )
-        if (
-            payload.vector.embedding_base_url.rstrip("/")
-            != embedding_provider.base_url.rstrip("/")
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="embedding_base_url must match the selected provider",
-            )
-        expected_model_id = (
-            f"{payload.vector.embedding_provider_id}:"
-            f"{payload.vector.embedding_model}"
-        )
-        if payload.vector.embedding_model_id != expected_model_id:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    "embedding_model_id must identify the selected provider and model"
-                ),
-            )
-        try:
-            probe = ai_provider_registry.probe_embedding(
-                payload.vector.embedding_provider_id,
-                payload.vector.embedding_model,
-            )
-        except AIProviderStoreError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=str(exc),
-            ) from exc
-        if payload.vector.embedding_dimension != probe.dimension:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    "embedding_dimension does not match the provider response: "
-                    f"expected={probe.dimension}"
-                ),
-            )
     try:
+        target = None
+        if payload.vector.vector_target_id:
+            target = vector_target_store.get(payload.vector.vector_target_id)
+            if target is None or not target.enabled:
+                raise VectorTargetStoreError("Selected VectorTarget is unavailable")
+            parsed_target = urlsplit(target.endpoint)
+            target_port = parsed_target.port or (443 if parsed_target.scheme == "https" else 80)
+            if (parsed_target.hostname or "") != payload.vector.host or target_port != payload.vector.port:
+                target = vector_target_store.upsert_qdrant(
+                    endpoint=f"http://{payload.vector.host}:{payload.vector.port}",
+                    name=f"Qdrant {payload.vector.host}:{payload.vector.port}",
+                )
+        else:
+            target = vector_target_store.upsert_qdrant(
+                endpoint=f"http://{payload.vector.host}:{payload.vector.port}",
+                name=f"Qdrant {payload.vector.host}:{payload.vector.port}",
+            )
+        existing_profile = None
+        if payload.vector.embedding_profile_id:
+            existing_profile = embedding_profile_store.get(
+                payload.vector.embedding_profile_id
+            )
+        profile = embedding_profile_store.upsert(
+            name=(
+                existing_profile.name
+                if existing_profile is not None
+                else payload.vector.embedding_model_id
+            ),
+            deployment=payload.vector.embedding_deployment,
+            provider=payload.vector.embedding_provider,
+            base_url=payload.vector.embedding_base_url,
+            model=payload.vector.embedding_model,
+            model_id=payload.vector.embedding_model_id,
+            dimension=payload.vector.embedding_dimension,
+            batch_size=payload.vector.embedding_batch_size,
+            credential_ref=(
+                existing_profile.credential_ref
+                if existing_profile is not None
+                else None
+            ),
+        )
         value = runtime_service_store.update(
             groq_enabled=payload.groq.enabled,
             groq_base_url=payload.groq.base_url,
             groq_model=payload.groq.model,
             default_model_id=payload.default_model_id,
-            vector_host=payload.vector.host,
-            vector_port=payload.vector.port,
+            vector_target_id=target.vector_target_id,
+            embedding_profile_id=profile.embedding_profile_id,
             vector_collection=payload.vector.collection,
-            embedding_deployment=payload.vector.embedding_deployment,
-            embedding_provider=payload.vector.embedding_provider,
-            embedding_provider_id=payload.vector.embedding_provider_id,
-            embedding_base_url=payload.vector.embedding_base_url,
-            embedding_model=payload.vector.embedding_model,
-            embedding_model_id=payload.vector.embedding_model_id,
-            embedding_dimension=payload.vector.embedding_dimension,
-            embedding_batch_size=payload.vector.embedding_batch_size,
             index_version=payload.vector.index_version,
         )
-    except RuntimeServiceSettingsError as exc:
+    except (
+        RuntimeServiceSettingsError,
+        VectorTargetStoreError,
+        EmbeddingProfileStoreError,
+        ValueError,
+    ) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="PostgreSQL runtime service settings are unavailable",
+            detail="PostgreSQL runtime service settings, VectorTarget, or EmbeddingProfile registry is unavailable",
         ) from exc
+    runtime_settings_resolver.invalidate()
     generation_router.invalidate_groq_status()
+    generation_router.invalidate_nvidia_status()
+    generation_router.invalidate_backendai_status()
     return _runtime_service_settings_response(value)
 
 
@@ -3390,7 +4716,7 @@ def upsert_repository_source(
     response_model=RepositoryIndexJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
     tags=["Projects"],
-    summary="Queue a repository snapshot and BGE-M3 index generation",
+    summary="Queue a repository snapshot and configured index generation",
 )
 def queue_repository_index(
     source_id: str,
@@ -3464,6 +4790,98 @@ def resume_repository_index(
     return _repository_job_response(row)
 
 
+def _read_project_briefing(
+    project_id: str,
+    commit_id: str | None,
+    request: Request,
+) -> ProjectBriefingResponse:
+    request_id = _request_id(request)
+    telemetry_client_id = _frontend_client_id(request, project_id)
+    started = perf_counter()
+    _safe_record_communication_event(
+        request_id=request_id,
+        channel="rag",
+        direction="fastapi_to_vectordb",
+        phase="rag.briefing.request",
+        status="started",
+        client_id=telemetry_client_id,
+        project_id=project_id,
+        provider="rag_lab",
+        details={
+            "endpoint": f"{rag_lab_client.base_url}/briefing",
+            "requested_commit_id": commit_id,
+        },
+    )
+    try:
+        binding = rag_lab_client.resolve_project(project_id)
+        value = rag_lab_client.briefing(binding.external_project_id)
+    except RagLabError as exc:
+        _safe_record_communication_event(
+            request_id=request_id,
+            channel="rag",
+            direction="vectordb_to_fastapi",
+            phase="rag.briefing.response",
+            status="error",
+            client_id=telemetry_client_id,
+            project_id=project_id,
+            status_code=exc.status_code,
+            duration_ms=round((perf_counter() - started) * 1000),
+            provider="rag_lab",
+            error=str(exc),
+        )
+        raise _service_error(exc) from exc
+    result = build_project_briefing_response(project_id, commit_id, binding, value)
+    _safe_record_communication_event(
+        request_id=request_id,
+        channel="rag",
+        direction="vectordb_to_fastapi",
+        phase="rag.briefing.response",
+        status="success",
+        client_id=telemetry_client_id,
+        project_id=project_id,
+        status_code=200,
+        duration_ms=round((perf_counter() - started) * 1000),
+        provider="rag_lab",
+        source_count=len(result.references),
+        details={
+            "external_project_id": result.external_project_id,
+            "revision_status": result.revision_status,
+            "outdated": result.outdated,
+        },
+    )
+    return result
+
+
+@app.get(
+    "/v1/projects/{project_id:path}/briefing",
+    response_model=ProjectBriefingResponse,
+    responses=ERROR_RESPONSES,
+    tags=["Projects"],
+    summary="Read the generated external RAG project briefing",
+)
+def get_project_briefing(
+    project_id: str,
+    request: Request,
+    commit_id: str | None = Query(default=None, min_length=7, max_length=64),
+) -> ProjectBriefingResponse:
+    return _read_project_briefing(project_id, commit_id, request)
+
+
+@app.get(
+    "/v1/briefing",
+    response_model=ProjectBriefingResponse,
+    responses=ERROR_RESPONSES,
+    tags=["Projects"],
+    summary="Compatibility route for the generated project briefing",
+)
+def get_project_briefing_compatibility(
+    request: Request,
+    project_id: str = Query(..., min_length=1, max_length=255),
+    commit_id: str | None = Query(default=None, min_length=7, max_length=64),
+) -> ProjectBriefingResponse:
+    return _read_project_briefing(project_id, commit_id, request)
+
+
 @app.get(
     "/v1/projects/{project_id:path}/tree",
     response_model=ProjectTreeResponse,
@@ -3478,7 +4896,7 @@ def get_project_tree(
     try:
         active, rows = repository_store.list_tree(project_id, normalized_path)
     except RepositoryStoreError as exc:
-        if "no active index generation" in str(exc):
+        if "no current snapshot" in str(exc):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=str(exc),
@@ -3515,7 +4933,7 @@ def get_project_file(
     try:
         active, row = repository_store.get_file(project_id, normalized_path)
     except RepositoryStoreError as exc:
-        if "no active index generation" in str(exc):
+        if "no current snapshot" in str(exc):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=str(exc),
@@ -3541,18 +4959,18 @@ def get_project_file(
     summary="Compare active PostgreSQL chunk mappings with Qdrant",
 )
 def validate_project_index(project_id: str) -> VectorIndexValidationResponse:
-    try:
-        active = repository_store.get_active_generation(project_id)
-        if active is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project has no active index generation",
-            )
-        postgres_chunks = repository_store.generation_chunk_count(
-            active["generation_id"]
+    runtime = _resolve_project_vector_runtime(project_id)
+    binding: SnapshotVectorBindingRecord = runtime["binding"]
+    generation = runtime["generation"]
+    if generation is None or binding.generation_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="INDEX_VALIDATION_NOT_APPLICABLE: active project route is external and has no managed Generation ledger",
         )
-        qdrant_chunks = vector_store.count_generation(
-            project_id, active["generation_id"]
+    try:
+        postgres_chunks = repository_store.generation_chunk_count(binding.generation_id)
+        qdrant_chunks = runtime["vector_store"].count_generation(
+            project_id, binding.generation_id
         )
     except RepositoryStoreError as exc:
         raise _repository_store_error(exc) from exc
@@ -3560,8 +4978,8 @@ def validate_project_index(project_id: str) -> VectorIndexValidationResponse:
         raise _service_error(exc) from exc
     return VectorIndexValidationResponse(
         project_id=project_id,
-        snapshot_id=active["snapshot_id"],
-        generation_id=active["generation_id"],
+        snapshot_id=binding.snapshot_id,
+        generation_id=binding.generation_id,
         postgres_chunks=postgres_chunks,
         qdrant_chunks=qdrant_chunks,
         consistent=postgres_chunks == qdrant_chunks,
@@ -3627,20 +5045,8 @@ def _ingest_documents(
 
 def _ingest_one_document(project_id: str, document: DocumentInput) -> tuple[int, str]:
     chunk_specs = chunk_text_with_metadata(
-        document.text,
-        settings.chunk_size,
-        settings.chunk_overlap,
-        path=document.path,
-        language=document.language,
+        document.text, settings.chunk_size, settings.chunk_overlap
     )
-    index_metadata = {
-        **document.metadata,
-        **classify_index_path(document.path, document.language),
-        "chunking_strategy": (
-            chunk_specs[0].get("chunking_strategy") if chunk_specs else "none"
-        ),
-    }
-    indexed_document = document.model_copy(update={"metadata": index_metadata})
     document_hash = hashlib.sha256(document.text.encode("utf-8")).hexdigest()[:16]
     embedded_chunks: list[dict[str, Any]] = []
     for batch_start in range(0, len(chunk_specs), settings.embedding_batch_size):
@@ -3664,7 +5070,7 @@ def _ingest_one_document(project_id: str, document: DocumentInput) -> tuple[int,
                 }
             )
     try:
-        project_store.save_document(project_id, indexed_document, embedded_chunks)
+        project_store.save_document(project_id, document, embedded_chunks)
     except ProjectStoreError as exc:
         raise _project_store_error() from exc
     stored = vector_store.replace_document(
@@ -3673,7 +5079,7 @@ def _ingest_one_document(project_id: str, document: DocumentInput) -> tuple[int,
         document.path,
         document.language,
         embedded_chunks,
-        index_metadata,
+        document.metadata,
     )
     provider = embedded_chunks[0]["embedding_provider"] if embedded_chunks else ""
     return stored, provider
@@ -3784,6 +5190,97 @@ def list_project_metadata(
 
 
 @app.post(
+    "/v1/snapshots/compare",
+    response_model=SnapshotCompareResponse,
+    tags=["Projects"],
+    summary="Compare a Frontend project identity with the Backend Snapshot baseline",
+    description=(
+        "Resolve project_id with commit_id or snapshot_id and return same, different, "
+        "or unknown. A different result sets update_warning=true. Textual None/null "
+        "values are normalized to an omitted optional identity."
+    ),
+    responses=ERROR_RESPONSES,
+)
+def compare_snapshot(
+    payload: SnapshotCompareRequest,
+    request: Request,
+) -> SnapshotCompareResponse:
+    started_at = perf_counter()
+    request_id = _request_id(request)
+    client_id = _frontend_client_id(request, payload.project_id)
+    _safe_record_communication_event(
+        request_id=request_id,
+        channel="snapshot-control",
+        direction="frontend_to_fastapi",
+        phase="snapshot.compare.request",
+        status="started",
+        method="POST",
+        path="/v1/snapshots/compare",
+        client_id=client_id,
+        project_id=payload.project_id,
+        provider="snapshot-registry",
+        details={
+            "commit_id_supplied": payload.commit_id is not None,
+            "snapshot_id_supplied": payload.snapshot_id is not None,
+        },
+    )
+    try:
+        result = snapshot_comparison_service.compare(
+            payload,
+            request_id=request_id,
+        )
+    except SnapshotComparisonError as exc:
+        duration_ms = round((perf_counter() - started_at) * 1000)
+        _safe_record_communication_event(
+            request_id=request_id,
+            channel="snapshot-control",
+            direction="fastapi_to_frontend",
+            phase="snapshot.compare.response",
+            status="failed",
+            method="POST",
+            path="/v1/snapshots/compare",
+            client_id=client_id,
+            project_id=payload.project_id,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            duration_ms=duration_ms,
+            provider="snapshot-registry",
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    duration_ms = round((perf_counter() - started_at) * 1000)
+    _safe_record_communication_event(
+        request_id=request_id,
+        channel="snapshot-control",
+        direction="fastapi_to_frontend",
+        phase="snapshot.compare.response",
+        status="success" if result.comparison == "same" else "warning",
+        method="POST",
+        path="/v1/snapshots/compare",
+        client_id=client_id,
+        project_id=payload.project_id,
+        status_code=status.HTTP_200_OK,
+        duration_ms=duration_ms,
+        provider=result.baseline_source,
+        model=result.comparison,
+        details={
+            "comparison": result.comparison,
+            "same_version": result.same_version,
+            "update_warning": result.update_warning,
+            "registration_required": result.registration_required,
+            "baseline_snapshot_id": result.baseline_snapshot_id,
+            "baseline_commit_id": result.baseline_commit_id,
+            "matched_snapshot_id": result.matched_snapshot_id,
+            "reason_code": result.reason_code,
+        },
+    )
+    return result
+
+
+@app.post(
     "/v1/projects/{project_id}/version/check",
     response_model=ProjectVersionCheckResponse,
     tags=["Documents"],
@@ -3856,100 +5353,385 @@ def check_project_version(
     )
 
 
-@app.post("/v1/search", response_model=SearchResponse, tags=["Documents"])
-def search_documents(payload: SearchRequest) -> SearchResponse:
+def _resolve_project_vector_runtime(project_id: str) -> dict[str, Any]:
+    """Resolve the P2-I sole retrieval chain from ProjectVectorRoute.active_binding_id."""
     try:
-        result = rag_lab_client.search(
-            payload.project_id,
-            payload.query,
-            top_k=payload.top_k,
+        route = project_vector_route_store.get(project_id)
+    except ProjectVectorRouteStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ProjectVectorRoute registry is unavailable",
+        ) from exc
+    if route is None or not route.active_binding_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"PROJECT_VECTOR_ROUTE_REQUIRED: project has no active retrieval binding: {project_id}",
         )
-    except RagLabError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    try:
+        candidate = project_vector_route_store.candidate_context(route.active_binding_id)
+        if candidate is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Active SnapshotVectorBinding is missing: {route.active_binding_id}",
+            )
+        project_vector_route_store.validate_candidate(project_id, candidate)
+        if not project_vector_route_store.current_runtime_routable(candidate):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="VECTOR_ROUTE_NOT_ROUTABLE: active external payload requires P3 hydration or inline content contract",
+            )
+        binding = snapshot_vector_binding_store.get(route.active_binding_id)
+        if binding is None or binding.verification_state != "verified":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="SNAPSHOT_VECTOR_BINDING_REQUIRED: active route binding is not verified",
+            )
+        index = vector_index_store.get(binding.vector_index_id)
+        if index is None or index.status != "ready":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="VECTOR_INDEX_UNAVAILABLE: active route VectorIndex is not ready",
+            )
+        snapshot = repository_store.get_snapshot(binding.snapshot_id)
+        if snapshot is None or str(snapshot.get("project_id") or "") != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Active route Snapshot cannot be resolved for the project",
+            )
+        generation = (
+            repository_store.get_generation(binding.generation_id)
+            if binding.generation_id
+            else None
+        )
+        target = vector_target_store.get(index.vector_target_id)
+        profile = embedding_profile_store.get(index.embedding_profile_id)
+        if index.ownership_mode == "external_attached":
+            verification = external_vector_index_verification_store.get(index.vector_index_id)
+            if verification is None or verification.verification_state != "compatible":
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="EXTERNAL_VECTOR_INDEX_NOT_COMPATIBLE: active external route lost compatibility",
+                )
+    except ProjectVectorRouteStoreError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except VectorIndexStoreError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="VectorIndex registry is unavailable") from exc
+    except SnapshotVectorBindingStoreError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="SnapshotVectorBinding registry is unavailable") from exc
+    except RepositoryStoreError as exc:
+        raise _repository_store_error(exc) from exc
+    except ExternalVectorIndexVerificationStoreError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="External VectorIndex verification registry is unavailable") from exc
+    except VectorTargetStoreError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="VectorTarget registry is unavailable") from exc
+    except EmbeddingProfileStoreError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="EmbeddingProfile registry is unavailable") from exc
+    if target is None or profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="VectorIndex target/profile reference cannot be resolved",
+        )
+    try:
+        resolved_settings = settings_for_vector_index(
+            settings.snapshot(), index=index, target=target, profile=profile
+        )
+        resolved_store = build_vector_store_for_index(
+            resolved_settings, index=index, target=target, profile=profile
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"VECTOR_INDEX_UNAVAILABLE: {exc}",
+        ) from exc
+    return {
+        "route": route,
+        "candidate": candidate,
+        "binding": binding,
+        "snapshot": snapshot,
+        "generation": generation,
+        "index": index,
+        "target": target,
+        "profile": profile,
+        "settings": resolved_settings,
+        "embedding_service": EmbeddingService(resolved_settings),
+        "vector_store": resolved_store,
+    }
+
+def _search_documents_with_runtime(
+    payload: SearchRequest,
+    runtime: dict[str, Any],
+) -> SearchResponse:
+    resolved_embedding_service: EmbeddingService = runtime["embedding_service"]
+    resolved_vector_store = runtime["vector_store"]
+    index: VectorIndexRecord = runtime["index"]
+    generation = runtime["generation"]
+    binding: SnapshotVectorBindingRecord = runtime["binding"]
+    profile: EmbeddingProfileRecord = runtime["profile"]
+    try:
+        embedding = resolved_embedding_service.embed(payload.query, input_type="query")
+        results = resolved_vector_store.search(
+            payload.project_id,
+            embedding.vector,
+            embedding.provider,
+            embedding.model,
+            payload.top_k,
+            (str(generation["generation_id"]) if generation is not None else None),
+        )
+        results = project_store.enrich_sources(results)
+    except (ServiceError, VectorStoreError) as exc:
+        raise _service_error(exc) from exc
+    except ProjectStoreError as exc:
+        raise _project_store_error() from exc
     return SearchResponse(
         project_id=payload.project_id,
         query=payload.query,
-        results=result.sources,
-        embedding_provider="rag_lab",
+        results=results,
+        embedding_provider=embedding.provider,
+        embedding_profile_id=profile.embedding_profile_id,
+        vector_index_id=index.vector_index_id,
+        snapshot_id=binding.snapshot_id,
+        generation_id=binding.generation_id,
+        snapshot_vector_binding_id=binding.binding_id,
+        vector_route_revision=runtime["route"].revision,
+    )
+
+
+@app.post("/v1/search", response_model=SearchResponse, tags=["Documents"])
+def search_documents(payload: SearchRequest) -> SearchResponse:
+    runtime = _resolve_project_vector_runtime(payload.project_id)
+    return _search_documents_with_runtime(payload, runtime)
+
+
+@app.get(
+    "/v1/contracts/canonical-context",
+    tags=["Chat"],
+    summary="Read the frozen P3 Canonical Context JSON Schema",
+)
+def canonical_context_contract() -> dict[str, Any]:
+    """Expose the machine-readable contract without exposing request evidence."""
+
+    return {
+        "schema_version": CANONICAL_CONTEXT_SCHEMA_VERSION,
+        "target_retrieval_path": "/prompt",
+        "target_retrieval_owner": "vectordb",
+        "target_prompt_owner": "vectordb",
+        "hydration_owner": "vectordb",
+        "raw_content_retention": "request_scoped",
+        "schema": CanonicalContext.model_json_schema(),
+    }
+
+
+@app.get(
+    "/v1/contracts/vector-service",
+    tags=["Documents"],
+    summary="Read the external VectorDB conformance contract",
+)
+def external_vector_service_contract() -> dict[str, Any]:
+    return vector_service_contract()
+
+
+def _chat_context_response(record: ChatContextRecord) -> ChatContextResponse:
+    return ChatContextResponse(
+        context_id=record.context_id,
+        project_id=record.project_id,
+        commit_id=record.commit_id,
+        snapshot_id=record.snapshot_id,
+        resolution=record.resolution,
+        grounding_available=record.grounding_available,
+        created_at=record.created_at,
+        expires_at=record.expires_at,
     )
 
 
 @app.post(
-    "/v1/chat",
-    response_model=ChatResponse,
+    "/v1/chat/contexts",
+    response_model=ChatContextResponse,
+    status_code=status.HTTP_201_CREATED,
     tags=["Chat"],
-    summary="Run project-scoped RAG chat",
-    description=(
-        "Resolves project_id against rag_lab /projects, calls rag_lab /prompt, "
-        "and passes the returned messages unchanged to the selected model. "
-        "rag_lab owns retrieval, evidence gating, prompt assembly, and source order. "
-        "Client top_k and reasoning_mode remain accepted only for compatibility. "
-        "The current frontend turn may use role=user with content; message and prompt "
-        "remain compatibility aliases. With stream=true, SSE emits meta(sending), "
-        "status(reasoning), delta(thinking), done(answering), or error(failed)."
-    ),
-    responses=ERROR_RESPONSES,
+    summary="Register optional project and Snapshot context separately from Chat",
 )
-def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResponse:
-    overall_started = perf_counter()
-    request_id = _request_id(request)
-    requested_model_id = payload.model_id or generation_router.default_model_id
+def register_chat_context(
+    payload: ChatContextRegistrationRequest,
+    request: Request,
+) -> ChatContextResponse:
+    try:
+        record = chat_context_service.register(
+            owner_client_id=_chat_owner_id(request),
+            project_id=payload.project_id,
+            commit_id=payload.commit_id,
+            snapshot_id=payload.snapshot_id,
+        )
+    except ChatContextError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return _chat_context_response(record)
+
+
+@app.get(
+    "/v1/chat/contexts/{context_id}",
+    response_model=ChatContextResponse,
+    tags=["Chat"],
+    summary="Read an unexpired Chat Context owned by the current Client",
+)
+def get_chat_context(context_id: str, request: Request) -> ChatContextResponse:
+    try:
+        record = chat_context_service.get(
+            context_id,
+            owner_client_id=_chat_owner_id(request),
+        )
+    except ChatContextError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return _chat_context_response(record)
+
+
+@app.get(
+    "/v1/contracts/chat-stream",
+    tags=["Chat"],
+    summary="Read the P3-C Chat SSE event contract",
+)
+def chat_stream_contract() -> dict[str, Any]:
+    return {
+        "schema_version": API_SCHEMA_VERSION,
+        "transport": "server-sent-events",
+        "media_type": "text/event-stream",
+        "events": ["meta", "status", "delta", "done", "error"],
+        "display_states": {
+            "meta": "전송중",
+            "status": "추론중",
+            "delta": "생각중",
+            "done": "답변중",
+            "error": "답변 실패",
+        },
+        "delta_semantics": "answer_text_only",
+        "chain_of_thought_exposed": False,
+        "context_header": "X-Vision-Context-ID",
+        "negotiation": {
+            "preferred": "Accept: text/event-stream",
+            "compatibility": "stream=true",
+            "json": "Accept: application/json or explicit stream=false",
+        },
+    }
+
+
+def _cache_chat_response(request: Request, response: ChatResponse) -> None:
+    request_id = str(response.metadata.get("request_id") or "").strip()
+    if not request_id:
+        return
+    try:
+        redis_coordinator.set_ephemeral_json(
+            "chat-result",
+            request_id,
+            {
+                "owner_client_id": _chat_owner_id(request),
+                "response": response.model_dump(mode="json"),
+            },
+            ttl_seconds=3_600,
+        )
+    except (DistributedStateError, TypeError, ValueError) as exc:
+        # Citation replay is optional and must never make Chat fail.
+        logger.warning("Chat result cache unavailable request_id=%s: %s", request_id, exc)
+
+
+@app.get(
+    "/v1/citations/{request_id}/{citation_id}",
+    tags=["Chat"],
+    summary="Read one short-lived citation from a completed Chat response",
+)
+def get_chat_citation(
+    request_id: str,
+    citation_id: int,
+    request: Request,
+) -> dict[str, Any]:
+    if citation_id < 1:
+        raise HTTPException(status_code=422, detail="citation_id는 1 이상이어야 합니다.")
+    try:
+        cached = redis_coordinator.get_ephemeral_json("chat-result", request_id)
+    except DistributedStateError as exc:
+        raise HTTPException(status_code=503, detail="Citation 저장소를 사용할 수 없습니다.") from exc
+    if cached is None:
+        raise HTTPException(status_code=404, detail="Citation이 없거나 만료되었습니다.")
+    if cached.get("owner_client_id") != _chat_owner_id(request):
+        raise HTTPException(status_code=403, detail="다른 Frontend Client의 Citation입니다.")
+    response = cached.get("response")
+    sources = response.get("source") if isinstance(response, dict) else None
+    if not isinstance(sources, list) or citation_id > len(sources):
+        raise HTTPException(status_code=404, detail="citation_id를 찾을 수 없습니다.")
+    return {
+        "schema_version": API_SCHEMA_VERSION,
+        "request_id": request_id,
+        "citation_id": citation_id,
+        "source": sources[citation_id - 1],
+    }
+
+
+def _sse_event(
+    event: str,
+    request_id: str,
+    sequence: int,
+    values: dict[str, Any] | None = None,
+    *,
+    simulated: bool | None = None,
+    progress_source: str | None = None,
+) -> str:
+    progress = simulated_chat_progress(request_id, event)  # type: ignore[arg-type]
+    if simulated is not None:
+        progress["simulated"] = simulated
+    if progress_source is not None:
+        progress["progress_source"] = progress_source
+    payload = {**progress, "sequence": sequence, **(values or {})}
+    return (
+        f"id: {sequence}\n"
+        f"event: {event}\n"
+        f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+    )
+
+
+def _external_prompt_chat(
+    *,
+    payload: ChatRequest,
+    request: Request,
+    request_id: str,
+    effective_project_id: str,
+    requested_model_id: str,
+    processing_mode: str,
+    project_resolution: Any,
+    intake_result: Any,
+    context_chars: int,
+    overall_started: float,
+    delta_callback: Callable[[str], None] | None = None,
+) -> ChatResponse:
+    """P3-B: VectorDB owns retrieval, hydration and prompt construction."""
 
     try:
-        external_projects = rag_lab_client.projects()
-    except RagLabError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    resolution_rows = [
-        {
-            "project_id": str(item.get("project_id") or ""),
-            "display_name": str(item.get("project_id") or ""),
-            "index_status": (
-                "ready" if str(item.get("state") or "") == "done"
-                else str(item.get("state") or "")
-            ),
-            "current_snapshot_id": (
-                item.get("commit") or item.get("indexed_at")
-                if str(item.get("state") or "") == "done"
-                else None
-            ),
-        }
-        for item in external_projects
-        if item.get("project_id")
-    ]
-    project_resolution = resolve_project_id(
-        payload.project_id,
-        resolution_rows,
-        configured_aliases=settings.project_id_aliases,
-    )
-    if project_resolution.resolved_project_id is None:
-        candidate_text = (
-            ", ".join(project_resolution.candidates)
-            if project_resolution.candidates
-            else "none"
+        snapshot = (
+            repository_store.get_snapshot(payload.snapshot_id)
+            if payload.snapshot_id
+            else repository_store.get_current_snapshot_context(effective_project_id)
         )
+    except RepositoryStoreError as exc:
+        raise _repository_store_error(exc) from exc
+    if snapshot is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "project_id를 rag_lab의 인덱싱 프로젝트로 결정할 수 없습니다. "
-                f"requested={payload.project_id!r}, candidates={candidate_text}. "
-                "rag_lab GET /projects에서 project_id를 확인하세요."
+                "EXTERNAL_VECTOR_SNAPSHOT_REQUIRED: project has no current Snapshot"
             ),
         )
-
-    effective_project_id = project_resolution.resolved_project_id
-    telemetry_client_id = _frontend_client_id(request, effective_project_id)
-    context_chars = (
-        len(payload.context)
-        if isinstance(payload.context, str)
-        else len(
-            json.dumps(
-                [item.model_dump(mode="json") for item in payload.context],
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
+    if str(snapshot.get("project_id") or "") != effective_project_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="요청 Snapshot이 project_id에 속하지 않습니다.",
         )
-    )
+    snapshot_id = str(snapshot["snapshot_id"])
+    revision = str(snapshot.get("revision") or "").strip() or None
+    if payload.snapshot_id and payload.snapshot_id != snapshot_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "요청 snapshot_id가 현재 project Snapshot과 일치하지 않습니다. "
+                f"requested={payload.snapshot_id!r}, active={snapshot_id!r}."
+            ),
+        )
+    telemetry_client_id = _frontend_client_id(request, effective_project_id)
     _safe_record_chat_audit_request(
         request_id=request_id,
         client_id=telemetry_client_id,
@@ -3961,27 +5743,29 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
         context_chars=context_chars,
     )
     _record_frontend_activity(request, effective_project_id, "chat.request")
-
     retrieval_started = perf_counter()
     _safe_record_communication_event(
         request_id=request_id,
         channel="rag",
         direction="fastapi_to_vectordb",
-        phase="rag.request",
+        phase="rag.prompt.request",
         status="started",
         client_id=telemetry_client_id,
         project_id=effective_project_id,
         provider="rag_lab",
-        model=None,
         details={
-            "policy": "rag_lab/prompt",
             "endpoint": f"{rag_lab_client.base_url}/prompt",
-            "project_resolution": project_resolution.metadata(),
+            "snapshot_id": snapshot_id,
+            "revision": revision,
         },
     )
     try:
-        prompt_result = rag_lab_client.prompt(
+        external_binding = rag_lab_client.resolve_project(
             effective_project_id,
+            revision=revision,
+        )
+        prompt_result = rag_lab_client.prompt(
+            external_binding.external_project_id,
             payload.message,
         )
     except RagLabError as exc:
@@ -3990,7 +5774,7 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
             request_id=request_id,
             channel="rag",
             direction="vectordb_to_fastapi",
-            phase="rag.response",
+            phase="rag.prompt.response",
             status="error",
             client_id=telemetry_client_id,
             project_id=effective_project_id,
@@ -3998,7 +5782,6 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
             duration_ms=retrieval_ms,
             provider="rag_lab",
             error=str(exc),
-            details={"policy": "rag_lab/prompt"},
         )
         _safe_complete_chat_audit(
             request_id=request_id,
@@ -4012,133 +5795,608 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     retrieval_ms = round((perf_counter() - retrieval_started) * 1000)
-    chat_sources = [
-        source.model_copy(update={"citation_id": index})
-        for index, source in enumerate(prompt_result.sources, start=1)
-    ]
-    evidence_status = "sufficient" if prompt_result.has_evidence else "missing"
-    retrieval_metadata = {
-        "policy": "rag_lab/prompt",
-        "prompt_owner": "rag_lab",
-        "has_evidence": prompt_result.has_evidence,
-        "top_score": prompt_result.top_score,
-        "threshold": prompt_result.threshold,
-        "reason": prompt_result.reason,
-        "selected_count": len(chat_sources),
-        "source_order_preserved": True,
-        "client_top_k_ignored": payload.top_k is not None,
-        "reasoning_mode_ignored": payload.reasoning_mode is not None,
-        "history_ignored_by_prompt_owner": len(payload.history),
-        "frontend_context_ignored_by_prompt_owner": context_chars,
-    }
+    canonical_context = build_canonical_context(
+        request_id=request_id,
+        client_id=getattr(request.state, "frontend_client_id", None),
+        project_id=effective_project_id,
+        snapshot_id=snapshot_id,
+        session_id=payload.session_id,
+        query=payload.message,
+        retrieval=CanonicalContextRetrieval(
+            owner="vectordb",
+            mode="prompt",
+            prompt_owner="vectordb",
+            provider="rag_lab",
+            endpoint=f"{rag_lab_client.base_url}/prompt",
+            has_evidence=prompt_result.has_evidence,
+            reason=prompt_result.reason,
+            top_score=prompt_result.top_score,
+            threshold=prompt_result.threshold,
+        ),
+        messages=prompt_result.messages,
+        sources=prompt_result.sources,
+        provenance={
+            "external_project_id": external_binding.external_project_id,
+            "binding_strength": external_binding.binding_strength,
+            "verification_state": external_binding.verification_state,
+            "revision": external_binding.revision,
+            "indexed_at": external_binding.indexed_at,
+            "fingerprint": external_binding.fingerprint,
+            "manifest_sha256": snapshot.get("manifest_sha256"),
+            **prompt_result.provenance,
+        },
+    )
     _safe_record_communication_event(
         request_id=request_id,
         channel="rag",
         direction="vectordb_to_fastapi",
-        phase="rag.response",
+        phase="rag.prompt.response",
         status="success",
         client_id=telemetry_client_id,
         project_id=effective_project_id,
         status_code=200,
         duration_ms=retrieval_ms,
         provider="rag_lab",
-        source_count=len(chat_sources),
-        details=retrieval_metadata,
+        source_count=len(canonical_context.sources),
+        details={
+            "canonical_context_id": canonical_context.context_id,
+            "external_project_id": external_binding.external_project_id,
+            "binding_strength": external_binding.binding_strength,
+            "verification_state": external_binding.verification_state,
+            "has_evidence": prompt_result.has_evidence,
+        },
     )
 
-    response_metadata = {
-        "schema_version": API_SCHEMA_VERSION,
-        "request_id": request_id,
-        "client_request_id": payload.client_request_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "project_id": effective_project_id,
-        "requested_project_id": payload.project_id,
-        "resolved_project_id": effective_project_id,
-        "project_resolution": project_resolution.metadata(),
-        "session_id": payload.session_id,
-        "requested_model_id": requested_model_id,
-        "evidence_status": evidence_status,
-        "embedding_provider": "rag_lab",
-        "retrieval": retrieval_metadata,
-        "session_scope": effective_project_id,
-        "history_messages": len(payload.history),
-        "context_items": (
-            1
-            if isinstance(payload.context, str) and payload.context.strip()
-            else 0
-            if isinstance(payload.context, str)
-            else len(payload.context)
-        ),
-        "source_count": len(chat_sources),
-        "sources": [source.model_dump(mode="json") for source in chat_sources],
-    }
-
-    if not prompt_result.has_evidence:
-        answer = "NO_EVIDENCE"
-        total_ms = round((perf_counter() - overall_started) * 1000)
-        response_metadata.update(
-            {
-                "status": "completed",
-                "used_model_id": None,
-                "provider": "rag_lab",
-                "ai_model": None,
-                "llm_called": False,
-                "timing": {
-                    "retrieval_ms": retrieval_ms,
-                    "generation_ms": 0,
-                    "total_ms": total_ms,
-                },
-            }
-        )
-        _safe_complete_chat_audit(
-            request_id=request_id,
-            status="completed",
-            status_code=200,
-            answer=answer,
-            used_model_id=None,
-            provider="rag_lab",
-            source_count=0,
-            duration_ms=total_ms,
-        )
-        if payload.stream:
-            def no_evidence_stream():
-                yield _chat_stream_event(
-                    "meta",
-                    request_id,
-                    _client_chat_metadata(payload, response_metadata),
-                )
-                yield _chat_stream_event("status", request_id)
-                yield _chat_stream_event(
-                    "delta",
-                    request_id,
-                    {"request_id": request_id, "sequence": 1, "text": answer},
-                )
-                yield _chat_stream_event(
-                    "done",
-                    request_id,
-                    {
-                        "answer": answer,
-                        "source": [],
-                        "metadata": _client_chat_metadata(payload, response_metadata),
-                    },
-                )
-
-            return StreamingResponse(
-                no_evidence_stream(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache, no-transform",
-                    "X-Accel-Buffering": "no",
-                    "X-Request-ID": request_id,
-                    "X-API-Version": API_SCHEMA_VERSION,
+    generation_started = perf_counter()
+    if prompt_result.has_evidence:
+        try:
+            generation = generation_router.generate(
+                payload.model_id,
+                payload.message,
+                prompt_result.sources,
+                payload.history,
+                payload.context,
+                effective_project_id,
+                payload.session_id,
+                request_id=request_id,
+                prompt_mode="external_vector_prompt",
+                messages_override=prompt_result.messages,
+                delta_callback=delta_callback,
+                routing_metadata={
+                    "request_id": request_id,
+                    "client_id": getattr(request.state, "frontend_client_id", None),
+                    "project_id": effective_project_id,
+                    "snapshot_id": snapshot_id,
+                    "session_id": payload.session_id,
+                    "context_id": canonical_context.context_id,
                 },
             )
+        except ServiceError as exc:
+            _safe_complete_chat_audit(
+                request_id=request_id,
+                status="error",
+                status_code=getattr(exc, "status_code", 503),
+                used_model_id=requested_model_id,
+                source_count=len(prompt_result.sources),
+                duration_ms=round((perf_counter() - overall_started) * 1000),
+                error=str(exc),
+            )
+            raise _service_error(exc) from exc
+        answer = generation.answer
+        used_model_id = generation.used_model_id
+        used_model_name = generation.used_model_name
+        provider = generation.provider
+        generated_request_id = generation.request_id
+    else:
+        answer = "NO_EVIDENCE"
+        used_model_id = requested_model_id
+        used_model_name = requested_model_id
+        provider = "not_called"
+        generated_request_id = request_id
+    generation_ms = round((perf_counter() - generation_started) * 1000)
+    total_ms = round((perf_counter() - overall_started) * 1000)
+    # VectorDB may return below-threshold candidates while has_evidence=false.
+    # They are retrieval diagnostics, not answer citations, and must not be
+    # exposed beside NO_EVIDENCE in the public Chat response.
+    chat_sources = (
+        [
+            source.model_copy(update={"citation_id": index})
+            for index, source in enumerate(prompt_result.sources, start=1)
+        ]
+        if prompt_result.has_evidence
+        else []
+    )
+    _safe_complete_chat_audit(
+        request_id=request_id,
+        status="completed",
+        status_code=200,
+        answer=answer,
+        used_model_id=used_model_id,
+        provider=provider,
+        source_count=len(chat_sources),
+        duration_ms=total_ms,
+    )
+    return ChatResponse(
+        answer=answer,
+        source=[
+            SourceDocument(
+                file=source.path or source.document_id,
+                chunk=(
+                    source.text
+                    or str(source.metadata.get("section") or "")
+                    or str(source.metadata.get("external_source_id") or source.chunk_id)
+                ),
+                score=source.score,
+            )
+            for source in chat_sources
+        ],
+        metadata={
+            "schema_version": API_SCHEMA_VERSION,
+            "request_id": generated_request_id,
+            "client_request_id": payload.client_request_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "completed",
+            "project_id": effective_project_id,
+            "requested_project_id": payload.project_id,
+            "resolved_project_id": effective_project_id,
+            "project_resolution": project_resolution.metadata(),
+            "session_id": payload.session_id,
+            "requested_model_id": requested_model_id,
+            "used_model_id": used_model_id,
+            "provider": provider,
+            "ai_model": used_model_name,
+            "chat_processing_mode": processing_mode,
+            "chat_route": "external_vector_prompt",
+            "prompt_owner": "vectordb",
+            "snapshot_id": snapshot_id,
+            "requested_snapshot_id": payload.snapshot_id,
+            "external_vector": {
+                "base_url": rag_lab_client.base_url,
+                "project_id": external_binding.external_project_id,
+                "binding_strength": external_binding.binding_strength,
+                "verification_state": external_binding.verification_state,
+                "revision": external_binding.revision,
+                "indexed_at": external_binding.indexed_at,
+            },
+            "canonical_context": {
+                "schema_version": canonical_context.schema_version,
+                "context_id": canonical_context.context_id,
+                "retrieval_owner": "vectordb",
+                "retrieval_mode": "prompt",
+                "prompt_owner": "vectordb",
+                "raw_content_retention": canonical_context.retention.policy,
+                "source_count": len(canonical_context.sources),
+            },
+            "timing": {
+                "retrieval_ms": retrieval_ms,
+                "generation_ms": generation_ms,
+                "total_ms": total_ms,
+            },
+            "request_normalization": intake_result.metadata(debug=payload.debug),
+            "source_count": len(chat_sources),
+        },
+    )
+
+def _chat_json(
+    payload: ChatRequest,
+    request: Request,
+    *,
+    delta_callback: Callable[[str], None] | None = None,
+) -> ChatResponse:
+    # project_id is the canonical Backend registry key. session_id identifies
+    # one client conversation and is independent from the retrieval scope.
+    overall_started = perf_counter()
+    request_id = _request_id(request)
+    try:
+        global_intake_settings = chat_intake_settings_store.get()
+        deep_normalization_enabled = resolve_deep_normalization(
+            global_intake_settings.deep_normalization_enabled,
+            getattr(
+                request.state,
+                "chat_deep_normalization_mode",
+                "inherit",
+            ),
+        )
+    except ChatIntakeSettingsError as exc:
+        # Basic schema normalization is still active. Deep interpretation is an
+        # optional convenience and must not make Chat unavailable with stale DB state.
+        logger.warning("Chat deep-normalization settings unavailable: %s", exc)
+        deep_normalization_enabled = False
+    intake_result = normalize_chat_intake(
+        payload,
+        deep_enabled=deep_normalization_enabled,
+    )
+    payload = intake_result.payload
+    requested_model_id = payload.model_id or generation_router.default_model_id
+    processing_mode = generation_router.chat_processing_mode(requested_model_id)
+    route_decision = (
+        classify_chat_request(payload)
+        if processing_mode == "vision_managed"
+        else None
+    )
+    context_chars = (
+        len(payload.context)
+        if isinstance(payload.context, str)
+        else len(
+            json.dumps(
+                [item.model_dump(mode="json") for item in payload.context],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+    )
+    usable_frontend_context = _has_usable_frontend_context(payload.context)
+    direct_generation = (
+        processing_mode == "provider_managed"
+        or (route_decision is not None and not route_decision.project_required)
+    )
+
+    if direct_generation:
+        effective_project_id = (
+            payload.project_id
+            if payload.project_id not in {"__auto__", "auto", "default"}
+            else "__unscoped__"
+        )
+        telemetry_client_id = _frontend_client_id(request, effective_project_id)
+        _safe_record_chat_audit_request(
+            request_id=request_id,
+            client_id=telemetry_client_id,
+            project_id=effective_project_id,
+            session_id=payload.session_id,
+            requested_model_id=requested_model_id,
+            message=payload.message,
+            history_count=len(payload.history),
+            context_chars=context_chars,
+        )
+        _record_frontend_activity(request, effective_project_id, "chat.request")
+        generation_started = perf_counter()
+        _safe_record_communication_event(
+            request_id=request_id, channel="fastapi-ai",
+            direction="fastapi_to_ai_server", phase="ai.request", status="started",
+            client_id=telemetry_client_id, project_id=effective_project_id,
+            provider="model-router", model=requested_model_id, source_count=0,
+            details={
+                "chat_processing_mode": processing_mode,
+                "chat_route": "provider_managed" if processing_mode == "provider_managed" else "general",
+                "rag_sources_attached": 0,
+                "frontend_context_available": usable_frontend_context,
+                "request_normalization": intake_result.metadata(debug=payload.debug),
+                "snapshot_id": payload.snapshot_id,
+            },
+        )
+        try:
+            generation = generation_router.generate(
+                payload.model_id, payload.message, [], payload.history, payload.context,
+                effective_project_id, payload.session_id, request_id=request_id,
+                prompt_mode=(
+                    "provider_managed" if processing_mode == "provider_managed" else "direct"
+                ),
+                routing_metadata={
+                    "request_id": request_id,
+                    "client_id": getattr(request.state, "frontend_client_id", None),
+                    "project_id": (
+                        None if effective_project_id == "__unscoped__" else effective_project_id
+                    ),
+                    "snapshot_id": payload.snapshot_id,
+                    "session_id": payload.session_id,
+                },
+                delta_callback=delta_callback,
+            )
+        except ServiceError as exc:
+            _safe_complete_chat_audit(
+                request_id=request_id, status="error",
+                status_code=getattr(exc, "status_code", 503),
+                used_model_id=requested_model_id, source_count=0,
+                duration_ms=round((perf_counter() - overall_started) * 1000),
+                error=str(exc),
+            )
+            raise _service_error(exc) from exc
+        generation_ms = round((perf_counter() - generation_started) * 1000)
+        total_ms = round((perf_counter() - overall_started) * 1000)
+        _safe_record_communication_event(
+            request_id=request_id, channel="fastapi-ai",
+            direction="ai_server_to_fastapi", phase="ai.response", status="success",
+            client_id=telemetry_client_id, project_id=effective_project_id,
+            status_code=200, duration_ms=generation_ms, provider=generation.provider,
+            model=generation.used_model_name, source_count=0,
+            details={
+                "answer_chars": len(generation.answer),
+                "chat_processing_mode": processing_mode,
+                "rag_sources_attached": 0,
+            },
+        )
+        _safe_complete_chat_audit(
+            request_id=request_id, status="completed", status_code=200,
+            answer=generation.answer, used_model_id=generation.used_model_id,
+            provider=generation.provider, source_count=0, duration_ms=total_ms,
+        )
+        route_name = "provider_managed" if processing_mode == "provider_managed" else "general"
         return ChatResponse(
-            answer=answer,
+            answer=generation.answer,
             source=[],
-            metadata=_client_chat_metadata(payload, response_metadata),
+            metadata={
+                "schema_version": API_SCHEMA_VERSION,
+                "request_id": generation.request_id,
+                "client_request_id": payload.client_request_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "status": "completed",
+                "project_id": None if effective_project_id == "__unscoped__" else effective_project_id,
+                "requested_project_id": payload.project_id,
+                "resolved_project_id": None if effective_project_id == "__unscoped__" else effective_project_id,
+                "project_resolution": {
+                    "strategy": "not_required",
+                    "candidates": [],
+                },
+                "session_id": payload.session_id,
+                "requested_model_id": generation.requested_model_id,
+                "used_model_id": generation.used_model_id,
+                "provider": generation.provider,
+                "chat_processing_mode": processing_mode,
+                "chat_route": route_name,
+                "chat_route_reasons": list(route_decision.reasons) if route_decision else [],
+                "fallback_used": generation.requested_model_id != generation.used_model_id,
+                "finish_reason": "stop",
+                "timing": {"retrieval_ms": 0, "generation_ms": generation_ms, "total_ms": total_ms},
+                "retrieval": {
+                    "skipped": True,
+                    "reason": "provider_managed" if processing_mode == "provider_managed" else "general_chat",
+                },
+                "request_normalization": {
+                    "auto_project_requested": payload.project_id == "__auto__",
+                    "fallback_session_id": payload.session_id.startswith("vscode-"),
+                    "accepted_extra_fields": sorted((payload.model_extra or {}).keys()),
+                    **intake_result.metadata(debug=payload.debug),
+                },
+                "snapshot_id": payload.snapshot_id,
+                "history_messages": len(payload.history),
+                "source_count": 0,
+                "sources": [],
+            },
         )
 
+    try:
+        project_resolution = resolve_project_id(
+            payload.project_id,
+            project_store.list_projects(),
+            configured_aliases=settings.project_id_aliases,
+        )
+    except ProjectStoreError as exc:
+        raise _project_store_error() from exc
+    if project_resolution.resolved_project_id is None:
+        candidate_text = (
+            ", ".join(project_resolution.candidates)
+            if project_resolution.candidates
+            else "none"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "project_id를 인덱싱된 프로젝트로 결정할 수 없습니다. "
+                f"requested={payload.project_id!r}, "
+                f"candidates={candidate_text}. "
+                "Frontend가 project_id를 확정할 필요는 없습니다. workspace/reference 같은 "
+                "프로젝트 힌트를 전달하거나 GET /v1/IngestResponse에서 상태를 확인하세요."
+            ),
+        )
+    effective_project_id = project_resolution.resolved_project_id
+    if settings.rag_lab_base_url:
+        return _external_prompt_chat(
+            payload=payload,
+            request=request,
+            request_id=request_id,
+            effective_project_id=effective_project_id,
+            requested_model_id=requested_model_id,
+            processing_mode=processing_mode,
+            project_resolution=project_resolution,
+            intake_result=intake_result,
+            context_chars=context_chars,
+            overall_started=overall_started,
+            delta_callback=delta_callback,
+        )
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=(
+            "VECTOR_PROMPT_PROVIDER_REQUIRED: project-grounded Chat requires "
+            "a VectorDB /prompt provider because Vision-owned AI prompts are disabled"
+        ),
+    )
+    retrieval_runtime = _resolve_project_vector_runtime(effective_project_id)
+    retrieval_index: VectorIndexRecord = retrieval_runtime["index"]
+    retrieval_binding: SnapshotVectorBindingRecord = retrieval_runtime["binding"]
+    retrieval_profile: EmbeddingProfileRecord = retrieval_runtime["profile"]
+    retrieval_target: VectorTargetRecord = retrieval_runtime["target"]
+    if (
+        payload.snapshot_id
+        and payload.snapshot_id != retrieval_binding.snapshot_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "요청 snapshot_id가 현재 project retrieval route와 일치하지 않습니다. "
+                f"requested={payload.snapshot_id!r}, "
+                f"active={retrieval_binding.snapshot_id!r}."
+            ),
+        )
+    logger.info(
+        "Resolved chat project requested=%r resolved=%r strategy=%s confidence=%.4f",
+        payload.project_id, effective_project_id, project_resolution.strategy,
+        project_resolution.confidence,
+    )
+    candidate_k = settings.rag_candidate_k
+    reasoning_mode = payload.reasoning_mode or settings.agentic_rag_default_mode
+    telemetry_client_id = _frontend_client_id(request, effective_project_id)
+    _safe_record_chat_audit_request(
+        request_id=request_id, client_id=telemetry_client_id,
+        project_id=effective_project_id, session_id=payload.session_id,
+        requested_model_id=requested_model_id, message=payload.message,
+        history_count=len(payload.history), context_chars=context_chars,
+    )
+    _record_frontend_activity(request, effective_project_id, "chat.request")
+    query_plan = agentic_query_planner.plan(
+        payload.message,
+        payload.history,
+        reasoning_mode,
+        payload.context,
+    )
+    resolved_reasoning_mode = query_plan.mode
+    retrieval_started = perf_counter()
+    _safe_record_communication_event(
+        request_id=request_id,
+        channel="rag",
+        direction="fastapi_to_vectordb",
+        phase="rag.request",
+        status="started",
+        client_id=telemetry_client_id,
+        project_id=effective_project_id,
+        provider=retrieval_target.engine,
+        model=retrieval_profile.model,
+        details={
+            "policy": f"agentic-rag-v1/{resolved_reasoning_mode}",
+            "requested_reasoning_mode": reasoning_mode,
+            "reasoning_mode": resolved_reasoning_mode,
+            "candidate_k": candidate_k,
+            "frontend_context_available": usable_frontend_context,
+            "project_resolution": project_resolution.metadata(),
+            "request_normalization": intake_result.metadata(debug=payload.debug),
+            "requested_snapshot_id": payload.snapshot_id,
+        },
+    )
+    retrieval_degraded_error: str | None = None
+    retrieval_degraded_status_code: int | None = None
+    try:
+        agentic_result = agentic_rag.run(
+            query_plan,
+            lambda query: _search_documents_with_runtime(
+                SearchRequest(
+                    project_id=effective_project_id,
+                    query=query,
+                    top_k=candidate_k,
+                ),
+                retrieval_runtime,
+            ),
+        )
+        retrieval_decision = agentic_result.decision
+        agentic_trace = agentic_result.trace
+        embedding_provider = agentic_result.embedding_provider
+        selected_sources = retrieval_decision.sources
+    except HTTPException as exc:
+        if exc.status_code >= 500 and usable_frontend_context:
+            retrieval_degraded_error = str(exc.detail)
+            retrieval_degraded_status_code = exc.status_code
+            agentic_result = agentic_rag.fallback(
+                query_plan,
+                stop_reason="vector_unavailable_context_fallback",
+            )
+            retrieval_decision = agentic_result.decision
+            agentic_trace = agentic_result.trace
+            embedding_provider = agentic_result.embedding_provider
+            selected_sources = retrieval_decision.sources
+        else:
+            retrieval_ms = round((perf_counter() - retrieval_started) * 1000)
+            _safe_record_communication_event(
+                request_id=request_id,
+                channel="rag",
+                direction="vectordb_to_fastapi",
+                phase="rag.response",
+                status="error",
+                client_id=telemetry_client_id,
+                project_id=effective_project_id,
+                status_code=exc.status_code,
+                duration_ms=retrieval_ms,
+                provider=retrieval_target.engine,
+                model=retrieval_profile.model,
+                error=str(exc),
+                details={
+                    "policy": f"agentic-rag-v1/{resolved_reasoning_mode}",
+                    "requested_reasoning_mode": reasoning_mode,
+                    "reasoning_mode": resolved_reasoning_mode,
+                    "candidate_k": candidate_k,
+                    "frontend_context_available": usable_frontend_context,
+                    "project_resolution": project_resolution.metadata(),
+                },
+            )
+            _safe_complete_chat_audit(
+                request_id=request_id,
+                status="error",
+                status_code=exc.status_code,
+                used_model_id=requested_model_id,
+                source_count=0,
+                duration_ms=round((perf_counter() - overall_started) * 1000),
+                error=str(exc.detail),
+            )
+            raise
+    retrieval_ms = round((perf_counter() - retrieval_started) * 1000)
+    _safe_record_communication_event(
+        request_id=request_id,
+        channel="rag",
+        direction="vectordb_to_fastapi",
+        phase="rag.response",
+        status=("degraded" if retrieval_degraded_error else "success"),
+        client_id=telemetry_client_id,
+        project_id=effective_project_id,
+        status_code=retrieval_degraded_status_code or 200,
+        duration_ms=retrieval_ms,
+        provider=embedding_provider,
+        model=retrieval_profile.model,
+        source_count=len(selected_sources),
+        error=retrieval_degraded_error,
+        details={
+            "policy": retrieval_decision.policy,
+            "candidate_k": candidate_k,
+            "candidate_count": retrieval_decision.candidate_count,
+            "reranked_count": retrieval_decision.reranked_count,
+            "selected_count": retrieval_decision.selected_count,
+            "context_chars": retrieval_decision.context_chars,
+            "requested_reasoning_mode": agentic_trace.requested_mode,
+            "reasoning_mode": agentic_trace.mode,
+            "step_count": agentic_trace.step_count,
+            "max_steps": agentic_trace.max_steps,
+            "follow_up_rewritten": agentic_trace.follow_up_rewritten,
+            "context_grounded": agentic_trace.context_grounded,
+            "evidence_coverage": agentic_trace.evidence_coverage,
+            "final_novelty_ratio": agentic_trace.final_novelty_ratio,
+            "stop_reason": agentic_trace.stop_reason,
+            "degraded": retrieval_degraded_error is not None,
+            "frontend_context_available": usable_frontend_context,
+            "client_top_k_ignored": payload.top_k is not None,
+            "project_resolution": project_resolution.metadata(),
+        },
+    )
+    canonical_context = build_canonical_context(
+        request_id=request_id,
+        client_id=getattr(request.state, "frontend_client_id", None),
+        project_id=effective_project_id,
+        snapshot_id=retrieval_binding.snapshot_id,
+        session_id=payload.session_id,
+        query=query_plan.standalone_query,
+        retrieval=CanonicalContextRetrieval(
+            owner="vision_legacy",
+            mode="search",
+            prompt_owner="vision_legacy",
+            provider=retrieval_target.engine,
+            endpoint=retrieval_target.endpoint,
+            has_evidence=bool(selected_sources),
+            reason=(
+                retrieval_degraded_error
+                or agentic_trace.stop_reason
+                or ("ok" if selected_sources else "no_evidence")
+            ),
+            top_score=(
+                max(source.score for source in selected_sources)
+                if selected_sources
+                else None
+            ),
+            threshold=settings.rag_min_score,
+        ),
+        sources=selected_sources,
+        provenance={
+            "vector_index_id": retrieval_index.vector_index_id,
+            "snapshot_vector_binding_id": retrieval_binding.binding_id,
+            "generation_id": retrieval_binding.generation_id,
+            "vector_route_revision": retrieval_runtime["route"].revision,
+            "transition_state": "p2_legacy_runtime",
+        },
+    )
     generation_started = perf_counter()
     _safe_record_communication_event(
         request_id=request_id,
@@ -4150,228 +6408,64 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
         project_id=effective_project_id,
         provider="model-router",
         model=requested_model_id,
-        source_count=len(chat_sources),
+        source_count=len(selected_sources),
         details={
-            "prompt_owner": "rag_lab",
-            "messages_forwarded_unchanged": True,
+            "rag_sources_attached": len(selected_sources),
+            "rag_degraded": retrieval_degraded_error is not None,
+            "frontend_context_available": usable_frontend_context,
+            "canonical_context_id": canonical_context.context_id,
         },
     )
-
-    if payload.stream:
-        def event_stream():
-            yield _chat_stream_event(
-                "meta",
-                request_id,
-                _client_chat_metadata(
-                    payload,
-                    {**response_metadata, "status": "streaming"},
-                ),
-            )
-            yield _chat_stream_event("status", request_id)
-            answer_parts: list[str] = []
-            sequence = 0
-            try:
-                if (
-                    requested_model_id == settings.backendai_public_model_id
-                    or requested_model_id.startswith("backendai:")
-                ):
-                    streaming_generation = generation_router.stream_backendai(
-                        payload.model_id,
-                        prompt_result.messages,
-                        request_id=request_id,
-                    )
-                    used_model_id = streaming_generation.used_model_id
-                    used_model_name = streaming_generation.used_model_name
-                    provider = streaming_generation.provider
-                    inference_protocol = streaming_generation.inference_protocol
-                    inference_endpoint = streaming_generation.inference_endpoint
-                    deltas = streaming_generation.deltas
-                else:
-                    completed_generation = generation_router.generate(
-                        payload.model_id,
-                        prompt_result.messages,
-                        request_id=request_id,
-                    )
-                    used_model_id = completed_generation.used_model_id
-                    used_model_name = completed_generation.used_model_name
-                    provider = completed_generation.provider
-                    inference_protocol = (
-                        completed_generation.inference_protocol or provider
-                    )
-                    inference_endpoint = completed_generation.inference_endpoint
-                    deltas = iter((completed_generation.answer,))
-
-                for delta in deltas:
-                    if not delta:
-                        continue
-                    sequence += 1
-                    answer_parts.append(delta)
-                    yield _chat_stream_event(
-                        "delta",
-                        request_id,
-                        {
-                            "request_id": request_id,
-                            "sequence": sequence,
-                            "text": delta,
-                        },
-                    )
-                answer = "".join(answer_parts).strip()
-                if not answer:
-                    raise ServiceError("생성 모델이 빈 streaming 답변을 반환했습니다.")
-                cited_answer, model_citation_compliant = _ensure_answer_citations(
-                    answer,
-                    chat_sources,
-                )
-                if cited_answer != answer:
-                    footer = cited_answer[len(answer):]
-                    sequence += 1
-                    yield _chat_stream_event(
-                        "delta",
-                        request_id,
-                        {
-                            "request_id": request_id,
-                            "sequence": sequence,
-                            "text": footer,
-                        },
-                    )
-                answer = cited_answer
-                generation_ms = round((perf_counter() - generation_started) * 1000)
-                total_ms = round((perf_counter() - overall_started) * 1000)
-                final_metadata = {
-                    **response_metadata,
-                    "status": "completed",
-                    "used_model_id": used_model_id,
-                    "provider": provider,
-                    "ai_model": used_model_name,
-                    "inference_protocol": inference_protocol,
-                    "inference_endpoint": inference_endpoint,
-                    "llm_called": True,
-                    "model_citation_compliant": model_citation_compliant,
-                    "timing": {
-                        "retrieval_ms": retrieval_ms,
-                        "generation_ms": generation_ms,
-                        "total_ms": total_ms,
-                    },
-                }
-                _safe_record_communication_event(
-                    request_id=request_id,
-                    channel="fastapi-ai",
-                    direction="ai_server_to_fastapi",
-                    phase="ai.response",
-                    status="success",
-                    client_id=telemetry_client_id,
-                    project_id=effective_project_id,
-                    status_code=200,
-                    duration_ms=generation_ms,
-                    provider=provider,
-                    model=used_model_name,
-                    source_count=len(chat_sources),
-                    details={"stream": True, "chunks": sequence},
-                )
-                _safe_complete_chat_audit(
-                    request_id=request_id,
-                    status="completed",
-                    status_code=200,
-                    answer=answer,
-                    used_model_id=used_model_id,
-                    provider=provider,
-                    source_count=len(chat_sources),
-                    duration_ms=total_ms,
-                )
-                yield _chat_stream_event(
-                    "done",
-                    request_id,
-                    {
-                        "answer": answer,
-                        "source": [
-                            SourceDocument(
-                                file=source.path or source.document_id,
-                                chunk=source.text,
-                                score=source.score,
-                            ).model_dump(mode="json")
-                            for source in chat_sources
-                        ],
-                        "metadata": _client_chat_metadata(payload, final_metadata),
-                    },
-                )
-            except ServiceError as exc:
-                status_code = getattr(exc, "status_code", 503)
-                _safe_complete_chat_audit(
-                    request_id=request_id,
-                    status="error",
-                    status_code=status_code,
-                    used_model_id=requested_model_id,
-                    source_count=len(chat_sources),
-                    duration_ms=round((perf_counter() - overall_started) * 1000),
-                    error=str(exc),
-                )
-                yield _chat_stream_event(
-                    "error",
-                    request_id,
-                    {
-                        "request_id": request_id,
-                        "status_code": status_code,
-                        "error": str(exc),
-                        "partial": "".join(answer_parts),
-                    },
-                )
-
-        return StreamingResponse(
-            event_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache, no-transform",
-                "X-Accel-Buffering": "no",
-                "X-Request-ID": request_id,
-                "X-API-Version": API_SCHEMA_VERSION,
-            },
-        )
-
     try:
         generation = generation_router.generate(
             payload.model_id,
-            prompt_result.messages,
+            payload.message,
+            selected_sources,
+            payload.history,
+            payload.context,
+            effective_project_id,
+            payload.session_id,
             request_id=request_id,
+            prompt_mode="passthrough",
+            routing_metadata={
+                "request_id": request_id,
+                "client_id": getattr(request.state, "frontend_client_id", None),
+                "project_id": effective_project_id,
+                "snapshot_id": retrieval_binding.snapshot_id,
+                "session_id": payload.session_id,
+                "context_id": canonical_context.context_id,
+            },
+            delta_callback=delta_callback,
         )
     except ServiceError as exc:
         generation_ms = round((perf_counter() - generation_started) * 1000)
+        _safe_record_communication_event(
+            request_id=request_id,
+            channel="fastapi-ai",
+            direction="ai_server_to_fastapi",
+            phase="ai.response",
+            status="error",
+            client_id=telemetry_client_id,
+            project_id=effective_project_id,
+            status_code=getattr(exc, "status_code", 503),
+            duration_ms=generation_ms,
+            provider="model-router",
+            model=requested_model_id,
+            source_count=len(selected_sources),
+            error=str(exc),
+            details={"rag_sources_attached": len(selected_sources)},
+        )
         _safe_complete_chat_audit(
             request_id=request_id,
             status="error",
             status_code=getattr(exc, "status_code", 503),
             used_model_id=requested_model_id,
-            source_count=len(chat_sources),
+            source_count=len(selected_sources),
             duration_ms=round((perf_counter() - overall_started) * 1000),
             error=str(exc),
         )
         raise _service_error(exc) from exc
-
-    cited_answer, model_citation_compliant = _ensure_answer_citations(
-        generation.answer,
-        chat_sources,
-    )
-    generation = replace(generation, answer=cited_answer)
     generation_ms = round((perf_counter() - generation_started) * 1000)
-    total_ms = round((perf_counter() - overall_started) * 1000)
-    response_metadata.update(
-        {
-            "status": "completed",
-            "used_model_id": generation.used_model_id,
-            "provider": generation.provider,
-            "fallback_used": generation.requested_model_id != generation.used_model_id,
-            "ai_provider": generation.provider,
-            "ai_model": generation.used_model_name,
-            "inference_protocol": generation.inference_protocol or generation.provider,
-            "inference_endpoint": generation.inference_endpoint,
-            "llm_called": True,
-            "model_citation_compliant": model_citation_compliant,
-            "timing": {
-                "retrieval_ms": retrieval_ms,
-                "generation_ms": generation_ms,
-                "total_ms": total_ms,
-            },
-        }
-    )
     _safe_record_communication_event(
         request_id=request_id,
         channel="fastapi-ai",
@@ -4384,9 +6478,22 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
         duration_ms=generation_ms,
         provider=generation.provider,
         model=generation.used_model_name,
-        source_count=len(chat_sources),
-        details={"messages_from": "rag_lab"},
+        source_count=len(selected_sources),
+        details={
+            "answer_chars": len(generation.answer),
+            "rag_sources_attached": len(selected_sources),
+        },
     )
+    total_ms = round((perf_counter() - overall_started) * 1000)
+    chat_sources = [
+        source.model_copy(update={"citation_id": index})
+        for index, source in enumerate(selected_sources, start=1)
+    ]
+    timing = {
+        "retrieval_ms": retrieval_ms,
+        "generation_ms": generation_ms,
+        "total_ms": total_ms,
+    }
     _safe_complete_chat_audit(
         request_id=request_id,
         status="completed",
@@ -4407,8 +6514,313 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse | StreamingResp
             )
             for source in chat_sources
         ],
-        metadata=_client_chat_metadata(payload, response_metadata),
+        metadata={
+            "schema_version": API_SCHEMA_VERSION,
+            "request_id": generation.request_id,
+            "client_request_id": payload.client_request_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "completed",
+            "project_id": effective_project_id,
+            "requested_project_id": payload.project_id,
+            "resolved_project_id": effective_project_id,
+            "project_resolution": project_resolution.metadata(),
+            "session_id": payload.session_id,
+            "client": {
+                "client_id": getattr(
+                    request.state,
+                    "frontend_client_id",
+                    None,
+                ),
+                "auto_registered": bool(
+                    getattr(
+                        request.state,
+                        "frontend_client_auto_registered",
+                        False,
+                    )
+                ),
+            },
+            "requested_model_id": generation.requested_model_id,
+            "used_model_id": generation.used_model_id,
+            "provider": generation.provider,
+            "chat_processing_mode": processing_mode,
+            "chat_route": "project_grounded",
+            "chat_route_reasons": list(route_decision.reasons) if route_decision else [],
+            "fallback_used": (
+                generation.requested_model_id != generation.used_model_id
+            ),
+            "finish_reason": "stop",
+            "timing": timing,
+            "ai_provider": generation.provider,
+            "ai_model": generation.used_model_name,
+            "embedding_provider": embedding_provider,
+            "embedding_model": retrieval_profile.model,
+            "embedding_profile_id": retrieval_profile.embedding_profile_id,
+            "vector_index_id": retrieval_index.vector_index_id,
+            "snapshot_vector_binding_id": retrieval_binding.binding_id,
+            "snapshot_id": retrieval_binding.snapshot_id,
+            "generation_id": retrieval_binding.generation_id,
+            "vector_route_revision": retrieval_runtime["route"].revision,
+            "vector_route_mode": retrieval_runtime["route"].routing_mode,
+            "vector_target_id": retrieval_target.vector_target_id,
+            "index_version": retrieval_index.index_version,
+            "canonical_context": {
+                "schema_version": canonical_context.schema_version,
+                "context_id": canonical_context.context_id,
+                "retrieval_owner": canonical_context.retrieval.owner,
+                "retrieval_mode": canonical_context.retrieval.mode,
+                "prompt_owner": canonical_context.retrieval.prompt_owner,
+                "raw_content_retention": canonical_context.retention.policy,
+                "source_count": len(canonical_context.sources),
+            },
+            "retrieval": {
+                "policy": retrieval_decision.policy,
+                "candidate_k": candidate_k,
+                "candidate_count": retrieval_decision.candidate_count,
+                "reranked_count": retrieval_decision.reranked_count,
+                "selected_count": retrieval_decision.selected_count,
+                "context_chars": retrieval_decision.context_chars,
+                "requested_reasoning_mode": agentic_trace.requested_mode,
+                "reasoning_mode": agentic_trace.mode,
+                "step_count": agentic_trace.step_count,
+                "max_steps": agentic_trace.max_steps,
+                "queries": list(agentic_trace.queries),
+                "standalone_query": agentic_trace.standalone_query,
+                "follow_up_rewritten": agentic_trace.follow_up_rewritten,
+                "context_grounded": agentic_trace.context_grounded,
+                "unique_candidate_count": agentic_trace.unique_candidate_count,
+                "evidence_coverage": agentic_trace.evidence_coverage,
+                "final_novelty_ratio": agentic_trace.final_novelty_ratio,
+                "stop_reason": agentic_trace.stop_reason,
+                "degraded": retrieval_degraded_error is not None,
+                "degraded_error": retrieval_degraded_error,
+                "frontend_context_available": usable_frontend_context,
+                "client_top_k_ignored": payload.top_k is not None,
+            },
+            "prompt_budget": {
+                "context_window_tokens": settings.ai_context_window_tokens,
+                "question_max_chars": settings.ai_question_max_chars,
+                "history_max_chars": settings.ai_history_max_chars,
+                "frontend_context_max_chars": (
+                    settings.ai_frontend_context_max_chars
+                ),
+                "rag_context_max_chars": settings.rag_context_max_chars,
+            },
+            "request_normalization": {
+                "auto_project_requested": payload.project_id == "__auto__",
+                "fallback_session_id": payload.session_id.startswith("vscode-"),
+                "accepted_extra_fields": sorted(
+                    (payload.model_extra or {}).keys()
+                ),
+                **intake_result.metadata(debug=payload.debug),
+            },
+            "requested_snapshot_id": payload.snapshot_id,
+            "session_scope": effective_project_id,
+            "history_messages": len(payload.history),
+            "context_items": (
+                1
+                if isinstance(payload.context, str) and payload.context.strip()
+                else 0
+                if isinstance(payload.context, str)
+                else len(payload.context)
+            ),
+            "source_count": len(chat_sources),
+            "sources": [
+                source.model_dump(mode="json") for source in chat_sources
+            ],
+        },
     )
+
+
+async def _chat_sse_body(
+    payload: ChatRequest,
+    request: Request,
+):
+    request_id = _request_id(request)
+    loop = asyncio.get_running_loop()
+    deltas: asyncio.Queue[str] = asyncio.Queue()
+    emitted_delta = False
+
+    def on_delta(text: str) -> None:
+        if text:
+            loop.call_soon_threadsafe(deltas.put_nowait, text)
+
+    non_streaming_payload = payload.model_copy(update={"stream": False})
+
+    def execute() -> ChatResponse:
+        return _chat_json(
+            non_streaming_payload,
+            request,
+            delta_callback=on_delta,
+        )
+
+    task = asyncio.create_task(run_in_threadpool(execute))
+    sequence = 1
+    yield _sse_event(
+        "meta",
+        request_id,
+        sequence,
+        {
+            "context_id": (
+                getattr(request.state, "vision_chat_context", None).context_id
+                if getattr(request.state, "vision_chat_context", None)
+                else None
+            ),
+            "streaming": True,
+        },
+    )
+    sequence += 1
+    yield _sse_event(
+        "status",
+        request_id,
+        sequence,
+        {"message": "AI 응답을 준비하고 있습니다."},
+    )
+    sequence += 1
+
+    try:
+        while not task.done() or not deltas.empty():
+            if not deltas.empty():
+                fragment = deltas.get_nowait()
+            else:
+                delta_waiter = asyncio.create_task(deltas.get())
+                completed, _pending = await asyncio.wait(
+                    {task, delta_waiter},
+                    timeout=15.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if delta_waiter in completed:
+                    fragment = delta_waiter.result()
+                else:
+                    delta_waiter.cancel()
+                    try:
+                        await delta_waiter
+                    except asyncio.CancelledError:
+                        pass
+                    if task in completed:
+                        continue
+                    # SSE comments keep proxy and browser connections alive without
+                    # changing the public event state machine.
+                    yield ": keep-alive\n\n"
+                    continue
+            emitted_delta = True
+            yield _sse_event(
+                "delta",
+                request_id,
+                sequence,
+                {"text": fragment},
+                simulated=False,
+                progress_source="ai-server",
+            )
+            sequence += 1
+        response = await task
+    except HTTPException as exc:
+        yield _sse_event(
+            "error",
+            request_id,
+            sequence,
+            {
+                "code": _error_code(exc.status_code),
+                "message": exc.detail,
+                "status_code": exc.status_code,
+                "retryable": exc.status_code in {429, 502, 503, 504},
+            },
+        )
+        return
+    except Exception as exc:  # pragma: no cover - final stream safety boundary
+        logger.exception("Unhandled Chat SSE failure request_id=%s", request_id)
+        yield _sse_event(
+            "error",
+            request_id,
+            sequence,
+            {
+                "code": "INTERNAL_ERROR",
+                "message": str(exc) or "Chat Streaming 처리에 실패했습니다.",
+                "status_code": 500,
+                "retryable": False,
+            },
+        )
+        return
+
+    if not emitted_delta and response.answer:
+        # Providers without token Streaming still use the same SSE contract.
+        yield _sse_event(
+            "delta",
+            request_id,
+            sequence,
+            {"text": response.answer},
+            simulated=True,
+            progress_source="vision-generator",
+        )
+        sequence += 1
+
+    response = response.model_copy(
+        update={
+            "metadata": {
+                **response.metadata,
+                "transport": "sse",
+                "streaming_mode": (
+                    "upstream_delta" if emitted_delta else "buffered_compatibility"
+                ),
+            }
+        }
+    )
+    _cache_chat_response(request, response)
+    yield _sse_event(
+        "done",
+        request_id,
+        sequence,
+        response.model_dump(mode="json"),
+        simulated=not emitted_delta,
+        progress_source=("ai-server" if emitted_delta else "vision-generator"),
+    )
+
+
+@app.post(
+    "/v1/chat",
+    response_model=ChatResponse,
+    tags=["Chat"],
+    summary="Run general or separately-contextualized Chat",
+    description=(
+        "The minimal body is role, model_id, content and stream. Project, Git Commit "
+        "and Snapshot data may be registered independently through POST /v1/chat/contexts "
+        "and selected with X-Vision-Context-ID. Without that header Chat remains unscoped. "
+        "stream=false returns JSON; stream=true returns meta/status/delta/done/error SSE."
+    ),
+    responses=ERROR_RESPONSES,
+)
+def chat(payload: ChatRequest, request: Request) -> Any:
+    contextualized = _apply_registered_chat_context(payload, request)
+    sse_requested = wants_chat_sse(
+        stream=contextualized.stream,
+        input_fields=contextualized.intake_input_fields,
+        accept_header=request.headers.get("accept"),
+    )
+    logger.info(
+        "Chat transport request_id=%s selected=%s stream=%r explicit_stream=%s accept=%r",
+        _request_id(request),
+        "sse" if sse_requested else "json",
+        contextualized.stream,
+        "stream" in contextualized.intake_input_fields,
+        request.headers.get("accept"),
+    )
+    if sse_requested:
+        return StreamingResponse(
+            _chat_sse_body(contextualized, request),
+            media_type="text/event-stream",
+            headers={
+                # Some existing Frontend builds compare this value literally
+                # instead of parsing the media type and optional parameters.
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+                "X-Content-Type-Options": "nosniff",
+                "X-Vision-Chat-Transport": "sse",
+                "Vary": "Accept",
+            },
+        )
+    response = _chat_json(contextualized, request)
+    _cache_chat_response(request, response)
+    return response
 
 
 @app.post(
@@ -4487,6 +6899,41 @@ def complete_upload(
             if version_info.get("modified_at")
             else None
         )
+        upload_repository_id = f"upload:{upload.project_id}"
+        snapshot_repository.upsert_repository(
+            repository_id=upload_repository_id,
+            tenant_id=settings.snapshot_tenant_id,
+            project_id=upload.project_id,
+            source_type="frontend-upload",
+            repository_url=None,
+            default_branch=(upload_git.branch if upload_git else None),
+        )
+        upload_fingerprint = snapshot_fingerprint(
+            tenant_id=settings.snapshot_tenant_id,
+            repository_id=upload_repository_id,
+            snapshot_kind="upload",
+            revision=(upload_git.commit_sha if upload_git else None),
+            manifest_sha256=version_info.get("manifest_sha256"),
+        )
+        snapshot_repository.register_snapshot(
+            snapshot_id=upload.snapshot_id,
+            tenant_id=settings.snapshot_tenant_id,
+            repository_id=upload_repository_id,
+            project_id=upload.project_id,
+            snapshot_kind="upload",
+            revision=(upload_git.commit_sha if upload_git else None),
+            branch=(upload_git.branch if upload_git else None),
+            dirty=(upload_git.dirty if upload_git else None),
+            committed_at=(upload_git.committed_at if upload_git else None),
+            tree_sha=None,
+            manifest_sha256=version_info.get("manifest_sha256"),
+            fingerprint=upload_fingerprint,
+            verified_by="frontend",
+            locator={"provider": "frontend-upload", "upload_id": upload_id},
+            status="captured",
+            file_count=int(version_info.get("document_count") or 0),
+            total_bytes=int(version_info.get("total_bytes") or 0),
+        )
         project_store.register_snapshot(
             upload.project_id,
             upload.snapshot_id,
@@ -4498,6 +6945,11 @@ def complete_upload(
         raise _upload_error(exc) from exc
     except ProjectStoreError as exc:
         raise _project_store_error() from exc
+    except SnapshotRepositoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     if upload.status != "completed":
         try:
             _enqueue_worker_task(

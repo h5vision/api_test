@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from psycopg.rows import dict_row
 
 from .config import Settings
+from .schema_guard import SchemaStateError, require_schema
 from .schemas import ModelInfo
 from .services import ServiceError
 
@@ -49,6 +50,7 @@ class AIProvider:
     api_key_hint: str | None
     enabled: bool
     deployment_type: str
+    chat_processing_mode: str
     status: str
     error: str | None
     latency_ms: int
@@ -78,19 +80,6 @@ class DiscoveryResult:
     latency_ms: int
     error: str | None = None
     skipped_models: list[str] = field(default_factory=list)
-    embedding_models: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class EmbeddingProbeResult:
-    provider_id: str
-    provider_name: str
-    protocol: str
-    base_url: str
-    deployment_type: str
-    model_name: str
-    dimension: int
-    latency_ms: int
 
 
 class PostgresAIProviderStore:
@@ -128,76 +117,11 @@ class PostgresAIProviderStore:
                 return
             try:
                 with self._connect() as connection:
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS ai_provider_configs (
-                            provider_id TEXT PRIMARY KEY,
-                            name TEXT NOT NULL,
-                            protocol TEXT NOT NULL CHECK (
-                                protocol IN ('ollama', 'openai')
-                            ),
-                            base_url TEXT NOT NULL,
-                            auth_type TEXT NOT NULL CHECK (
-                                auth_type IN ('none', 'bearer', 'x-api-key')
-                            ),
-                            api_key_ciphertext TEXT,
-                            api_key_hint TEXT,
-                            enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                            deployment_type TEXT NOT NULL CHECK (
-                                deployment_type IN (
-                                    'cloud', 'local', 'remote_server'
-                                )
-                            ),
-                            status TEXT NOT NULL DEFAULT 'unknown',
-                            error TEXT,
-                            latency_ms INTEGER NOT NULL DEFAULT 0,
-                            model_count INTEGER NOT NULL DEFAULT 0,
-                            last_checked_at TIMESTAMPTZ,
-                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS ai_provider_embedding_models (
-                            provider_id TEXT NOT NULL REFERENCES ai_provider_configs(
-                                provider_id
-                            ) ON DELETE CASCADE,
-                            model_name TEXT NOT NULL,
-                            discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            PRIMARY KEY (provider_id, model_name)
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_ai_provider_embedding_models_provider
-                        ON ai_provider_embedding_models (provider_id, model_name)
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS ai_provider_models (
-                            provider_id TEXT NOT NULL REFERENCES ai_provider_configs(
-                                provider_id
-                            ) ON DELETE CASCADE,
-                            model_name TEXT NOT NULL,
-                            discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            PRIMARY KEY (provider_id, model_name)
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_ai_provider_models_provider
-                        ON ai_provider_models (provider_id, model_name)
-                        """
-                    )
+                    require_schema(connection)
                 self._initialized = True
-            except (psycopg.Error, OSError) as exc:
+            except (psycopg.Error, OSError, SchemaStateError) as exc:
                 raise AIProviderStoreError(
-                    "PostgreSQL AI provider schema is unavailable"
+                    "PostgreSQL schema is not on the required Alembic baseline"
                 ) from exc
 
     def _encrypt(self, api_key: str) -> str:
@@ -235,6 +159,7 @@ class PostgresAIProviderStore:
             ),
             enabled=bool(row["enabled"]),
             deployment_type=str(row["deployment_type"]),
+            chat_processing_mode=str(row.get("chat_processing_mode") or "vision_managed"),
             status=str(row["status"]),
             error=str(row["error"]) if row.get("error") else None,
             latency_ms=int(row["latency_ms"]),
@@ -249,7 +174,7 @@ class PostgresAIProviderStore:
         return """
             RETURNING provider_id, name, protocol, base_url, auth_type,
                       api_key_ciphertext, api_key_hint, enabled,
-                      deployment_type, status, error, latency_ms, model_count,
+                      deployment_type, chat_processing_mode, status, error, latency_ms, model_count,
                       last_checked_at, created_at, updated_at
         """
 
@@ -261,7 +186,7 @@ class PostgresAIProviderStore:
                     """
                     SELECT provider_id, name, protocol, base_url, auth_type,
                            api_key_ciphertext, api_key_hint, enabled,
-                           deployment_type, status, error, latency_ms, model_count,
+                           deployment_type, chat_processing_mode, status, error, latency_ms, model_count,
                            last_checked_at, created_at, updated_at
                     FROM ai_provider_configs
                     ORDER BY created_at, provider_id
@@ -284,7 +209,7 @@ class PostgresAIProviderStore:
                     """
                     SELECT provider_id, name, protocol, base_url, auth_type,
                            api_key_ciphertext, api_key_hint, enabled,
-                           deployment_type, status, error, latency_ms, model_count,
+                           deployment_type, chat_processing_mode, status, error, latency_ms, model_count,
                            last_checked_at, created_at, updated_at
                     FROM ai_provider_configs
                     WHERE provider_id = %s
@@ -305,6 +230,7 @@ class PostgresAIProviderStore:
         api_key: str | None,
         enabled: bool,
         deployment_type: str,
+        chat_processing_mode: str = "vision_managed",
     ) -> AIProvider:
         self._ensure_schema()
         provider_id = f"aip_{uuid4().hex}"
@@ -316,8 +242,9 @@ class PostgresAIProviderStore:
                     f"""
                     INSERT INTO ai_provider_configs (
                         provider_id, name, protocol, base_url, auth_type,
-                        api_key_ciphertext, api_key_hint, enabled, deployment_type
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        api_key_ciphertext, api_key_hint, enabled, deployment_type,
+                        chat_processing_mode
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     {self._returning_sql()}
                     """,
                     (
@@ -330,6 +257,7 @@ class PostgresAIProviderStore:
                         key_hint,
                         enabled,
                         deployment_type,
+                        chat_processing_mode,
                     ),
                 ).fetchone()
             if row is None:
@@ -350,6 +278,7 @@ class PostgresAIProviderStore:
         clear_api_key: bool,
         enabled: bool,
         deployment_type: str,
+        chat_processing_mode: str = "vision_managed",
     ) -> AIProvider | None:
         self._ensure_schema()
         current = self.get(provider_id)
@@ -391,6 +320,7 @@ class PostgresAIProviderStore:
                         api_key_hint = %s,
                         enabled = %s,
                         deployment_type = %s,
+                        chat_processing_mode = %s,
                         status = 'unknown',
                         error = NULL,
                         model_count = 0,
@@ -408,15 +338,12 @@ class PostgresAIProviderStore:
                         key_hint,
                         enabled,
                         deployment_type,
+                        chat_processing_mode,
                         provider_id,
                     ),
                 ).fetchone()
                 connection.execute(
                     "DELETE FROM ai_provider_models WHERE provider_id = %s",
-                    (provider_id,),
-                )
-                connection.execute(
-                    "DELETE FROM ai_provider_embedding_models WHERE provider_id = %s",
                     (provider_id,),
                 )
             return self._record(row, with_secret=False) if row else None
@@ -447,10 +374,6 @@ class PostgresAIProviderStore:
                     "DELETE FROM ai_provider_models WHERE provider_id = %s",
                     (provider_id,),
                 )
-                connection.execute(
-                    "DELETE FROM ai_provider_embedding_models WHERE provider_id = %s",
-                    (provider_id,),
-                )
                 if result.models:
                     with connection.cursor() as cursor:
                         cursor.executemany(
@@ -462,21 +385,6 @@ class PostgresAIProviderStore:
                             DO UPDATE SET discovered_at = NOW()
                             """,
                             [(provider_id, model) for model in result.models],
-                        )
-                if result.embedding_models:
-                    with connection.cursor() as cursor:
-                        cursor.executemany(
-                            """
-                            INSERT INTO ai_provider_embedding_models (
-                                provider_id, model_name, discovered_at
-                            ) VALUES (%s, %s, NOW())
-                            ON CONFLICT (provider_id, model_name)
-                            DO UPDATE SET discovered_at = NOW()
-                            """,
-                            [
-                                (provider_id, model)
-                                for model in result.embedding_models
-                            ],
                         )
                 row = connection.execute(
                     f"""
@@ -494,7 +402,7 @@ class PostgresAIProviderStore:
                         result.status,
                         result.error,
                         max(0, result.latency_ms),
-                        len(set(result.models) | set(result.embedding_models)),
+                        len(result.models),
                         provider_id,
                     ),
                 ).fetchone()
@@ -524,29 +432,6 @@ class PostgresAIProviderStore:
             return [DiscoveredProviderModel(**row) for row in rows]
         except (psycopg.Error, OSError) as exc:
             raise AIProviderStoreError("AI provider model list failed") from exc
-
-    def discovered_embedding_models(self) -> list[DiscoveredProviderModel]:
-        self._ensure_schema()
-        try:
-            with self._connect() as connection:
-                rows = connection.execute(
-                    """
-                    SELECT p.provider_id, p.name AS provider_name, p.protocol,
-                           p.base_url, p.deployment_type,
-                           p.enabled AS provider_enabled,
-                           p.status AS provider_status,
-                           m.model_name, m.discovered_at
-                    FROM ai_provider_embedding_models AS m
-                    JOIN ai_provider_configs AS p
-                      ON p.provider_id = m.provider_id
-                    ORDER BY p.created_at, m.model_name
-                    """
-                ).fetchall()
-            return [DiscoveredProviderModel(**row) for row in rows]
-        except (psycopg.Error, OSError) as exc:
-            raise AIProviderStoreError(
-                "AI provider embedding model list failed"
-            ) from exc
 
 
 class AIProviderRegistry:
@@ -627,9 +512,16 @@ class AIProviderRegistry:
             for token in tokens
         )
         explicit_chat = any(
-            token in {
-                "completion", "chat", "chat.completions", "generation",
-                "text-generation", "conversational", "tools", "vision",
+            token
+            in {
+                "completion",
+                "chat",
+                "chat.completions",
+                "generation",
+                "text-generation",
+                "conversational",
+                "tools",
+                "vision",
             }
             or "completion" in token
             for token in tokens
@@ -638,42 +530,6 @@ class AIProviderRegistry:
             not embedding and not _NON_CHAT_MODEL_PATTERN.search(model_name)
         )
         return chat, embedding
-
-    @classmethod
-    def _ollama_model_capabilities(
-        cls,
-        base_url: str,
-        model_name: str,
-        *,
-        auth_type: str,
-        api_key: str | None,
-        timeout_seconds: int,
-    ) -> set[str]:
-        headers = cls._auth_headers(auth_type, api_key)
-        headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(
-            f"{base_url.rstrip('/')}/api/show",
-            data=json.dumps({"model": model_name}).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            values = payload.get("capabilities", [])
-            return {
-                str(value).strip().casefold()
-                for value in values
-                if str(value).strip()
-            } if isinstance(values, list) else set()
-        except (
-            urllib.error.HTTPError,
-            urllib.error.URLError,
-            TimeoutError,
-            ValueError,
-            json.JSONDecodeError,
-        ):
-            return set()
 
     @classmethod
     def detect_protocol(
@@ -721,7 +577,7 @@ class AIProviderRegistry:
         api_key: str | None = None,
         timeout_seconds: int = 3,
     ) -> DiscoveryResult:
-        """Discover Ollama chat and embedding models independently."""
+        """Return only models that Ollama reports as completion-capable."""
 
         started_at = perf_counter()
         request = urllib.request.Request(
@@ -740,7 +596,6 @@ class AIProviderRegistry:
                 raise ValueError("models is not a list")
             models: set[str] = set()
             skipped: set[str] = set()
-            embedding_models: set[str] = set()
             for item in entries:
                 if not isinstance(item, dict):
                     continue
@@ -749,121 +604,32 @@ class AIProviderRegistry:
                 ).strip()
                 if not model_name:
                     continue
-                raw_capabilities = item.get("capabilities")
-                capabilities = {
-                    str(capability).strip().casefold()
-                    for capability in raw_capabilities
-                    if str(capability).strip()
-                } if isinstance(raw_capabilities, list) else set()
-                if not capabilities:
-                    capabilities = cls._ollama_model_capabilities(
-                        base_url,
-                        model_name,
-                        auth_type=auth_type,
-                        api_key=api_key,
-                        timeout_seconds=timeout_seconds,
-                    )
-                is_embedding = (
-                    "embedding" in capabilities
-                    or cls._looks_like_embedding_model(model_name)
-                )
-                is_chat = "completion" in capabilities or (
-                    not capabilities and not is_embedding
-                )
-                if is_embedding:
-                    embedding_models.add(model_name)
-                if is_chat:
-                    models.add(model_name)
-                else:
+                capabilities = item.get("capabilities")
+                if (
+                    isinstance(capabilities, list)
+                    and capabilities
+                    and "completion" not in {
+                        str(capability).strip().lower()
+                        for capability in capabilities
+                    }
+                ):
                     skipped.add(model_name)
+                    continue
+                models.add(model_name)
             normalized = sorted(models)
             skipped_models = sorted(skipped)
-            normalized_embeddings = sorted(embedding_models)
             return DiscoveryResult(
-                "online" if normalized or normalized_embeddings else "degraded",
+                "online" if normalized else "degraded",
                 normalized,
                 round((perf_counter() - started_at) * 1000),
                 (
                     None
-                    if normalized or normalized_embeddings
+                    if normalized
                     else "no_chat_models"
                     if skipped_models
                     else "no_models"
                 ),
                 skipped_models,
-                normalized_embeddings,
-            )
-        except urllib.error.HTTPError as exc:
-            return DiscoveryResult(
-                "offline",
-                [],
-                round((perf_counter() - started_at) * 1000),
-                f"http_{exc.code}",
-            )
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            reason = "timeout" if isinstance(exc, TimeoutError) else "unreachable"
-            if isinstance(exc, urllib.error.URLError) and isinstance(
-                exc.reason, TimeoutError
-            ):
-                reason = "timeout"
-            return DiscoveryResult(
-                "offline",
-                [],
-                round((perf_counter() - started_at) * 1000),
-                reason,
-            )
-
-    @classmethod
-    def probe_openai_catalog(
-        cls,
-        base_url: str,
-        *,
-        auth_type: str = "bearer",
-        api_key: str | None = None,
-        timeout_seconds: int = 5,
-    ) -> DiscoveryResult:
-        request = urllib.request.Request(
-            f"{base_url.rstrip('/')}/models",
-            headers=cls._auth_headers(auth_type, api_key),
-            method="GET",
-        )
-        started_at = perf_counter()
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            entries = payload.get("data", [])
-            chat_models: set[str] = set()
-            embedding_models: set[str] = set()
-            skipped_models: set[str] = set()
-            for item in entries:
-                if not isinstance(item, dict):
-                    continue
-                model_name = str(item.get("id") or "").strip()
-                if not model_name:
-                    continue
-                is_chat, is_embedding = cls._catalog_capabilities(
-                    item, model_name
-                )
-                if is_chat:
-                    chat_models.add(model_name)
-                if is_embedding:
-                    embedding_models.add(model_name)
-                if not is_chat and not is_embedding:
-                    skipped_models.add(model_name)
-            normalized = sorted(chat_models)
-            normalized_embeddings = sorted(embedding_models)
-            return DiscoveryResult(
-                "online" if normalized or normalized_embeddings else "degraded",
-                normalized,
-                round((perf_counter() - started_at) * 1000),
-                None if normalized or normalized_embeddings else "no_models",
-                sorted(skipped_models),
-                normalized_embeddings,
             )
         except urllib.error.HTTPError as exc:
             return DiscoveryResult(
@@ -907,120 +673,54 @@ class AIProviderRegistry:
                 timeout_seconds=5,
             )
             return self.store.update_discovery(provider_id, result)
-        result = self.probe_openai_catalog(
-            provider.base_url,
-            auth_type=provider.auth_type,
-            api_key=provider.api_key,
-            timeout_seconds=5,
+        path = "/models"
+        request = urllib.request.Request(
+            f"{provider.base_url}{path}",
+            headers=self._headers(provider),
+            method="GET",
         )
-        return self.store.update_discovery(provider_id, result)
-
-    def probe_embedding(
-        self,
-        provider_id: str,
-        model_name: str,
-    ) -> EmbeddingProbeResult:
-        provider = self.store.get(provider_id, with_secret=True)
-        if provider is None:
-            raise AIProviderStoreError("AI provider was not found")
-        if not provider.enabled:
-            raise AIProviderStoreError("AI provider is disabled")
-        allowed = {
-            model.model_name
-            for model in self.store.discovered_embedding_models()
-            if model.provider_id == provider_id
-        }
-        if model_name not in allowed:
-            raise AIProviderStoreError(
-                "Embedding model was not found in the provider catalog"
-            )
-        headers = self._headers(provider)
-        headers["Content-Type"] = "application/json"
-        if provider.protocol == "ollama":
-            url = f"{provider.base_url}/api/embed"
-            payloads = [
-                {"model": model_name, "input": ["dimension probe"]}
-            ]
-        else:
-            url = f"{provider.base_url}/embeddings"
-            payloads = [
-                {
-                    "model": model_name,
-                    "input": ["dimension probe"],
-                    "input_type": "query",
-                    "encoding_format": "float",
-                    "truncate": "END",
-                },
-                {
-                    "model": model_name,
-                    "input": ["dimension probe"],
-                    "encoding_format": "float",
-                },
-            ]
         started_at = perf_counter()
         try:
-            body: dict[str, Any] | None = None
-            last_http_error: tuple[int, str] | None = None
-            for index, payload in enumerate(payloads):
-                request = urllib.request.Request(
-                    url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers=headers,
-                    method="POST",
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                entries = payload.get("data", [])
+                models = {
+                    str(item.get("id") or "").strip()
+                    for item in entries
+                    if isinstance(item, dict)
+                }
+                normalized = sorted(model for model in models if model)
+                result = DiscoveryResult(
+                    "online" if normalized else "degraded",
+                    normalized,
+                    round((perf_counter() - started_at) * 1000),
+                    None if normalized else "no_models",
                 )
-                try:
-                    with urllib.request.urlopen(request, timeout=30) as response:
-                        body = json.loads(response.read().decode("utf-8"))
-                    break
-                except urllib.error.HTTPError as exc:
-                    detail = exc.read().decode("utf-8", errors="replace")[:300]
-                    last_http_error = (exc.code, detail)
-                    if (
-                        provider.protocol != "ollama"
-                        and index == 0
-                        and exc.code in {400, 422}
-                    ):
-                        continue
-                    raise
-            if body is None:
-                code, detail = last_http_error or (502, "empty response")
-                raise AIProviderStoreError(
-                    f"Embedding provider returned HTTP {code}: {detail}"
-                )
-            if provider.protocol == "ollama":
-                rows = body.get("embeddings")
-                vector = rows[0] if isinstance(rows, list) and rows else None
-            else:
-                rows = body.get("data")
-                first = rows[0] if isinstance(rows, list) and rows else None
-                vector = first.get("embedding") if isinstance(first, dict) else None
-            if not isinstance(vector, list) or not vector:
-                raise ValueError("embedding vector is missing")
-            dimension = len(vector)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
-            raise AIProviderStoreError(
-                f"Embedding provider returned HTTP {exc.code}: {detail}"
-            ) from exc
+            result = DiscoveryResult(
+                "offline",
+                [],
+                round((perf_counter() - started_at) * 1000),
+                f"http_{exc.code}",
+            )
         except (
             urllib.error.URLError,
             TimeoutError,
             ValueError,
             json.JSONDecodeError,
         ) as exc:
-            raise AIProviderStoreError(
-                "Embedding provider probe failed"
-            ) from exc
-        return EmbeddingProbeResult(
-            provider_id=provider.provider_id,
-            provider_name=provider.name,
-            protocol=provider.protocol,
-            base_url=provider.base_url,
-            deployment_type=provider.deployment_type,
-            model_name=model_name,
-            dimension=dimension,
-            latency_ms=round((perf_counter() - started_at) * 1000),
-        )
+            reason = "timeout" if isinstance(exc, TimeoutError) else "unreachable"
+            if isinstance(exc, urllib.error.URLError) and isinstance(
+                exc.reason, TimeoutError
+            ):
+                reason = "timeout"
+            result = DiscoveryResult(
+                "offline",
+                [],
+                round((perf_counter() - started_at) * 1000),
+                reason,
+            )
+        return self.store.update_discovery(provider_id, result)
 
     def refresh_stale(self, *, max_age_seconds: int = 30) -> None:
         threshold = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
@@ -1103,10 +803,22 @@ class AIProviderRegistry:
             raise ServiceError("AI Provider가 빈 답변을 반환했습니다.")
         return answer.strip()
 
+    def chat_processing_mode(self, model_id: str) -> str:
+        parsed = self.parse_model_id(model_id)
+        if parsed is None:
+            return "vision_managed"
+        provider_id, _model_name = parsed
+        provider = self.store.get(provider_id)
+        if provider is None or not provider.enabled:
+            return "vision_managed"
+        return provider.chat_processing_mode
+
     def generate(
         self,
         model_id: str,
         messages: list[dict[str, str]],
+        *,
+        routing_metadata: dict[str, str | None] | None = None,
     ) -> tuple[str, str, str]:
         parsed = self.parse_model_id(model_id)
         if parsed is None:
@@ -1134,6 +846,11 @@ class AIProviderRegistry:
             )
         headers = self._headers(provider)
         headers["Content-Type"] = "application/json"
+        for key, value in (routing_metadata or {}).items():
+            if value is not None and str(value):
+                headers[f"X-Vision-{key.replace('_', '-').title()}"] = (
+                    urllib.parse.quote(str(value), safe="._:/-")
+                )
         if provider.protocol == "ollama":
             path = "/api/chat"
             body = {

@@ -1,0 +1,38 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vision-worker
+  namespace: vision
+spec:
+  scaleTargetRef:
+    name: vision-worker
+  pollingInterval: 15
+  cooldownPeriod: 120
+  minReplicaCount: 1
+  maxReplicaCount: 8
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 30
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 60
+  triggers:
+    - type: redis-streams
+      metadata:
+        hostFromEnv: REDIS_HOST
+        portFromEnv: REDIS_PORT
+        passwordFromEnv: REDIS_PASSWORD
+        databaseIndex: "0"
+        stream: vision:tasks:indexing
+        consumerGroup: vision:tasks:indexing:workers
+        lagCount: "1"
+        activationLagCount: "1"

@@ -1,73 +1,187 @@
 from __future__ import annotations
 
 import json
-import math
-import sqlite3
-import threading
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from dataclasses import dataclass, field
+from time import perf_counter
+from typing import Any, Protocol, TypeAlias, runtime_checkable
+from urllib.parse import quote
 from uuid import NAMESPACE_URL, uuid5
 
 from .schemas import Source
+
+
+VectorScalar: TypeAlias = str | int | float | bool
 
 
 class VectorStoreError(RuntimeError):
     pass
 
 
-class SQLiteVectorStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self._initialize()
+class VectorIndexNotFoundError(VectorStoreError):
+    pass
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
 
-    def _initialize(self) -> None:
-        with self._lock, self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS document_chunks (
-                    project_id TEXT NOT NULL,
-                    chunk_id TEXT NOT NULL,
-                    document_id TEXT NOT NULL,
-                    path TEXT,
-                    language TEXT,
-                    content TEXT NOT NULL,
-                    embedding_json TEXT NOT NULL,
-                    embedding_provider TEXT NOT NULL,
-                    embedding_model TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (project_id, chunk_id)
-                )
-                """
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_chunks_project ON document_chunks(project_id)"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_chunks_document ON document_chunks(project_id, document_id)"
-            )
-            columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(document_chunks)")
-            }
-            if "generation_id" not in columns:
-                connection.execute(
-                    "ALTER TABLE document_chunks ADD COLUMN generation_id TEXT"
-                )
-            if "snapshot_id" not in columns:
-                connection.execute(
-                    "ALTER TABLE document_chunks ADD COLUMN snapshot_id TEXT"
-                )
+class VectorIndexCompatibilityError(VectorStoreError):
+    pass
+
+
+class VectorSelectorConflictError(VectorStoreError):
+    pass
+
+
+class VectorCapabilityError(VectorStoreError):
+    pass
+
+
+@dataclass(frozen=True)
+class VectorCapabilities:
+    dense_vectors: bool
+    sparse_vectors: bool
+    payload_filter: bool
+    exact_count: bool
+    provision_index: bool
+    named_vectors: bool = False
+    hybrid_query: bool = False
+    rrf: bool = False
+    quantization: bool = False
+
+
+@dataclass(frozen=True)
+class VectorTargetHealth:
+    reachable: bool
+    engine: str
+    latency_ms: float | None
+    version: str | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class VectorSelector:
+    """Portable P2-B selector: AND of exact scalar payload matches."""
+
+    match: dict[str, VectorScalar] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class VectorIndexRef:
+    """Physical collection locator plus the immutable logical-index boundary."""
+
+    collection: str
+    selector: VectorSelector = field(default_factory=VectorSelector)
+
+
+@dataclass(frozen=True)
+class VectorIndexSpec:
+    collection: str
+    dimension: int
+    distance_metric: str
+    vector_type: str = "dense"
+
+
+@dataclass(frozen=True)
+class VectorIndexState:
+    exists: bool
+    collection: str
+    dimension: int | None
+    distance_metric: str | None
+    vector_type: str | None
+    points_count: int | None
+    status: str
+
+
+@dataclass(frozen=True)
+class VectorPoint:
+    point_id: str
+    vector: list[float]
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class VectorWriteResult:
+    point_ids: list[str]
+
+    @property
+    def written_count(self) -> int:
+        return len(self.point_ids)
+
+
+@dataclass(frozen=True)
+class VectorQuery:
+    vector: list[float]
+    top_k: int
+    selector: VectorSelector = field(default_factory=VectorSelector)
+    include_payload: bool = True
+
+
+@dataclass(frozen=True)
+class VectorMatch:
+    point_id: str
+    score: float
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class VectorDeleteResult:
+    deleted_count: int | None
+
+
+@dataclass(frozen=True)
+class VectorPointSample:
+    point_id: str
+    payload: dict[str, Any]
+    vector: list[float] | None = None
+
+
+@runtime_checkable
+class VectorEngineAdapter(Protocol):
+    """Canonical P2-B vector engine I/O contract.
+
+    The adapter is target-scoped. It deliberately knows nothing about Vision
+    Project, Snapshot, Generation, EmbeddingProfile, or Source semantics.
+    """
+
+    def capabilities(self) -> VectorCapabilities: ...
+
+    def health(self) -> VectorTargetHealth: ...
+
+    def describe_index(self, index: VectorIndexRef) -> VectorIndexState: ...
+
+    def discover_indexes(self) -> list[VectorIndexState]: ...
+
+    def provision_index(self, spec: VectorIndexSpec) -> VectorIndexState: ...
+
+    def upsert(
+        self, index: VectorIndexRef, points: list[VectorPoint]
+    ) -> VectorWriteResult: ...
+
+    def query(self, index: VectorIndexRef, request: VectorQuery) -> list[VectorMatch]: ...
+
+    def count(
+        self, index: VectorIndexRef, selector: VectorSelector | None = None
+    ) -> int: ...
+
+    def delete(
+        self, index: VectorIndexRef, selector: VectorSelector
+    ) -> VectorDeleteResult: ...
+
+    def sample(
+        self,
+        index: VectorIndexRef,
+        *,
+        limit: int = 10,
+        include_vectors: bool = False,
+    ) -> list[VectorPointSample]: ...
+
+
+@runtime_checkable
+class ManagedVectorStore(Protocol):
+    """Temporary P2-B compatibility façade for current Vision callers.
+
+    This is not the canonical engine contract. P2-C~F will migrate callers to
+    persistent vector_index_id based orchestration and retire this façade.
+    """
 
     def replace_document(
         self,
@@ -77,37 +191,16 @@ class SQLiteVectorStore:
         language: str | None,
         chunks: list[dict[str, Any]],
         metadata: dict[str, Any],
-    ) -> int:
-        timestamp = datetime.now(timezone.utc).isoformat()
-        with self._lock, self._connect() as connection:
-            connection.execute(
-                "DELETE FROM document_chunks WHERE project_id = ? AND document_id = ?",
-                (project_id, document_id),
-            )
-            for chunk in chunks:
-                connection.execute(
-                    """
-                    INSERT INTO document_chunks (
-                        project_id, chunk_id, document_id, path, language, content,
-                        embedding_json, embedding_provider, embedding_model,
-                        metadata_json, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        project_id,
-                        chunk["chunk_id"],
-                        document_id,
-                        path,
-                        language,
-                        chunk["content"],
-                        json.dumps(chunk["embedding"], separators=(",", ":")),
-                        chunk["embedding_provider"],
-                        chunk["embedding_model"],
-                        json.dumps(metadata, ensure_ascii=False),
-                        timestamp,
-                    ),
-                )
-        return len(chunks)
+    ) -> int: ...
+
+    def upsert_generation_chunks(
+        self,
+        *,
+        project_id: str,
+        snapshot_id: str,
+        generation_id: str,
+        items: list[dict[str, Any]],
+    ) -> list[str]: ...
 
     def search(
         self,
@@ -117,184 +210,59 @@ class SQLiteVectorStore:
         embedding_model: str,
         top_k: int,
         generation_id: str | None = None,
-    ) -> list[Source]:
-        with self._lock, self._connect() as connection:
-            query = """
-                SELECT chunk_id, document_id, path, language, content,
-                       embedding_json, metadata_json
-                FROM document_chunks
-                WHERE project_id = ?
-                  AND embedding_provider = ?
-                  AND embedding_model = ?
-            """
-            parameters: list[Any] = [project_id, embedding_provider, embedding_model]
-            if generation_id is not None:
-                query += " AND generation_id = ?"
-                parameters.append(generation_id)
-            rows = connection.execute(query, tuple(parameters)).fetchall()
+    ) -> list[Source]: ...
 
-        results: list[Source] = []
-        for row in rows:
-            stored = json.loads(row["embedding_json"])
-            score = self._cosine_similarity(vector, stored)
-            results.append(
-                Source(
-                    document_id=row["document_id"],
-                    chunk_id=row["chunk_id"],
-                    path=row["path"],
-                    language=row["language"],
-                    text=row["content"],
-                    score=round(score, 6),
-                    metadata=json.loads(row["metadata_json"]),
-                )
+    def count_generation(self, project_id: str, generation_id: str) -> int: ...
+
+    def delete_generation(self, project_id: str, generation_id: str) -> int: ...
+
+    def delete_project(self, project_id: str) -> int: ...
+
+    def stats(self) -> dict[str, Any]: ...
+
+
+def merge_selectors(
+    base: VectorSelector,
+    operation: VectorSelector | None,
+) -> VectorSelector:
+    merged = dict(base.match)
+    if operation is None:
+        return VectorSelector(merged)
+    for key, value in operation.match.items():
+        if key in merged and merged[key] != value:
+            raise VectorSelectorConflictError(
+                f"Vector selector conflict for key={key!r}: "
+                f"index={merged[key]!r}, operation={value!r}"
             )
-        results.sort(key=lambda item: item.score, reverse=True)
-        return results[:top_k]
-
-    def upsert_generation_document(
-        self,
-        *,
-        project_id: str,
-        snapshot_id: str,
-        generation_id: str,
-        document_id: str,
-        path: str,
-        language: str | None,
-        chunks: list[dict[str, Any]],
-        metadata: dict[str, Any],
-    ) -> list[str]:
-        return self.upsert_generation_chunks(
-            project_id=project_id,
-            snapshot_id=snapshot_id,
-            generation_id=generation_id,
-            items=[
-                {
-                    **chunk,
-                    "document_id": document_id,
-                    "path": path,
-                    "language": language,
-                    "metadata": metadata,
-                }
-                for chunk in chunks
-            ],
-        )
-
-    def upsert_generation_chunks(
-        self,
-        *,
-        project_id: str,
-        snapshot_id: str,
-        generation_id: str,
-        items: list[dict[str, Any]],
-    ) -> list[str]:
-        timestamp = datetime.now(timezone.utc).isoformat()
-        point_ids: list[str] = []
-        with self._lock, self._connect() as connection:
-            for chunk in items:
-                point_id = str(
-                    uuid5(
-                        NAMESPACE_URL,
-                        f"{project_id}:{generation_id}:{chunk['chunk_id']}",
-                    )
-                )
-                point_ids.append(point_id)
-                connection.execute(
-                    """
-                    INSERT OR REPLACE INTO document_chunks (
-                        project_id, chunk_id, document_id, path, language, content,
-                        embedding_json, embedding_provider, embedding_model,
-                        metadata_json, updated_at, generation_id, snapshot_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        project_id,
-                        chunk["chunk_id"],
-                        chunk["document_id"],
-                        chunk["path"],
-                        chunk.get("language"),
-                        chunk["content"],
-                        json.dumps(chunk["embedding"], separators=(",", ":")),
-                        chunk["embedding_provider"],
-                        chunk["embedding_model"],
-                        json.dumps(chunk.get("metadata", {}), ensure_ascii=False),
-                        timestamp,
-                        generation_id,
-                        snapshot_id,
-                    ),
-                )
-        return point_ids
-
-    def count_generation(self, project_id: str, generation_id: str) -> int:
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT COUNT(*) AS count FROM document_chunks
-                WHERE project_id = ? AND generation_id = ?
-                """,
-                (project_id, generation_id),
-            ).fetchone()
-            return int(row["count"])
-
-    def delete_generation(self, project_id: str, generation_id: str) -> int:
-        with self._lock, self._connect() as connection:
-            cursor = connection.execute(
-                """
-                DELETE FROM document_chunks
-                WHERE project_id = ? AND generation_id = ?
-                """,
-                (project_id, generation_id),
-            )
-            return cursor.rowcount
-
-    def delete_project(self, project_id: str) -> int:
-        with self._lock, self._connect() as connection:
-            cursor = connection.execute(
-                "DELETE FROM document_chunks WHERE project_id = ?", (project_id,)
-            )
-            return cursor.rowcount
-
-    def stats(self) -> dict[str, Any]:
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) AS chunks, COUNT(DISTINCT project_id) AS projects FROM document_chunks"
-            ).fetchone()
-            return {
-                "provider": "sqlite",
-                "status": "ok",
-                "projects": int(row["projects"]),
-                "chunks": int(row["chunks"]),
-            }
-
-    @staticmethod
-    def _cosine_similarity(left: list[float], right: list[float]) -> float:
-        if not left or not right or len(left) != len(right):
-            return 0.0
-        dot = sum(a * b for a, b in zip(left, right))
-        left_norm = math.sqrt(sum(value * value for value in left))
-        right_norm = math.sqrt(sum(value * value for value in right))
-        if not left_norm or not right_norm:
-            return 0.0
-        return dot / (left_norm * right_norm)
+        merged[key] = value
+    return VectorSelector(merged)
 
 
-class QdrantVectorStore:
+def _normalize_distance(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    return {
+        "cosine": "cosine",
+        "dot": "dot",
+        "euclid": "euclid",
+        "euclidean": "euclid",
+        "manhattan": "manhattan",
+    }.get(normalized, normalized)
+
+
+class QdrantVectorAdapter:
+    """Qdrant implementation of the target-scoped P2-B engine contract."""
+
     def __init__(
         self,
         base_url: str,
         api_key: str,
-        collection: str,
-        vector_size: int,
-        index_version: str,
         timeout_seconds: int,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.collection = collection
-        self.vector_size = vector_size
-        self.index_version = index_version
         self.timeout_seconds = timeout_seconds
-        self._initialized = False
-        self._initialize_lock = threading.Lock()
 
     def _request(
         self,
@@ -303,6 +271,7 @@ class QdrantVectorStore:
         payload: dict[str, Any] | None = None,
         *,
         allow_not_found: bool = False,
+        allow_http_statuses: frozenset[int] = frozenset(),
     ) -> dict[str, Any]:
         headers = {"Accept": "application/json"}
         if payload is not None:
@@ -322,64 +291,395 @@ class QdrantVectorStore:
         except urllib.error.HTTPError as exc:
             if allow_not_found and exc.code == 404:
                 return {"status": "not_found"}
+            if exc.code in allow_http_statuses:
+                return {"status": "http_error", "status_code": exc.code}
             detail = exc.read().decode("utf-8", errors="replace")[:500]
             raise VectorStoreError(
-                f"Qdrant가 HTTP {exc.code}을 반환했습니다: {detail}"
+                f"Qdrant returned HTTP {exc.code}: {detail}"
             ) from exc
         except (urllib.error.URLError, TimeoutError) as exc:
-            raise VectorStoreError(f"Qdrant에 연결할 수 없습니다: {exc}") from exc
+            raise VectorStoreError(f"Qdrant is unavailable: {exc}") from exc
         except json.JSONDecodeError as exc:
-            raise VectorStoreError("Qdrant 응답이 올바른 JSON이 아닙니다.") from exc
-
-    def _ensure_collection(self) -> None:
-        if self._initialized:
-            return
-        with self._initialize_lock:
-            if self._initialized:
-                return
-            current = self._request(
-                "GET", f"/collections/{self.collection}", allow_not_found=True
-            )
-            if current.get("status") == "not_found":
-                self._request(
-                    "PUT",
-                    f"/collections/{self.collection}",
-                    {
-                        "vectors": {
-                            "size": self.vector_size,
-                            "distance": "Cosine",
-                        }
-                    },
-                )
-            else:
-                configured_size = (
-                    current.get("result", {})
-                    .get("config", {})
-                    .get("params", {})
-                    .get("vectors", {})
-                    .get("size")
-                )
-                if configured_size not in {None, self.vector_size}:
-                    raise VectorStoreError(
-                        "Qdrant collection vector size mismatch: "
-                        f"expected={self.vector_size}, actual={configured_size}"
-                    )
-            self._initialized = True
+            raise VectorStoreError("Qdrant returned invalid JSON") from exc
 
     @staticmethod
-    def _filter(
-        project_id: str,
-        document_id: str | None = None,
-        generation_id: str | None = None,
-    ) -> dict[str, Any]:
-        must: list[dict[str, Any]] = [
-            {"key": "project_id", "match": {"value": project_id}}
-        ]
-        if document_id is not None:
-            must.append({"key": "document_id", "match": {"value": document_id}})
-        if generation_id is not None:
-            must.append({"key": "generation_id", "match": {"value": generation_id}})
-        return {"must": must}
+    def _collection_path(collection: str) -> str:
+        normalized = collection.strip()
+        if not normalized:
+            raise ValueError("collection must not be blank")
+        return quote(normalized, safe="")
+
+    @staticmethod
+    def _qdrant_filter(selector: VectorSelector) -> dict[str, Any] | None:
+        if not selector.match:
+            return None
+        return {
+            "must": [
+                {"key": key, "match": {"value": value}}
+                for key, value in sorted(selector.match.items())
+            ]
+        }
+
+    @staticmethod
+    def _parse_vector_config(result: dict[str, Any]) -> tuple[int | None, str | None, str]:
+        vectors = (
+            result.get("config", {})
+            .get("params", {})
+            .get("vectors", {})
+        )
+        if isinstance(vectors, dict) and "size" in vectors:
+            dimension = int(vectors["size"]) if vectors.get("size") is not None else None
+            distance = _normalize_distance(str(vectors.get("distance"))) if vectors.get("distance") else None
+            return dimension, distance, "dense"
+        if isinstance(vectors, dict) and vectors:
+            # Named-vector collections are discoverable in P2-B but managed writes
+            # remain single unnamed dense-vector only until a later contract extension.
+            return None, None, "named"
+        return None, None, "dense"
+
+    def capabilities(self) -> VectorCapabilities:
+        return VectorCapabilities(
+            dense_vectors=True,
+            sparse_vectors=True,
+            payload_filter=True,
+            exact_count=True,
+            provision_index=True,
+            named_vectors=True,
+            hybrid_query=True,
+            rrf=True,
+            quantization=True,
+        )
+
+    def health(self) -> VectorTargetHealth:
+        started = perf_counter()
+        try:
+            data = self._request("GET", "/")
+            latency_ms = round((perf_counter() - started) * 1000, 2)
+            version = data.get("version")
+            if version is None and isinstance(data.get("result"), dict):
+                version = data["result"].get("version")
+            return VectorTargetHealth(
+                reachable=True,
+                engine="qdrant",
+                latency_ms=latency_ms,
+                version=str(version) if version else None,
+            )
+        except VectorStoreError as exc:
+            return VectorTargetHealth(
+                reachable=False,
+                engine="qdrant",
+                latency_ms=round((perf_counter() - started) * 1000, 2),
+                detail=str(exc),
+            )
+
+    def describe_index(self, index: VectorIndexRef) -> VectorIndexState:
+        collection = self._collection_path(index.collection)
+        data = self._request(
+            "GET", f"/collections/{collection}", allow_not_found=True
+        )
+        if data.get("status") == "not_found":
+            return VectorIndexState(
+                exists=False,
+                collection=index.collection,
+                dimension=None,
+                distance_metric=None,
+                vector_type=None,
+                points_count=None,
+                status="missing",
+            )
+        result = data.get("result", {})
+        dimension, distance, vector_type = self._parse_vector_config(result)
+        return VectorIndexState(
+            exists=True,
+            collection=index.collection,
+            dimension=dimension,
+            distance_metric=distance,
+            vector_type=vector_type,
+            points_count=int(result.get("points_count") or 0),
+            status=str(result.get("status") or "ok").lower(),
+        )
+
+    def discover_indexes(self) -> list[VectorIndexState]:
+        """Discover physical Qdrant collections without registering logical indexes."""
+        data = self._request("GET", "/collections")
+        result = data.get("result", {})
+        rows = result.get("collections", []) if isinstance(result, dict) else []
+        states: list[VectorIndexState] = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            states.append(self.describe_index(VectorIndexRef(collection=name)))
+        return sorted(states, key=lambda state: state.collection)
+
+    def provision_index(self, spec: VectorIndexSpec) -> VectorIndexState:
+        if spec.vector_type != "dense":
+            raise VectorCapabilityError(
+                "P2-B managed provisioning supports only a single unnamed dense vector"
+            )
+        if spec.dimension < 1:
+            raise ValueError("dimension must be positive")
+        index = VectorIndexRef(collection=spec.collection)
+        current = self.describe_index(index)
+        requested_distance = _normalize_distance(spec.distance_metric)
+        if current.exists:
+            if current.vector_type not in {None, "dense"}:
+                raise VectorIndexCompatibilityError(
+                    f"Collection {spec.collection!r} is not a single dense-vector index"
+                )
+            if current.dimension not in {None, spec.dimension}:
+                raise VectorIndexCompatibilityError(
+                    "Qdrant collection vector size mismatch: "
+                    f"expected={spec.dimension}, actual={current.dimension}"
+                )
+            if (
+                current.distance_metric is not None
+                and requested_distance is not None
+                and current.distance_metric != requested_distance
+            ):
+                raise VectorIndexCompatibilityError(
+                    "Qdrant collection distance mismatch: "
+                    f"expected={requested_distance}, actual={current.distance_metric}"
+                )
+            return current
+
+        qdrant_distance = {
+            "cosine": "Cosine",
+            "dot": "Dot",
+            "euclid": "Euclid",
+            "manhattan": "Manhattan",
+        }.get(requested_distance or "cosine")
+        if qdrant_distance is None:
+            raise VectorCapabilityError(
+                f"Unsupported Qdrant distance metric: {spec.distance_metric}"
+            )
+        collection = self._collection_path(spec.collection)
+        self._request(
+            "PUT",
+            f"/collections/{collection}",
+            {"vectors": {"size": spec.dimension, "distance": qdrant_distance}},
+        )
+        return self.describe_index(index)
+
+    def _require_index(self, index: VectorIndexRef) -> VectorIndexState:
+        state = self.describe_index(index)
+        if not state.exists:
+            raise VectorIndexNotFoundError(
+                f"Vector collection does not exist: {index.collection}"
+            )
+        return state
+
+    def upsert(
+        self, index: VectorIndexRef, points: list[VectorPoint]
+    ) -> VectorWriteResult:
+        if not points:
+            return VectorWriteResult([])
+        state = self._require_index(index)
+        if state.vector_type not in {None, "dense"}:
+            raise VectorCapabilityError(
+                "P2-B managed writes do not support named-vector collections"
+            )
+        rows: list[dict[str, Any]] = []
+        point_ids: list[str] = []
+        for point in points:
+            if state.dimension is not None and len(point.vector) != state.dimension:
+                raise VectorIndexCompatibilityError(
+                    "Vector dimension does not match collection: "
+                    f"expected={state.dimension}, actual={len(point.vector)}"
+                )
+            point_ids.append(point.point_id)
+            rows.append(
+                {
+                    "id": point.point_id,
+                    "vector": point.vector,
+                    "payload": point.payload,
+                }
+            )
+        collection = self._collection_path(index.collection)
+        self._request(
+            "PUT",
+            f"/collections/{collection}/points?wait=true",
+            {"points": rows},
+        )
+        return VectorWriteResult(point_ids)
+
+    def query(self, index: VectorIndexRef, request: VectorQuery) -> list[VectorMatch]:
+        if request.top_k < 1:
+            return []
+        state = self._require_index(index)
+        if state.dimension is not None and len(request.vector) != state.dimension:
+            raise VectorIndexCompatibilityError(
+                "Query vector dimension does not match collection: "
+                f"expected={state.dimension}, actual={len(request.vector)}"
+            )
+        selector = merge_selectors(index.selector, request.selector)
+        payload: dict[str, Any] = {
+            "query": request.vector,
+            "limit": request.top_k,
+            "with_payload": request.include_payload,
+            "with_vector": False,
+        }
+        filter_value = self._qdrant_filter(selector)
+        if filter_value is not None:
+            payload["filter"] = filter_value
+        collection = self._collection_path(index.collection)
+        data = self._request(
+            "POST",
+            f"/collections/{collection}/points/query",
+            payload,
+            allow_http_statuses=frozenset({404, 405}),
+        )
+        if data.get("status") == "http_error":
+            fallback = {
+                "vector": request.vector,
+                "limit": request.top_k,
+                "with_payload": request.include_payload,
+                "with_vector": False,
+            }
+            if filter_value is not None:
+                fallback["filter"] = filter_value
+            data = self._request(
+                "POST",
+                f"/collections/{collection}/points/search",
+                fallback,
+            )
+            rows = data.get("result", [])
+        else:
+            result = data.get("result", {})
+            rows = result.get("points", []) if isinstance(result, dict) else []
+
+        matches: list[VectorMatch] = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            payload_value = row.get("payload")
+            matches.append(
+                VectorMatch(
+                    point_id=str(row.get("id") or ""),
+                    score=float(row.get("score") or 0.0),
+                    payload=payload_value if isinstance(payload_value, dict) else {},
+                )
+            )
+        return matches
+
+    def count(
+        self, index: VectorIndexRef, selector: VectorSelector | None = None
+    ) -> int:
+        self._require_index(index)
+        merged = merge_selectors(index.selector, selector)
+        payload: dict[str, Any] = {"exact": True}
+        filter_value = self._qdrant_filter(merged)
+        if filter_value is not None:
+            payload["filter"] = filter_value
+        collection = self._collection_path(index.collection)
+        data = self._request(
+            "POST",
+            f"/collections/{collection}/points/count",
+            payload,
+        )
+        return int(data.get("result", {}).get("count", 0))
+
+    def delete(
+        self, index: VectorIndexRef, selector: VectorSelector
+    ) -> VectorDeleteResult:
+        self._require_index(index)
+        merged = merge_selectors(index.selector, selector)
+        if not merged.match:
+            raise VectorStoreError(
+                "Refusing unscoped vector delete; a non-empty selector is required"
+            )
+        count = self.count(index, selector)
+        collection = self._collection_path(index.collection)
+        self._request(
+            "POST",
+            f"/collections/{collection}/points/delete?wait=true",
+            {"filter": self._qdrant_filter(merged)},
+        )
+        return VectorDeleteResult(deleted_count=count)
+
+    def sample(
+        self,
+        index: VectorIndexRef,
+        *,
+        limit: int = 10,
+        include_vectors: bool = False,
+    ) -> list[VectorPointSample]:
+        if limit < 1:
+            return []
+        self._require_index(index)
+        payload: dict[str, Any] = {
+            "limit": min(100, int(limit)),
+            "with_payload": True,
+            "with_vector": bool(include_vectors),
+        }
+        filter_value = self._qdrant_filter(index.selector)
+        if filter_value is not None:
+            payload["filter"] = filter_value
+        collection = self._collection_path(index.collection)
+        data = self._request(
+            "POST",
+            f"/collections/{collection}/points/scroll",
+            payload,
+        )
+        result = data.get("result", {})
+        rows = result.get("points", []) if isinstance(result, dict) else []
+        samples: list[VectorPointSample] = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            payload_value = row.get("payload")
+            vector_value = row.get("vector") if include_vectors else None
+            samples.append(
+                VectorPointSample(
+                    point_id=str(row.get("id") or ""),
+                    payload=payload_value if isinstance(payload_value, dict) else {},
+                    vector=(
+                        [float(value) for value in vector_value]
+                        if isinstance(vector_value, list)
+                        else None
+                    ),
+                )
+            )
+        return samples
+
+
+class ManagedVectorStoreFacade:
+    """Translate current Vision managed-index semantics into the P2-B adapter."""
+
+    def __init__(
+        self,
+        adapter: VectorEngineAdapter,
+        *,
+        collection: str,
+        vector_size: int,
+        index_version: str,
+        distance_metric: str = "cosine",
+        selector: dict[str, VectorScalar] | None = None,
+        query_selector_authoritative: bool = False,
+    ) -> None:
+        self.adapter = adapter
+        self.index = VectorIndexRef(
+            collection=collection,
+            selector=VectorSelector(dict(selector or {})),
+        )
+        self.vector_size = vector_size
+        self.index_version = index_version
+        self.distance_metric = _normalize_distance(distance_metric) or "cosine"
+        self.query_selector_authoritative = bool(query_selector_authoritative)
+
+    def _state(self) -> VectorIndexState:
+        return self.adapter.describe_index(self.index)
+
+    def _ensure_managed_index(self) -> VectorIndexState:
+        return self.adapter.provision_index(
+            VectorIndexSpec(
+                collection=self.index.collection,
+                dimension=self.vector_size,
+                distance_metric=self.distance_metric,
+            )
+        )
 
     def replace_document(
         self,
@@ -390,27 +690,24 @@ class QdrantVectorStore:
         chunks: list[dict[str, Any]],
         metadata: dict[str, Any],
     ) -> int:
-        self._ensure_collection()
-        self._request(
-            "POST",
-            f"/collections/{self.collection}/points/delete?wait=true",
-            {"filter": self._filter(project_id, document_id)},
+        self._ensure_managed_index()
+        document_selector = VectorSelector(
+            {"project_id": project_id, "document_id": document_id}
         )
+        try:
+            self.adapter.delete(self.index, document_selector)
+        except VectorIndexNotFoundError:
+            pass
         if not chunks:
             return 0
-        points = []
+        points: list[VectorPoint] = []
         for chunk in chunks:
-            vector = chunk["embedding"]
-            if len(vector) != self.vector_size:
-                raise VectorStoreError(
-                    "저장할 embedding 차원이 Qdrant collection과 일치하지 않습니다."
-                )
             point_id = str(uuid5(NAMESPACE_URL, f"{project_id}:{chunk['chunk_id']}"))
             points.append(
-                {
-                    "id": point_id,
-                    "vector": vector,
-                    "payload": {
+                VectorPoint(
+                    point_id=point_id,
+                    vector=[float(value) for value in chunk["embedding"]],
+                    payload={
                         "project_id": project_id,
                         "document_id": document_id,
                         "document_version_id": chunk.get("document_version_id"),
@@ -425,42 +722,9 @@ class QdrantVectorStore:
                         "index_version": self.index_version,
                         "metadata": metadata,
                     },
-                }
+                )
             )
-        self._request(
-            "PUT",
-            f"/collections/{self.collection}/points?wait=true",
-            {"points": points},
-        )
-        return len(points)
-
-    def upsert_generation_document(
-        self,
-        *,
-        project_id: str,
-        snapshot_id: str,
-        generation_id: str,
-        document_id: str,
-        path: str,
-        language: str | None,
-        chunks: list[dict[str, Any]],
-        metadata: dict[str, Any],
-    ) -> list[str]:
-        return self.upsert_generation_chunks(
-            project_id=project_id,
-            snapshot_id=snapshot_id,
-            generation_id=generation_id,
-            items=[
-                {
-                    **chunk,
-                    "document_id": document_id,
-                    "path": path,
-                    "language": language,
-                    "metadata": metadata,
-                }
-                for chunk in chunks
-            ],
-        )
+        return self.adapter.upsert(self.index, points).written_count
 
     def upsert_generation_chunks(
         self,
@@ -470,34 +734,25 @@ class QdrantVectorStore:
         generation_id: str,
         items: list[dict[str, Any]],
     ) -> list[str]:
-        self._ensure_collection()
-        points: list[dict[str, Any]] = []
-        point_ids: list[str] = []
+        self._ensure_managed_index()
+        points: list[VectorPoint] = []
         for chunk in items:
-            vector = chunk["embedding"]
-            if len(vector) != self.vector_size:
-                raise VectorStoreError(
-                    "저장할 embedding 차원이 Qdrant collection과 일치하지 않습니다."
-                )
             point_id = str(
                 uuid5(
                     NAMESPACE_URL,
                     f"{project_id}:{generation_id}:{chunk['chunk_id']}",
                 )
             )
-            point_ids.append(point_id)
             points.append(
-                {
-                    "id": point_id,
-                    "vector": vector,
-                    "payload": {
+                VectorPoint(
+                    point_id=point_id,
+                    vector=[float(value) for value in chunk["embedding"]],
+                    payload={
                         "project_id": project_id,
                         "snapshot_id": snapshot_id,
                         "generation_id": generation_id,
                         "document_id": chunk["document_id"],
-                        "document_version_id": (
-                            f"{snapshot_id}:{chunk['document_id']}"
-                        ),
+                        "document_version_id": f"{snapshot_id}:{chunk['document_id']}",
                         "chunk_id": chunk["chunk_id"],
                         "path": chunk["path"],
                         "language": chunk.get("language"),
@@ -509,15 +764,9 @@ class QdrantVectorStore:
                         "index_version": self.index_version,
                         "metadata": chunk.get("metadata", {}),
                     },
-                }
+                )
             )
-        if points:
-            self._request(
-                "PUT",
-                f"/collections/{self.collection}/points?wait=true",
-                {"points": points},
-            )
-        return point_ids
+        return self.adapter.upsert(self.index, points).point_ids
 
     def search(
         self,
@@ -528,41 +777,31 @@ class QdrantVectorStore:
         top_k: int,
         generation_id: str | None = None,
     ) -> list[Source]:
-        self._ensure_collection()
-        must = [
-            {"key": "project_id", "match": {"value": project_id}},
-            {
-                "key": "embedding_provider",
-                "match": {"value": embedding_provider},
-            },
-            {
-                "key": "embedding_model",
-                "match": {"value": embedding_model},
-            },
-            {
-                "key": "index_version",
-                "match": {"value": self.index_version},
-            },
-        ]
-        if generation_id is not None:
-            must.append(
-                {"key": "generation_id", "match": {"value": generation_id}}
-            )
-        data = self._request(
-            "POST",
-            f"/collections/{self.collection}/points/search",
-            {
-                "vector": vector,
-                "filter": {"must": must},
-                "limit": top_k,
-                "with_payload": True,
-                "with_vector": False,
-            },
+        state = self._state()
+        if not state.exists:
+            return []
+        if self.query_selector_authoritative:
+            operation_selector = VectorSelector()
+        else:
+            selector_values: dict[str, VectorScalar] = {
+                "project_id": project_id,
+                "embedding_model": embedding_model,
+                "index_version": self.index_version,
+            }
+            if generation_id is not None:
+                selector_values["generation_id"] = generation_id
+            operation_selector = VectorSelector(selector_values)
+        matches = self.adapter.query(
+            self.index,
+            VectorQuery(
+                vector=vector,
+                top_k=top_k,
+                selector=operation_selector,
+            ),
         )
-        rows = data.get("result", [])
         results: list[Source] = []
-        for row in rows if isinstance(rows, list) else []:
-            payload = row.get("payload", {}) if isinstance(row, dict) else {}
+        for match in matches:
+            payload = match.payload
             results.append(
                 Source(
                     document_id=str(payload.get("document_id", "")),
@@ -573,73 +812,74 @@ class QdrantVectorStore:
                     line_start=payload.get("line_start"),
                     line_end=payload.get("line_end"),
                     text=str(payload.get("content", "")),
-                    score=round(float(row.get("score", 0.0)), 6),
-                    metadata=payload.get("metadata", {}),
+                    score=round(match.score, 6),
+                    metadata=(
+                        payload.get("metadata")
+                        if isinstance(payload.get("metadata"), dict)
+                        else {}
+                    ),
                 )
             )
         return results
 
     def count_generation(self, project_id: str, generation_id: str) -> int:
-        self._ensure_collection()
-        data = self._request(
-            "POST",
-            f"/collections/{self.collection}/points/count",
-            {
-                "filter": self._filter(
-                    project_id, generation_id=generation_id
-                ),
-                "exact": True,
-            },
+        if not self._state().exists:
+            return 0
+        return self.adapter.count(
+            self.index,
+            VectorSelector(
+                {"project_id": project_id, "generation_id": generation_id}
+            ),
         )
-        return int(data.get("result", {}).get("count", 0))
 
     def delete_generation(self, project_id: str, generation_id: str) -> int:
-        self._ensure_collection()
-        count = self.count_generation(project_id, generation_id)
-        self._request(
-            "POST",
-            f"/collections/{self.collection}/points/delete?wait=true",
-            {
-                "filter": self._filter(
-                    project_id, generation_id=generation_id
-                )
-            },
+        if not self._state().exists:
+            return 0
+        result = self.adapter.delete(
+            self.index,
+            VectorSelector(
+                {"project_id": project_id, "generation_id": generation_id}
+            ),
         )
-        return count
+        return int(result.deleted_count or 0)
 
     def delete_project(self, project_id: str) -> int:
-        self._ensure_collection()
-        count_data = self._request(
-            "POST",
-            f"/collections/{self.collection}/points/count",
-            {"filter": self._filter(project_id), "exact": True},
+        if not self._state().exists:
+            return 0
+        result = self.adapter.delete(
+            self.index,
+            VectorSelector({"project_id": project_id}),
         )
-        count = int(count_data.get("result", {}).get("count", 0))
-        self._request(
-            "POST",
-            f"/collections/{self.collection}/points/delete?wait=true",
-            {"filter": self._filter(project_id)},
-        )
-        return count
+        return int(result.deleted_count or 0)
 
     def stats(self) -> dict[str, Any]:
-        try:
-            self._ensure_collection()
-            data = self._request("GET", f"/collections/{self.collection}")
-            result = data.get("result", {})
+        health = self.adapter.health()
+        if not health.reachable:
             return {
-                "provider": "qdrant",
-                "status": "ok",
-                "collection": self.collection,
+                "provider": health.engine,
+                "status": "unavailable",
+                "collection": self.index.collection,
                 "projects": 0,
-                "chunks": int(result.get("points_count") or 0),
+                "chunks": 0,
+                "error": health.detail,
             }
+        try:
+            state = self.adapter.describe_index(self.index)
         except VectorStoreError as exc:
             return {
-                "provider": "qdrant",
+                "provider": health.engine,
                 "status": "unavailable",
-                "collection": self.collection,
+                "collection": self.index.collection,
                 "projects": 0,
                 "chunks": 0,
                 "error": str(exc),
             }
+        return {
+            "provider": health.engine,
+            "status": "ok" if state.exists else "missing",
+            "collection": self.index.collection,
+            "projects": 0,
+            "chunks": int(state.points_count or 0),
+            "dimension": state.dimension,
+            "distance_metric": state.distance_metric,
+        }

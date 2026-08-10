@@ -11,6 +11,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .config import Settings
+from .schema_guard import SchemaStateError, require_schema
 
 
 class FrontendClientStoreError(RuntimeError):
@@ -25,6 +26,7 @@ class FrontendClient:
     ip: str
     port: int
     enabled: bool
+    chat_deep_normalization_mode: str
     registration_type: str
     last_seen_ip: str | None
     last_seen_at: datetime | None
@@ -70,92 +72,11 @@ class PostgresFrontendClientStore:
                 return
             try:
                 with self._connect() as connection:
-                    existed = bool(
-                        connection.execute(
-                            "SELECT to_regclass('public.frontend_clients') IS NOT NULL AS exists"
-                        ).fetchone()["exists"]
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS frontend_clients (
-                            client_id TEXT PRIMARY KEY,
-                            name TEXT NOT NULL,
-                            ip INET NOT NULL,
-                            port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
-                            enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                            instance_id TEXT,
-                            registration_type TEXT NOT NULL DEFAULT 'admin',
-                            last_seen_ip INET,
-                            last_seen_at TIMESTAMPTZ,
-                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        ALTER TABLE frontend_clients
-                        ADD COLUMN IF NOT EXISTS instance_id TEXT
-                        """
-                    )
-                    connection.execute(
-                        """
-                        ALTER TABLE frontend_clients
-                        ADD COLUMN IF NOT EXISTS registration_type TEXT
-                        NOT NULL DEFAULT 'admin'
-                        """
-                    )
-                    connection.execute(
-                        """
-                        ALTER TABLE frontend_clients
-                        ADD COLUMN IF NOT EXISTS last_seen_ip INET
-                        """
-                    )
-                    connection.execute(
-                        """
-                        ALTER TABLE frontend_clients
-                        ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ
-                        """
-                    )
-                    connection.execute(
-                        """
-                        ALTER TABLE frontend_clients
-                        DROP CONSTRAINT IF EXISTS frontend_clients_ip_port_key
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_frontend_clients_enabled_ip
-                        ON frontend_clients (enabled, ip)
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE UNIQUE INDEX IF NOT EXISTS
-                        uq_frontend_clients_instance_id
-                        ON frontend_clients (instance_id)
-                        WHERE instance_id IS NOT NULL
-                        """
-                    )
-                    if not existed:
-                        connection.execute(
-                            """
-                            INSERT INTO frontend_clients (
-                                client_id, name, ip, port, enabled
-                            ) VALUES (%s, %s, %s, %s, TRUE)
-                            ON CONFLICT DO NOTHING
-                            """,
-                            (
-                                "frontend-primary",
-                                "Primary VS Code Frontend",
-                                self._settings.frontend_host,
-                                self._settings.frontend_port,
-                            ),
-                        )
+                    require_schema(connection)
                 self._initialized = True
-            except (psycopg.Error, OSError, KeyError, TypeError) as exc:
+            except (psycopg.Error, OSError, SchemaStateError) as exc:
                 raise FrontendClientStoreError(
-                    "PostgreSQL frontend client registry is unavailable"
+                    "PostgreSQL schema is not on the required Alembic baseline"
                 ) from exc
 
     @staticmethod
@@ -169,6 +90,9 @@ class PostgresFrontendClientStore:
             ip=str(row["ip"]),
             port=int(row["port"]),
             enabled=bool(row["enabled"]),
+            chat_deep_normalization_mode=str(
+                row.get("chat_deep_normalization_mode") or "inherit"
+            ),
             registration_type=str(row.get("registration_type") or "admin"),
             last_seen_ip=(
                 str(row["last_seen_ip"]) if row.get("last_seen_ip") else None
@@ -198,6 +122,7 @@ class PostgresFrontendClientStore:
                 rows = connection.execute(
                     """
                     SELECT client_id, instance_id, name, ip, port, enabled,
+                           chat_deep_normalization_mode,
                            registration_type, last_seen_ip, last_seen_at,
                            created_at, updated_at
                     FROM frontend_clients
@@ -221,6 +146,7 @@ class PostgresFrontendClientStore:
         ip: str,
         port: int,
         enabled: bool,
+        chat_deep_normalization_mode: str = "inherit",
     ) -> FrontendClient:
         self._ensure_schema()
         client_id = f"fcli_{uuid4().hex}"
@@ -230,13 +156,17 @@ class PostgresFrontendClientStore:
                     """
                     INSERT INTO frontend_clients (
                         client_id, instance_id, name, ip, port, enabled,
-                        registration_type
-                    ) VALUES (%s, NULL, %s, %s, %s, %s, 'admin')
+                        chat_deep_normalization_mode, registration_type
+                    ) VALUES (%s, NULL, %s, %s, %s, %s, %s, 'admin')
                     RETURNING client_id, instance_id, name, ip, port, enabled,
+                              chat_deep_normalization_mode,
                               registration_type, last_seen_ip, last_seen_at,
                               created_at, updated_at
                     """,
-                    (client_id, name, ip, port, enabled),
+                    (
+                        client_id, name, ip, port, enabled,
+                        chat_deep_normalization_mode,
+                    ),
                 ).fetchone()
         except (psycopg.Error, OSError) as exc:
             raise FrontendClientStoreError(
@@ -257,6 +187,7 @@ class PostgresFrontendClientStore:
         ip: str,
         port: int,
         enabled: bool,
+        chat_deep_normalization_mode: str = "inherit",
     ) -> FrontendClient | None:
         self._ensure_schema()
         try:
@@ -268,13 +199,18 @@ class PostgresFrontendClientStore:
                         ip = %s,
                         port = %s,
                         enabled = %s,
+                        chat_deep_normalization_mode = %s,
                         updated_at = NOW()
                     WHERE client_id = %s
                     RETURNING client_id, instance_id, name, ip, port, enabled,
+                              chat_deep_normalization_mode,
                               registration_type, last_seen_ip, last_seen_at,
                               created_at, updated_at
                     """,
-                    (name, ip, port, enabled, client_id),
+                    (
+                        name, ip, port, enabled,
+                        chat_deep_normalization_mode, client_id,
+                    ),
                 ).fetchone()
         except (psycopg.Error, OSError) as exc:
             raise FrontendClientStoreError(

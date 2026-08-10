@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 
 import hmac
@@ -105,6 +105,23 @@ def register_repository(
     except Exception as exc:
         raise _translate_error(exc) from exc
 
+
+
+
+@router.get(
+    "/repositories",
+    response_model=list[RepositoryRecord],
+    summary="List registered GitHub repositories",
+)
+def list_repositories(
+    service: Annotated[GithubSnapshotService, Depends(get_snapshot_service)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[RepositoryRecord]:
+    try:
+        return service.list_repositories(limit=limit, offset=offset)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
 
 
 

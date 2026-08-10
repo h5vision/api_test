@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from backend.rag_lab import RagLabClient
+from backend.rag_lab import RagLabClient, RagLabError
 
 
 class _Response:
@@ -22,6 +22,37 @@ class _Response:
 
 
 class RagLabClientTests(unittest.TestCase):
+    def test_briefing_validates_and_returns_generated_artifact(self) -> None:
+        response = _Response(
+            {
+                "project_id": "fastapi-cli",
+                "briefing": "## 이 프로젝트는\nFastAPI CLI입니다.",
+                "references": [{"n": 1, "path": "README.md"}],
+                "reference_files": [{"path": "README.md"}],
+                "mentioned_files": [],
+                "structure": {"total_files": 92},
+                "index_commit": "fb2dd86bf442",
+                "outdated": False,
+                "ok": True,
+            }
+        )
+        client = RagLabClient("http://192.0.2.12:8200")
+
+        with patch("backend.rag_lab.urllib.request.urlopen", return_value=response) as request:
+            result = client.briefing("fastapi-cli")
+
+        self.assertEqual(result["project_id"], "fastapi-cli")
+        self.assertIn("FastAPI CLI", result["briefing"])
+        self.assertIn("project_id=fastapi-cli", request.call_args.args[0].full_url)
+
+    def test_briefing_rejects_mismatched_project(self) -> None:
+        client = RagLabClient("http://192.0.2.12:8200")
+        response = _Response({"project_id": "other", "briefing": "content"})
+
+        with patch("backend.rag_lab.urllib.request.urlopen", return_value=response):
+            with self.assertRaises(RagLabError):
+                client.briefing("fastapi-cli")
+
     def test_prompt_preserves_messages_and_source_order(self) -> None:
         response = _Response(
             {
@@ -81,6 +112,55 @@ class RagLabClientTests(unittest.TestCase):
 
         self.assertFalse(result.has_evidence)
         self.assertEqual(result.sources, [])
+
+    def test_project_resolution_prefers_unique_snapshot_revision(self) -> None:
+        response = _Response(
+            {
+                "projects": [
+                    {
+                        "project_id": "fest-api-v2",
+                        "state": "done",
+                        "commit": "afe41126",
+                        "indexed_at": "2026-08-06T14:39:24+09:00",
+                        "fingerprint": {"embed_model": "bge-m3:latest"},
+                    },
+                    {
+                        "project_id": "fest-api-old",
+                        "state": "done",
+                        "commit": "previous",
+                    },
+                ]
+            }
+        )
+        client = RagLabClient("http://192.0.2.12:8200")
+
+        with patch("backend.rag_lab.urllib.request.urlopen", return_value=response):
+            binding = client.resolve_project(
+                "h5vision/fest-api",
+                revision="afe41126",
+            )
+
+        self.assertEqual(binding.external_project_id, "fest-api-v2")
+        self.assertEqual(binding.binding_strength, "revision_matched")
+        self.assertEqual(binding.verification_state, "compatible")
+
+    def test_project_resolution_rejects_exact_project_with_wrong_revision(self) -> None:
+        response = _Response(
+            {
+                "projects": [
+                    {
+                        "project_id": "fest-api",
+                        "state": "done",
+                        "commit": "old-revision",
+                    }
+                ]
+            }
+        )
+        client = RagLabClient("http://192.0.2.12:8200")
+
+        with patch("backend.rag_lab.urllib.request.urlopen", return_value=response):
+            with self.assertRaises(RagLabError):
+                client.resolve_project("h5vision/fest-api", revision="new-revision")
 
 
 if __name__ == "__main__":

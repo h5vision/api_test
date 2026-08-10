@@ -105,6 +105,18 @@ class GenerationCatalogTests(unittest.TestCase):
         self.assertEqual(status["models"], [])
         self.assertEqual(status["error"], "http_401")
 
+    def test_openai_catalog_with_key_but_no_base_url_is_offline(self) -> None:
+        status = GenerationRouter._probe_openai_catalog(
+            "",
+            "configured-key",
+            timeout_seconds=3,
+        )
+
+        self.assertEqual(status["status"], "offline")
+        self.assertFalse(status["connected"])
+        self.assertEqual(status["models"], [])
+        self.assertEqual(status["error"], "missing_base_url")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ from backend.snapshots.contracts import (
     LocatorRecord,
     RepositoryRecord,
     SnapshotFileResponse,
+    SnapshotListResponse,
     SnapshotRecord,
     SnapshotTreeResponse,
     TreeEntry,
@@ -77,6 +78,15 @@ class FakeSnapshotService:
 
     def list_snapshots_for_tenant(self, *, limit=100, offset=0):
         return [SNAPSHOT] if offset == 0 else []
+
+
+    def list_snapshots(self, repository_id, *, limit=100):
+        assert repository_id == REPOSITORY.repository_id
+        return SnapshotListResponse(
+            repository_id=repository_id,
+            snapshots=[SNAPSHOT],
+            total=1,
+        )
 
 
     def get_repository(self, repository_id):
@@ -183,6 +193,19 @@ def test_admin_snapshot_overview_has_exact_counts_and_no_secret():
     assert "SNAPSHOT_MVP_TOKEN" not in response.text
 
 
+
+
+def test_admin_repository_snapshot_list_is_scoped():
+    response = build_client(FakeSnapshotService()).get(
+        f"/v1/admin/snapshots/repositories/{REPOSITORY.repository_id}/snapshots",
+        params={"limit": 100},
+        headers=admin_headers(),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["repository_id"] == REPOSITORY.repository_id
+    assert body["total"] == 1
+    assert [item["snapshot_id"] for item in body["snapshots"]] == [SNAPSHOT.snapshot_id]
 
 
 def test_admin_snapshot_detail_tree_and_file():

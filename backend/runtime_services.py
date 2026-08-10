@@ -4,12 +4,12 @@ import threading
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlsplit
 
 import psycopg
 from psycopg.rows import dict_row
 
 from .config import Settings
+from .schema_guard import SchemaStateError, require_schema
 
 
 class RuntimeServiceSettingsError(RuntimeError):
@@ -26,22 +26,10 @@ class RuntimeGroqSettings:
 
 @dataclass(frozen=True)
 class RuntimeVectorSettings:
-    host: str
-    port: int
+    vector_target_id: str
+    embedding_profile_id: str
     collection: str
-    embedding_deployment: str
-    embedding_provider: str
-    embedding_provider_id: str | None
-    embedding_base_url: str
-    embedding_model: str
-    embedding_model_id: str
-    embedding_dimension: int
-    embedding_batch_size: int
     index_version: str
-
-    @property
-    def url(self) -> str:
-        return f"http://{self.host}:{self.port}"
 
 
 @dataclass(frozen=True)
@@ -51,29 +39,13 @@ class RuntimeServiceSettings:
     updated_at: datetime | None = None
 
 
-def _vector_default(settings: Settings) -> RuntimeVectorSettings:
-    parsed = urlsplit(settings.qdrant_url)
-    return RuntimeVectorSettings(
-        host=parsed.hostname or "qdrant",
-        port=parsed.port or (443 if parsed.scheme == "https" else 6333),
-        collection=settings.qdrant_collection,
-        embedding_deployment=settings.embedding_deployment,
-        embedding_provider=settings.embedding_provider,
-        embedding_provider_id=settings.embedding_provider_id or None,
-        embedding_base_url=settings.embedding_base_url,
-        embedding_model=settings.embedding_model,
-        embedding_model_id=settings.embedding_model_id,
-        embedding_dimension=settings.embedding_dimension,
-        embedding_batch_size=settings.embedding_batch_size,
-        index_version=settings.index_version,
-    )
-
-
 class PostgresRuntimeServiceSettingsStore:
-    """Stores administrator-managed AI and vector configuration.
+    """Stores selected runtime identities, not physical target/profile details.
 
-    Provider credentials remain environment/file secrets. Only non-secret
-    routing and index contract fields are persisted here.
+    P2-C promotes physical vector endpoints to ``vector_targets``. P2-D promotes
+    embedding execution/vector-space details to ``embedding_profiles``. The
+    singleton now selects those persistent identities and temporarily retains
+    collection/index_version until P2-E promotes VectorIndex.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -82,15 +54,7 @@ class PostgresRuntimeServiceSettingsStore:
         self._loaded = False
         self._initialize_lock = threading.Lock()
         self._cache_lock = threading.Lock()
-        self._cache = RuntimeServiceSettings(
-            groq=RuntimeGroqSettings(
-                enabled=bool(settings.groq_api_key),
-                base_url=settings.groq_base_url,
-                model=settings.groq_model,
-                default_model_id=settings.default_model_id,
-            ),
-            vector=_vector_default(settings),
-        )
+        self._cache: RuntimeServiceSettings | None = None
 
     def _connect(self) -> psycopg.Connection[dict[str, Any]]:
         return psycopg.connect(
@@ -111,77 +75,11 @@ class PostgresRuntimeServiceSettingsStore:
                 return
             try:
                 with self._connect() as connection:
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS runtime_service_settings (
-                            singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-                            groq_enabled BOOLEAN NOT NULL,
-                            groq_base_url TEXT NOT NULL,
-                            groq_model TEXT NOT NULL,
-                            default_model_id TEXT NOT NULL,
-                            vector_host TEXT NOT NULL,
-                            vector_port INTEGER NOT NULL CHECK (
-                                vector_port BETWEEN 1 AND 65535
-                            ),
-                            vector_collection TEXT NOT NULL,
-                            embedding_model TEXT NOT NULL,
-                            index_version TEXT NOT NULL,
-                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
-                    for column, definition in (
-                        ("embedding_deployment", "TEXT"),
-                        ("embedding_provider", "TEXT"),
-                        ("embedding_provider_id", "TEXT"),
-                        ("embedding_base_url", "TEXT"),
-                        ("embedding_model_id", "TEXT"),
-                        ("embedding_dimension", "INTEGER"),
-                        ("embedding_batch_size", "INTEGER"),
-                    ):
-                        connection.execute(
-                            f"""
-                            ALTER TABLE runtime_service_settings
-                            ADD COLUMN IF NOT EXISTS {column} {definition}
-                            """
-                        )
-                    defaults = _vector_default(self._settings)
-                    connection.execute(
-                        """
-                        UPDATE runtime_service_settings
-                        SET embedding_deployment = COALESCE(
-                                embedding_deployment, %s
-                            ),
-                            embedding_provider = COALESCE(
-                                embedding_provider, %s
-                            ),
-                            embedding_base_url = COALESCE(
-                                embedding_base_url, %s
-                            ),
-                            embedding_model_id = COALESCE(
-                                embedding_model_id, embedding_model, %s
-                            ),
-                            embedding_dimension = COALESCE(
-                                embedding_dimension, %s
-                            ),
-                            embedding_batch_size = COALESCE(
-                                embedding_batch_size, %s
-                            )
-                        WHERE singleton = TRUE
-                        """,
-                        (
-                            defaults.embedding_deployment,
-                            defaults.embedding_provider,
-                            defaults.embedding_base_url,
-                            defaults.embedding_model_id,
-                            defaults.embedding_dimension,
-                            defaults.embedding_batch_size,
-                        ),
-                    )
+                    require_schema(connection)
                 self._initialized = True
-            except (psycopg.Error, OSError) as exc:
+            except (psycopg.Error, OSError, SchemaStateError) as exc:
                 raise RuntimeServiceSettingsError(
-                    "PostgreSQL runtime service settings are unavailable"
+                    "PostgreSQL schema is not on the required Alembic revision"
                 ) from exc
 
     @staticmethod
@@ -189,32 +87,33 @@ class PostgresRuntimeServiceSettingsStore:
         return RuntimeServiceSettings(
             groq=RuntimeGroqSettings(
                 enabled=bool(row["groq_enabled"]),
-                base_url=str(row["groq_base_url"]).rstrip("/"),
-                model=str(row["groq_model"]),
-                default_model_id=str(row["default_model_id"]),
+                base_url=str(row.get("groq_base_url") or "").rstrip("/"),
+                model=str(row.get("groq_model") or ""),
+                default_model_id=str(row.get("default_model_id") or ""),
             ),
             vector=RuntimeVectorSettings(
-                host=str(row["vector_host"]),
-                port=int(row["vector_port"]),
-                collection=str(row["vector_collection"]),
-                embedding_deployment=str(row["embedding_deployment"]),
-                embedding_provider=str(row["embedding_provider"]),
-                embedding_provider_id=(
-                    str(row["embedding_provider_id"])
-                    if row.get("embedding_provider_id")
-                    else None
-                ),
-                embedding_base_url=str(row["embedding_base_url"]).rstrip("/"),
-                embedding_model=str(row["embedding_model"]),
-                embedding_model_id=str(row["embedding_model_id"]),
-                embedding_dimension=int(row["embedding_dimension"]),
-                embedding_batch_size=int(row["embedding_batch_size"]),
-                index_version=str(row["index_version"]),
+                vector_target_id=str(row.get("vector_target_id") or ""),
+                embedding_profile_id=str(row.get("embedding_profile_id") or ""),
+                collection=str(row.get("vector_collection") or ""),
+                index_version=str(row.get("index_version") or ""),
             ),
             updated_at=row["updated_at"],
         )
 
-    def get(self, *, refresh: bool = False) -> RuntimeServiceSettings:
+    @staticmethod
+    def is_complete(value: RuntimeServiceSettings | None) -> bool:
+        if value is None:
+            return False
+        vector = value.vector
+        return bool(
+            vector.vector_target_id
+            and vector.embedding_profile_id
+            and vector.collection
+            and vector.index_version
+            and value.groq.default_model_id
+        )
+
+    def get(self, *, refresh: bool = False) -> RuntimeServiceSettings | None:
         if not refresh and self._loaded:
             with self._cache_lock:
                 return self._cache
@@ -224,14 +123,8 @@ class PostgresRuntimeServiceSettingsStore:
                 row = connection.execute(
                     """
                     SELECT groq_enabled, groq_base_url, groq_model,
-                           default_model_id, vector_host, vector_port,
-                           vector_collection, embedding_deployment,
-                           embedding_provider, embedding_provider_id,
-                           embedding_base_url,
-                           embedding_model, embedding_model_id,
-                           embedding_dimension,
-                           embedding_batch_size, index_version,
-                           updated_at
+                           default_model_id, vector_target_id, embedding_profile_id,
+                           vector_collection, index_version, updated_at
                     FROM runtime_service_settings
                     WHERE singleton = TRUE
                     """
@@ -240,23 +133,27 @@ class PostgresRuntimeServiceSettingsStore:
             raise RuntimeServiceSettingsError(
                 "PostgreSQL runtime service settings read failed"
             ) from exc
-        if row is not None:
-            resolved = self._row_to_settings(row)
-            with self._cache_lock:
-                self._cache = resolved
-        self._loaded = True
+        resolved = self._row_to_settings(row) if row is not None else None
+        with self._cache_lock:
+            self._cache = resolved
+            self._loaded = True
+            return self._cache
+
+    def cached(self) -> RuntimeServiceSettings | None:
         with self._cache_lock:
             return self._cache
 
-    def cached(self) -> RuntimeServiceSettings:
-        with self._cache_lock:
-            return self._cache
+    def configured(self, *, refresh: bool = False) -> bool:
+        return self.is_complete(self.get(refresh=refresh))
 
     def groq_settings(self) -> RuntimeGroqSettings:
         try:
-            return self.get(refresh=True).groq
+            runtime = self.get(refresh=True)
         except RuntimeServiceSettingsError:
-            return self.cached().groq
+            runtime = self.cached()
+        if runtime is None:
+            return RuntimeGroqSettings(False, "", "", "")
+        return runtime.groq
 
     def update(
         self,
@@ -265,17 +162,9 @@ class PostgresRuntimeServiceSettingsStore:
         groq_base_url: str,
         groq_model: str,
         default_model_id: str,
-        vector_host: str,
-        vector_port: int,
+        vector_target_id: str,
+        embedding_profile_id: str,
         vector_collection: str,
-        embedding_deployment: str,
-        embedding_provider: str,
-        embedding_provider_id: str | None,
-        embedding_base_url: str,
-        embedding_model: str,
-        embedding_model_id: str,
-        embedding_dimension: int,
-        embedding_batch_size: int,
         index_version: str,
     ) -> RuntimeServiceSettings:
         self._ensure_schema()
@@ -286,15 +175,13 @@ class PostgresRuntimeServiceSettingsStore:
                     INSERT INTO runtime_service_settings (
                         singleton, groq_enabled, groq_base_url, groq_model,
                         default_model_id, vector_host, vector_port,
-                        vector_collection, embedding_deployment,
-                        embedding_provider, embedding_provider_id,
-                        embedding_base_url,
-                        embedding_model, embedding_model_id,
-                        embedding_dimension,
+                        vector_target_id, embedding_profile_id, vector_collection,
+                        embedding_deployment, embedding_provider, embedding_base_url,
+                        embedding_model, embedding_model_id, embedding_dimension,
                         embedding_batch_size, index_version, updated_at
                     ) VALUES (
-                        TRUE, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, NOW()
+                        TRUE, %s, %s, %s, %s, NULL, NULL,
+                        %s, %s, %s, NULL, NULL, NULL, NULL, NULL, NULL, NULL, %s, NOW()
                     )
                     ON CONFLICT (singleton)
                     DO UPDATE SET
@@ -302,44 +189,30 @@ class PostgresRuntimeServiceSettingsStore:
                         groq_base_url = EXCLUDED.groq_base_url,
                         groq_model = EXCLUDED.groq_model,
                         default_model_id = EXCLUDED.default_model_id,
-                        vector_host = EXCLUDED.vector_host,
-                        vector_port = EXCLUDED.vector_port,
+                        vector_target_id = EXCLUDED.vector_target_id,
+                        embedding_profile_id = EXCLUDED.embedding_profile_id,
                         vector_collection = EXCLUDED.vector_collection,
-                        embedding_deployment = EXCLUDED.embedding_deployment,
-                        embedding_provider = EXCLUDED.embedding_provider,
-                        embedding_provider_id = EXCLUDED.embedding_provider_id,
-                        embedding_base_url = EXCLUDED.embedding_base_url,
-                        embedding_model = EXCLUDED.embedding_model,
-                        embedding_model_id = EXCLUDED.embedding_model_id,
-                        embedding_dimension = EXCLUDED.embedding_dimension,
-                        embedding_batch_size = EXCLUDED.embedding_batch_size,
+                        embedding_deployment = NULL,
+                        embedding_provider = NULL,
+                        embedding_base_url = NULL,
+                        embedding_model = NULL,
+                        embedding_model_id = NULL,
+                        embedding_dimension = NULL,
+                        embedding_batch_size = NULL,
                         index_version = EXCLUDED.index_version,
                         updated_at = NOW()
                     RETURNING groq_enabled, groq_base_url, groq_model,
-                              default_model_id, vector_host, vector_port,
-                              vector_collection, embedding_deployment,
-                              embedding_provider, embedding_provider_id,
-                              embedding_base_url,
-                              embedding_model, embedding_model_id,
-                              embedding_dimension,
-                              embedding_batch_size, index_version, updated_at
+                              default_model_id, vector_target_id, embedding_profile_id,
+                              vector_collection, index_version, updated_at
                     """,
                     (
                         groq_enabled,
                         groq_base_url.rstrip("/"),
                         groq_model,
                         default_model_id,
-                        vector_host,
-                        vector_port,
+                        vector_target_id,
+                        embedding_profile_id,
                         vector_collection,
-                        embedding_deployment,
-                        embedding_provider,
-                        embedding_provider_id,
-                        embedding_base_url.rstrip("/"),
-                        embedding_model,
-                        embedding_model_id,
-                        embedding_dimension,
-                        embedding_batch_size,
                         index_version,
                     ),
                 ).fetchone()
@@ -354,26 +227,62 @@ class PostgresRuntimeServiceSettingsStore:
         resolved = self._row_to_settings(row)
         with self._cache_lock:
             self._cache = resolved
-        self._loaded = True
+            self._loaded = True
         return resolved
 
-    def effective_settings(self, base: Settings) -> Settings:
+    def _select_identity(self, column: str, value: str, label: str) -> RuntimeServiceSettings:
+        if column not in {"vector_target_id", "embedding_profile_id"}:
+            raise ValueError("unsupported runtime identity column")
+        self._ensure_schema()
         try:
-            runtime = self.get(refresh=True)
-        except RuntimeServiceSettingsError:
-            runtime = self.cached()
+            with self._connect() as connection:
+                row = connection.execute(
+                    f"""
+                    UPDATE runtime_service_settings
+                    SET {column} = %s, updated_at = NOW()
+                    WHERE singleton = TRUE
+                    RETURNING groq_enabled, groq_base_url, groq_model,
+                              default_model_id, vector_target_id, embedding_profile_id,
+                              vector_collection, index_version, updated_at
+                    """,
+                    (value,),
+                ).fetchone()
+        except (psycopg.Error, OSError) as exc:
+            raise RuntimeServiceSettingsError(f"{label} selection update failed") from exc
+        if row is None:
+            raise RuntimeServiceSettingsError(
+                f"Runtime service settings must be created before selecting a {label}"
+            )
+        resolved = self._row_to_settings(row)
+        with self._cache_lock:
+            self._cache = resolved
+            self._loaded = True
+        return resolved
+
+    def select_vector_target(self, vector_target_id: str) -> RuntimeServiceSettings:
+        return self._select_identity("vector_target_id", vector_target_id, "VectorTarget")
+
+    def select_embedding_profile(self, embedding_profile_id: str) -> RuntimeServiceSettings:
+        return self._select_identity(
+            "embedding_profile_id", embedding_profile_id, "EmbeddingProfile"
+        )
+
+    def effective_settings(self, base: Settings) -> Settings:
+        """Compatibility helper for non-registry fields only.
+
+        Canonical target/profile details are resolved by RuntimeSettingsResolver.
+        """
+        runtime = self.get(refresh=True)
+        if not self.is_complete(runtime):
+            raise RuntimeServiceSettingsError(
+                "Administrator runtime service settings are not configured"
+            )
+        assert runtime is not None
         return replace(
             base,
-            qdrant_url=runtime.vector.url,
+            vector_target_id=runtime.vector.vector_target_id,
+            embedding_profile_id=runtime.vector.embedding_profile_id,
             qdrant_collection=runtime.vector.collection,
-            embedding_provider=runtime.vector.embedding_provider,
-            embedding_provider_id=runtime.vector.embedding_provider_id or "",
-            embedding_base_url=runtime.vector.embedding_base_url,
-            embedding_model=runtime.vector.embedding_model,
-            embedding_model_id=runtime.vector.embedding_model_id,
-            embedding_deployment=runtime.vector.embedding_deployment,
-            embedding_dimension=runtime.vector.embedding_dimension,
-            embedding_batch_size=runtime.vector.embedding_batch_size,
             index_version=runtime.vector.index_version,
             groq_base_url=runtime.groq.base_url,
             groq_model=runtime.groq.model,

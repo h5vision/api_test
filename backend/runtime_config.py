@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
-from urllib.parse import urlsplit
 
 import psycopg
 from psycopg.rows import dict_row
 
 from .config import Settings
+from .schema_guard import SchemaStateError, require_schema
 
 
 class RuntimeNetworkSettingsError(RuntimeError):
@@ -36,12 +36,6 @@ class RuntimeNetworkSettings:
     updated_at: datetime | None = None
 
 
-def _backendai_default(settings: Settings) -> NetworkEndpoint:
-    parsed = urlsplit(settings.backendai_base_url)
-    host = parsed.hostname or "192.168.0.12"
-    port = parsed.port or (443 if parsed.scheme == "https" else 11434)
-    return NetworkEndpoint(host, port)
-
 
 class PostgresRuntimeNetworkSettingsStore:
     """Persists administrator-controlled service endpoints with env fallbacks."""
@@ -52,13 +46,8 @@ class PostgresRuntimeNetworkSettingsStore:
         self._loaded = False
         self._initialize_lock = threading.Lock()
         self._cache_lock = threading.Lock()
-        self._cache = RuntimeNetworkSettings(
-            frontend=NetworkEndpoint(
-                settings.frontend_host,
-                settings.frontend_port,
-            ),
-            backendai=_backendai_default(settings),
-        )
+        # Missing administrator rows are not substituted with deployment values.
+        self._cache: RuntimeNetworkSettings | None = None
 
     def _connect(self) -> psycopg.Connection[dict[str, Any]]:
         return psycopg.connect(
@@ -79,26 +68,11 @@ class PostgresRuntimeNetworkSettingsStore:
                 return
             try:
                 with self._connect() as connection:
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS runtime_network_settings (
-                            singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-                            frontend_ip INET NOT NULL,
-                            frontend_port INTEGER NOT NULL CHECK (
-                                frontend_port BETWEEN 1 AND 65535
-                            ),
-                            backendai_ip INET NOT NULL,
-                            backendai_port INTEGER NOT NULL CHECK (
-                                backendai_port BETWEEN 1 AND 65535
-                            ),
-                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
+                    require_schema(connection)
                 self._initialized = True
-            except (psycopg.Error, OSError) as exc:
+            except (psycopg.Error, OSError, SchemaStateError) as exc:
                 raise RuntimeNetworkSettingsError(
-                    "PostgreSQL runtime network settings are unavailable"
+                    "PostgreSQL schema is not on the required Alembic baseline"
                 ) from exc
 
     @staticmethod
@@ -115,7 +89,7 @@ class PostgresRuntimeNetworkSettingsStore:
             updated_at=row["updated_at"],
         )
 
-    def get(self, *, refresh: bool = False) -> RuntimeNetworkSettings:
+    def get(self, *, refresh: bool = False) -> RuntimeNetworkSettings | None:
         if not refresh and self._loaded:
             with self._cache_lock:
                 return self._cache
@@ -134,13 +108,25 @@ class PostgresRuntimeNetworkSettingsStore:
             raise RuntimeNetworkSettingsError(
                 "PostgreSQL runtime network settings read failed"
             ) from exc
-        if row is not None:
-            resolved = self._row_to_settings(row)
-            with self._cache_lock:
-                self._cache = resolved
-        self._loaded = True
+        resolved = self._row_to_settings(row) if row is not None else None
+        with self._cache_lock:
+            self._cache = resolved
+            self._loaded = True
+            return self._cache
+
+    def cached(self) -> RuntimeNetworkSettings | None:
         with self._cache_lock:
             return self._cache
+
+    def configured(self, *, refresh: bool = False) -> bool:
+        value = self.get(refresh=refresh)
+        return bool(
+            value is not None
+            and value.frontend.ip
+            and value.frontend.port > 0
+            and value.backendai.ip
+            and value.backendai.port > 0
+        )
 
     def update(
         self,
@@ -192,20 +178,20 @@ class PostgresRuntimeNetworkSettingsStore:
 
     def backendai_base_url(self) -> str:
         try:
-            return self.get(refresh=True).backendai.http_base_url
+            value = self.get(refresh=True)
         except RuntimeNetworkSettingsError:
-            with self._cache_lock:
-                return self._cache.backendai.http_base_url
+            value = self.cached()
+        return value.backendai.http_base_url if value is not None else ""
 
-    def cached(self) -> RuntimeNetworkSettings:
-        with self._cache_lock:
-            return self._cache
 
     def probe_frontend(self, timeout_seconds: float = 2.0) -> dict[str, Any]:
         try:
-            endpoint = self.get(refresh=True).frontend
+            value = self.get(refresh=True)
         except RuntimeNetworkSettingsError:
-            endpoint = self.cached().frontend
+            value = self.cached()
+        if value is None:
+            return {"reachable": False, "latency_ms": 0, "error": "not_configured"}
+        endpoint = value.frontend
         started_at = perf_counter()
         try:
             with socket.create_connection(

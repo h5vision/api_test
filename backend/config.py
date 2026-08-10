@@ -4,11 +4,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env", override=False)
+
+# P2-B.5: production configuration is injected by the deployment platform.
+# Vision deliberately does not load a project-local .env file.
 
 
 def _as_bool(name: str, default: bool) -> bool:
@@ -47,19 +46,6 @@ def _env_or_secret(name: str, file_name: str) -> str:
     return os.getenv(name, "").strip()
 
 
-def _embedding_deployment_default(base_url: str) -> str:
-    local_hosts = {
-        "127.0.0.1",
-        "localhost",
-        "::1",
-        "host.docker.internal",
-    }
-    from urllib.parse import urlsplit
-
-    host = (urlsplit(base_url).hostname or "").lower()
-    return "local" if host in local_hosts else "api"
-
-
 def _project_id_aliases() -> tuple[tuple[str, str], ...]:
     from .project_resolution import parse_project_id_aliases
 
@@ -76,12 +62,20 @@ class Settings:
     trusted_proxy_hosts: tuple[str, ...]
     cors_origins: tuple[str, ...]
     request_timeout_seconds: int
-    rag_lab_base_url: str
-    rag_lab_token: str
-    rag_lab_timeout_seconds: int
     allow_local_fallback: bool
     chunk_size: int
     chunk_overlap: int
+    rag_candidate_k: int
+    rag_min_sources: int
+    rag_max_sources: int
+    rag_context_max_chars: int
+    rag_min_score: float
+    rag_score_window: float
+    agentic_rag_default_mode: str
+    agentic_rag_balanced_steps: int
+    agentic_rag_deep_steps: int
+    agentic_rag_min_coverage: float
+    agentic_rag_min_novelty_ratio: float
     project_id_aliases: tuple[tuple[str, str], ...]
     ai_provider: str
     ai_base_url: str
@@ -93,9 +87,9 @@ class Settings:
     ai_question_max_chars: int
     ai_history_max_chars: int
     ai_frontend_context_max_chars: int
+    embedding_profile_id: str
     embedding_deployment: str
     embedding_provider: str
-    embedding_provider_id: str
     embedding_base_url: str
     embedding_model: str
     embedding_model_id: str
@@ -105,12 +99,14 @@ class Settings:
     embedding_keep_alive: str
     embedding_timeout_seconds: int
     vector_db_provider: str
-    vector_db_path: Path
-    vector_db_local_root: Path
+    vector_target_id: str
     qdrant_url: str
     qdrant_api_key: str
     qdrant_collection: str
     index_version: str
+    rag_lab_base_url: str
+    rag_lab_token: str
+    rag_lab_timeout_seconds: int
     postgres_host: str
     postgres_port: int
     postgres_db: str
@@ -122,6 +118,7 @@ class Settings:
     redis_password: str
     redis_db: int
     task_queue_name: str
+    task_consumer_group: str
     instance_id: str
     backendai_base_url: str
     backendai_api_key: str
@@ -141,6 +138,10 @@ class Settings:
     upload_part_size_bytes: int
     upload_session_ttl_hours: int
     max_indexable_file_bytes: int
+    snapshot_tenant_id: str
+    snapshot_allowed_repositories: frozenset[str]
+    snapshot_github_token: str
+    snapshot_github_timeout_seconds: int
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -167,39 +168,74 @@ class Settings:
             ).split(",")
             if item.strip()
         )
-        embedding_base_url = os.getenv(
-            "EMBEDDING_BASE_URL", "http://127.0.0.1:11434"
-        ).strip().rstrip("/")
-        embedding_model = os.getenv(
-            "EMBEDDING_MODEL", "bge-m3:latest"
-        ).strip()
+        # Administrator-owned runtime routing is intentionally NOT sourced from
+        # environment variables. These neutral values are never an operational
+        # fallback; RuntimeSettingsResolver overlays persisted Admin settings and
+        # request guards expose SETUP_REQUIRED until those rows exist.
+        embedding_base_url = ""
+        embedding_model = ""
+        rag_candidate_k = max(4, min(50, _as_int("RAG_CANDIDATE_K", 12)))
+        rag_max_sources = max(
+            1,
+            min(rag_candidate_k, _as_int("RAG_MAX_SOURCES", 8)),
+        )
+        rag_min_sources = max(
+            1,
+            min(rag_max_sources, _as_int("RAG_MIN_SOURCES", 3)),
+        )
         return cls(
             backend_host=os.getenv("BACKEND_HOST", "127.0.0.1").strip(),
             backend_port=_as_int("BACKEND_PORT", 8000),
-            frontend_host=os.getenv("FRONTEND_HOST", "192.168.0.7").strip(),
+            frontend_host=os.getenv("FRONTEND_HOST", "127.0.0.1").strip(),
             frontend_port=max(1, min(65535, _as_int("FRONTEND_PORT", 8888))),
             admin_proxy_ip=os.getenv("ADMIN_PROXY_IP", "172.30.0.10").strip(),
             trusted_proxy_hosts=trusted_proxy_hosts,
             cors_origins=cors,
             request_timeout_seconds=_as_int("REQUEST_TIMEOUT_SECONDS", 60),
-            rag_lab_base_url=os.getenv(
-                "RAG_LAB_BASE_URL", "http://192.168.0.12:8200"
-            ).strip().rstrip("/"),
-            rag_lab_token=_env_or_secret("RAG_LAB_TOKEN", "RAG_LAB_TOKEN_FILE"),
-            rag_lab_timeout_seconds=max(
-                10, _as_int("RAG_LAB_TIMEOUT_SECONDS", 60)
-            ),
             allow_local_fallback=_as_bool("ALLOW_LOCAL_FALLBACK", False),
             chunk_size=max(200, _as_int("CHUNK_SIZE", 1600)),
             chunk_overlap=max(0, _as_int("CHUNK_OVERLAP", 200)),
+            rag_candidate_k=rag_candidate_k,
+            rag_min_sources=rag_min_sources,
+            rag_max_sources=rag_max_sources,
+            rag_context_max_chars=max(
+                2_000,
+                _as_int("RAG_CONTEXT_MAX_CHARS", 12_000),
+            ),
+            rag_min_score=min(
+                1.0,
+                max(-1.0, _as_float("RAG_MIN_SCORE", 0.30)),
+            ),
+            rag_score_window=min(
+                1.0,
+                max(0.0, _as_float("RAG_SCORE_WINDOW", 0.20)),
+            ),
+            agentic_rag_default_mode=(
+                os.getenv("AGENTIC_RAG_DEFAULT_MODE", "auto").strip().lower()
+                if os.getenv("AGENTIC_RAG_DEFAULT_MODE", "auto").strip().lower()
+                in {"auto", "fast", "balanced", "deep"}
+                else "auto"
+            ),
+            agentic_rag_balanced_steps=max(
+                1,
+                min(4, _as_int("AGENTIC_RAG_BALANCED_STEPS", 2)),
+            ),
+            agentic_rag_deep_steps=max(
+                2,
+                min(6, _as_int("AGENTIC_RAG_DEEP_STEPS", 3)),
+            ),
+            agentic_rag_min_coverage=min(
+                1.0,
+                max(0.0, _as_float("AGENTIC_RAG_MIN_COVERAGE", 0.55)),
+            ),
+            agentic_rag_min_novelty_ratio=min(
+                1.0,
+                max(0.0, _as_float("AGENTIC_RAG_MIN_NOVELTY_RATIO", 0.10)),
+            ),
             project_id_aliases=_project_id_aliases(),
-            ai_provider=os.getenv("AI_PROVIDER", "nvidia").strip().lower(),
-            ai_base_url=os.getenv(
-                "AI_BASE_URL", "https://integrate.api.nvidia.com/v1"
-            ).strip().rstrip("/"),
-            ai_model=os.getenv(
-                "AI_MODEL", "meta/llama-3.1-70b-instruct"
-            ).strip(),
+            ai_provider="unconfigured",
+            ai_base_url="",
+            ai_model="",
             ai_api_key=os.getenv("AI_API_KEY", nvidia_key).strip(),
             ai_max_tokens=max(32, _as_int("AI_MAX_TOKENS", 1024)),
             ai_temperature=min(2.0, max(0.0, _as_float("AI_TEMPERATURE", 0.2))),
@@ -219,43 +255,30 @@ class Settings:
                 2_000,
                 _as_int("AI_FRONTEND_CONTEXT_MAX_CHARS", 24_000),
             ),
-            embedding_deployment=os.getenv(
-                "EMBEDDING_DEPLOYMENT",
-                _embedding_deployment_default(embedding_base_url),
-            ).strip().lower(),
-            embedding_provider=os.getenv(
-                "EMBEDDING_PROVIDER", "ollama"
-            ).strip().lower(),
-            embedding_provider_id=os.getenv(
-                "EMBEDDING_PROVIDER_ID", ""
-            ).strip(),
+            embedding_profile_id="",
+            embedding_deployment="api",
+            embedding_provider="unconfigured",
             embedding_base_url=embedding_base_url,
             embedding_model=embedding_model,
-            embedding_model_id=os.getenv(
-                "EMBEDDING_MODEL_ID", embedding_model
-            ).strip(),
+            embedding_model_id="",
             embedding_api_key=os.getenv("EMBEDDING_API_KEY", nvidia_key).strip(),
-            embedding_dimension=max(1, _as_int("EMBEDDING_DIMENSION", 1024)),
-            embedding_batch_size=max(1, _as_int("EMBEDDING_BATCH_SIZE", 32)),
+            embedding_dimension=0,
+            embedding_batch_size=1,
             embedding_keep_alive=os.getenv("EMBEDDING_KEEP_ALIVE", "10m").strip(),
             embedding_timeout_seconds=max(
                 30, _as_int("EMBEDDING_TIMEOUT_SECONDS", 300)
             ),
-            vector_db_provider=os.getenv("VECTOR_DB_PROVIDER", "sqlite").strip().lower(),
-            vector_db_path=_resolve_path(
-                os.getenv("VECTOR_DB_PATH", "./data/vector_store.sqlite3")
-            ),
-            vector_db_local_root=_resolve_path(
-                os.getenv("VECTOR_DB_LOCAL_ROOT", "./data/vector-databases")
-            ),
-            qdrant_url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
-            .strip()
-            .rstrip("/"),
+            vector_db_provider="qdrant",
+            vector_target_id="",
+            qdrant_url="",
             qdrant_api_key=_env_or_secret("QDRANT_API_KEY", "QDRANT_API_KEY_FILE"),
-            qdrant_collection=os.getenv(
-                "QDRANT_COLLECTION", "vision_bge_m3_v1"
-            ).strip(),
-            index_version=os.getenv("INDEX_VERSION", "bge-m3-v1").strip(),
+            qdrant_collection="",
+            index_version="",
+            rag_lab_base_url=os.getenv("RAG_LAB_BASE_URL", "").strip().rstrip("/"),
+            rag_lab_token=_env_or_secret("RAG_LAB_TOKEN", "RAG_LAB_TOKEN_FILE"),
+            rag_lab_timeout_seconds=max(
+                1, _as_int("RAG_LAB_TIMEOUT_SECONDS", 60)
+            ),
             postgres_host=os.getenv("POSTGRES_HOST", "127.0.0.1").strip(),
             postgres_port=_as_int("POSTGRES_PORT", 5432),
             postgres_db=os.getenv("POSTGRES_DB", "vision").strip(),
@@ -275,19 +298,16 @@ class Settings:
             task_queue_name=os.getenv(
                 "TASK_QUEUE_NAME", "vision:tasks:indexing"
             ).strip(),
+            task_consumer_group=os.getenv("TASK_CONSUMER_GROUP", "").strip(),
             instance_id=os.getenv(
                 "INSTANCE_ID",
                 os.getenv("HOSTNAME", "vision-local"),
             ).strip(),
-            backendai_base_url=os.getenv(
-                "BACKENDAI_BASE_URL", "http://192.168.0.12:11434"
-            )
-            .strip()
-            .rstrip("/"),
+            backendai_base_url="",
             backendai_api_key=_env_or_secret(
                 "BACKENDAI_API_KEY", "BACKENDAI_API_KEY_FILE"
             ),
-            backendai_model=os.getenv("BACKENDAI_MODEL", "gemma3:4b").strip(),
+            backendai_model="",
             backendai_public_model_id=os.getenv(
                 "BACKENDAI_PUBLIC_MODEL_ID", "backendai-default"
             ).strip(),
@@ -297,26 +317,18 @@ class Settings:
             nvidia_public_model_id=os.getenv(
                 "NVIDIA_PUBLIC_MODEL_ID", "nvidia-default"
             ).strip(),
-            groq_base_url=os.getenv(
-                "GROQ_BASE_URL", "https://api.groq.com/openai/v1"
-            )
-            .strip()
-            .rstrip("/"),
+            groq_base_url="",
             groq_api_key=groq_key,
-            groq_model=os.getenv(
-                "GROQ_MODEL", "llama-3.3-70b-versatile"
-            ).strip(),
+            groq_model="",
             groq_public_model_id=os.getenv(
                 "GROQ_PUBLIC_MODEL_ID", "groq-default"
             ).strip(),
-            default_model_id=os.getenv(
-                "DEFAULT_MODEL_ID", "backendai-default"
-            ).strip(),
-            allow_cloud_fallback=_as_bool("ALLOW_CLOUD_FALLBACK", False),
+            default_model_id="",
+            allow_cloud_fallback=False,
             project_db_local_root=_resolve_path(
                 os.getenv(
                     "PROJECT_DB_LOCAL_ROOT",
-                    "C:/Users/PC2412/Documents/HancomAI5",
+                    "./projects",
                 )
             ),
             offline_embedding_root=_resolve_path(
@@ -332,6 +344,23 @@ class Settings:
             max_indexable_file_bytes=max(
                 1024, _as_int("MAX_INDEXABLE_FILE_BYTES", 16 * 1024 * 1024)
             ),
+            snapshot_tenant_id=(
+                os.getenv("SNAPSHOT_TENANT_ID", "vision-default").strip()
+                or "vision-default"
+            ),
+            snapshot_allowed_repositories=frozenset(
+                item.strip().casefold()
+                for item in os.getenv(
+                    "SNAPSHOT_ALLOWED_REPOSITORIES", "h5vision/api_test"
+                ).split(",")
+                if item.strip()
+            ),
+            snapshot_github_token=_env_or_secret(
+                "SNAPSHOT_GITHUB_TOKEN", "SNAPSHOT_GITHUB_TOKEN_FILE"
+            ),
+            snapshot_github_timeout_seconds=max(
+                1, _as_int("SNAPSHOT_GITHUB_TIMEOUT_SECONDS", 20)
+            ),
         )
 
     def public_status(self) -> dict[str, object]:
@@ -340,6 +369,7 @@ class Settings:
             "ai_model": self.ai_model,
             "ai_context_window_tokens": self.ai_context_window_tokens,
             "ai_configured": bool(self.ai_api_key) or self.ai_provider == "local",
+            "embedding_profile_id": self.embedding_profile_id,
             "embedding_deployment": self.embedding_deployment,
             "embedding_provider": self.embedding_provider,
             "embedding_model": self.embedding_model,
@@ -348,16 +378,19 @@ class Settings:
             or self.embedding_provider in {"local", "ollama"},
             "embedding_dimension": self.embedding_dimension,
             "vector_db_provider": self.vector_db_provider,
-            "vector_collection": self.qdrant_collection
-            if self.vector_db_provider == "qdrant"
-            else None,
+            "vector_target_id": self.vector_target_id,
+            "vector_collection": self.qdrant_collection,
             "index_version": self.index_version,
-            "rag_lab_base_url_configured": bool(self.rag_lab_base_url),
+            "external_vector_prompt_configured": bool(self.rag_lab_base_url),
+            "external_vector_prompt_base_url": self.rag_lab_base_url,
+            "agentic_rag_default_mode": self.agentic_rag_default_mode,
             "metadata_db_provider": "postgresql",
             "metadata_db_configured": bool(self.postgres_password),
             "default_model_id": self.default_model_id,
             "backendai_base_url_configured": bool(self.backendai_base_url),
             "groq_configured": bool(self.groq_api_key),
+            "snapshot_tenant_id": self.snapshot_tenant_id,
+            "snapshot_github_auth_configured": bool(self.snapshot_github_token),
         }
 
 

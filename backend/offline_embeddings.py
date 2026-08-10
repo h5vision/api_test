@@ -21,7 +21,12 @@ from .repository_indexer import (
 )
 from .repository_store import PostgresRepositoryStore, RepositoryStoreError
 from .text import chunk_text_with_metadata
-from .vector_store import QdrantVectorStore, SQLiteVectorStore, VectorStoreError
+from .vector_store import ManagedVectorStore, VectorStoreError
+from .vector_indexes import PostgresVectorIndexStore, VectorIndexStoreError
+from .project_vector_routes import PostgresProjectVectorRouteStore, ProjectVectorRouteStoreError
+from .snapshot_vector_bindings import (
+    PostgresSnapshotVectorBindingStore, SnapshotVectorBindingStoreError,
+)
 
 
 ARTIFACT_SCHEMA_VERSION = "vision.embedding-artifact.v1"
@@ -110,12 +115,50 @@ class OfflineEmbeddingImporter:
         self,
         settings: Settings,
         store: PostgresRepositoryStore,
-        vector_store: SQLiteVectorStore | QdrantVectorStore,
+        vector_store: ManagedVectorStore,
+        vector_index_store: PostgresVectorIndexStore | None = None,
+        snapshot_vector_binding_store: PostgresSnapshotVectorBindingStore | None = None,
+        project_vector_route_store: PostgresProjectVectorRouteStore | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
         self.vector_store = vector_store
+        self.vector_index_store = vector_index_store
+        self.snapshot_vector_binding_store = snapshot_vector_binding_store
+        self.project_vector_route_store = project_vector_route_store
         self.root = settings.offline_embedding_root.resolve()
+
+    def _register_vector_index(self, project_id: str, snapshot_id: str, generation_id: str, status: str) -> str | None:
+        if self.vector_index_store is None:
+            return None
+        if not (self.settings.vector_target_id and self.settings.embedding_profile_id):
+            raise OfflineEmbeddingArtifactError(
+                "Persistent VectorTarget/EmbeddingProfile are required before offline import"
+            )
+        try:
+            record = self.vector_index_store.register_generation(
+                tenant_id=self.settings.snapshot_tenant_id,
+                project_id=project_id,
+                generation_id=generation_id,
+                vector_target_id=self.settings.vector_target_id,
+                embedding_profile_id=self.settings.embedding_profile_id,
+                collection=self.settings.qdrant_collection,
+                index_version=self.settings.index_version,
+                status=status,
+            )
+            self.store.bind_generation_vector_index(
+                generation_id,
+                record.vector_index_id,
+            )
+            if self.snapshot_vector_binding_store is not None:
+                self.snapshot_vector_binding_store.register_managed_generation(
+                    snapshot_id=snapshot_id,
+                    generation_id=generation_id,
+                    vector_index_id=record.vector_index_id,
+                )
+            return record.vector_index_id
+        except (VectorIndexStoreError, SnapshotVectorBindingStoreError) as exc:
+            raise OfflineEmbeddingArtifactError("Vector provenance registry write failed") from exc
 
     def _contract_errors(self, manifest: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -506,8 +549,6 @@ class OfflineEmbeddingImporter:
                 content,
                 self.settings.chunk_size,
                 self.settings.chunk_overlap,
-                path=relative_path,
-                language=LANGUAGES.get(pure.suffix.lower()),
             )
             for ordinal, item in enumerate(specs, start=1):
                 chunk_content = str(item["content"])
@@ -527,11 +568,6 @@ class OfflineEmbeddingImporter:
                         "source_id": artifact.source_id,
                         "revision": revision,
                         "snapshot_id": artifact.snapshot_id,
-                        "content_type": item.get("content_type"),
-                        "path_category": item.get("path_category"),
-                        "locale": item.get("locale"),
-                        "is_translation": bool(item.get("is_translation")),
-                        "chunking_strategy": item.get("chunking_strategy"),
                     },
                 }
 
@@ -758,6 +794,10 @@ class OfflineEmbeddingImporter:
                     artifact.generation_id,
                 )
 
+            self._register_vector_index(
+                artifact.project_id, artifact.snapshot_id, artifact.generation_id, "building"
+            )
+
             total_chunks = artifact.chunk_count
             imported_chunks = 0
             indexable_files = int(
@@ -833,7 +873,7 @@ class OfflineEmbeddingImporter:
                     f"expected={total_chunks}, postgres={postgres_count}, "
                     f"qdrant={vector_count}"
                 )
-            self.store.activate_generation(
+            completed_binding_id = self.store.complete_generation(
                 source_id=artifact.source_id,
                 project_id=artifact.project_id,
                 snapshot_id=artifact.snapshot_id,
@@ -846,6 +886,24 @@ class OfflineEmbeddingImporter:
                 file_count=indexable_files,
                 chunk_count=total_chunks,
             )
+            if self.project_vector_route_store is not None:
+                try:
+                    self.project_vector_route_store.promote_managed_binding(
+                        project_id=artifact.project_id,
+                        binding_id=completed_binding_id,
+                        actor="offline_embedding_importer",
+                        reason=f"Offline managed generation ready: {artifact.generation_id}",
+                    )
+                except ProjectVectorRouteStoreError:
+                    # Do not turn a verified build artifact into a failed Generation merely
+                    # because the independent routing control-plane promotion was blocked.
+                    pass
+            if self.vector_index_store is not None:
+                record = self.vector_index_store.get_generation(
+                    artifact.project_id, artifact.generation_id
+                )
+                if record is not None:
+                    self.vector_index_store.update_status(record.vector_index_id, "ready")
             self.store.update_job(
                 job_id,
                 status="completed",
@@ -859,6 +917,7 @@ class OfflineEmbeddingImporter:
             OfflineEmbeddingArtifactError,
             RepositoryStoreError,
             VectorStoreError,
+            VectorIndexStoreError,
             OSError,
             KeyError,
             TypeError,
@@ -874,6 +933,15 @@ class OfflineEmbeddingImporter:
                     )
                 except RepositoryStoreError:
                     pass
+                if self.vector_index_store is not None:
+                    try:
+                        record = self.vector_index_store.get_generation(
+                            artifact.project_id, artifact.generation_id
+                        )
+                        if record is not None:
+                            self.vector_index_store.update_status(record.vector_index_id, "unavailable")
+                    except VectorIndexStoreError:
+                        pass
             try:
                 self.store.update_job(
                     job_id,

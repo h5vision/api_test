@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .config import Settings
+from .schema_guard import SchemaStateError, require_schema
 from .schemas import DocumentInput, GitVersionInfo, Source
 
 
@@ -40,112 +41,21 @@ class PostgresProjectStore:
         )
 
     def _ensure_schema(self) -> None:
-        if not self.configured or self._initialized:
+        if not self.configured:
+            return
+        if self._initialized:
             return
         with self._initialize_lock:
             if self._initialized:
                 return
             try:
                 with self._connect() as connection:
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS projects (
-                            project_id TEXT PRIMARY KEY,
-                            display_name TEXT NOT NULL,
-                            current_snapshot_id TEXT,
-                            manifest_sha256 TEXT,
-                            git_commit_sha TEXT,
-                            git_branch TEXT,
-                            git_dirty BOOLEAN,
-                            git_committed_at TIMESTAMPTZ,
-                            source_modified_at TIMESTAMPTZ,
-                            index_completed_at TIMESTAMPTZ,
-                            embedding_model TEXT NOT NULL,
-                            index_version TEXT NOT NULL,
-                            index_status TEXT NOT NULL DEFAULT 'ready',
-                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        ALTER TABLE projects
-                        ADD COLUMN IF NOT EXISTS manifest_sha256 TEXT,
-                        ADD COLUMN IF NOT EXISTS git_commit_sha TEXT,
-                        ADD COLUMN IF NOT EXISTS git_branch TEXT,
-                        ADD COLUMN IF NOT EXISTS git_dirty BOOLEAN,
-                        ADD COLUMN IF NOT EXISTS git_committed_at TIMESTAMPTZ,
-                        ADD COLUMN IF NOT EXISTS source_modified_at TIMESTAMPTZ,
-                        ADD COLUMN IF NOT EXISTS index_completed_at TIMESTAMPTZ
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS document_versions (
-                            document_version_id UUID PRIMARY KEY,
-                            project_id TEXT NOT NULL REFERENCES projects(project_id)
-                                ON DELETE CASCADE,
-                            document_id TEXT NOT NULL,
-                            path TEXT,
-                            language TEXT,
-                            content_sha256 TEXT NOT NULL,
-                            content TEXT NOT NULL,
-                            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-                            is_current BOOLEAN NOT NULL DEFAULT TRUE,
-                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            UNIQUE (project_id, document_id, content_sha256)
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE UNIQUE INDEX IF NOT EXISTS
-                            idx_document_versions_one_current
-                        ON document_versions (project_id, document_id)
-                        WHERE is_current
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS document_chunks (
-                            chunk_id TEXT PRIMARY KEY,
-                            document_version_id UUID NOT NULL
-                                REFERENCES document_versions(document_version_id)
-                                ON DELETE CASCADE,
-                            project_id TEXT NOT NULL,
-                            document_id TEXT NOT NULL,
-                            content TEXT NOT NULL,
-                            content_sha256 TEXT NOT NULL,
-                            line_start INTEGER,
-                            line_end INTEGER,
-                            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_document_chunks_project_document
-                        ON document_chunks (project_id, document_id)
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS vector_mappings (
-                            chunk_id TEXT PRIMARY KEY REFERENCES document_chunks(chunk_id)
-                                ON DELETE CASCADE,
-                            external_point_id UUID NOT NULL,
-                            collection_name TEXT NOT NULL,
-                            embedding_model TEXT NOT NULL,
-                            index_version TEXT NOT NULL,
-                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
+                    require_schema(connection)
                 self._initialized = True
-            except (psycopg.Error, OSError) as exc:
-                raise ProjectStoreError("PostgreSQL project schema is unavailable") from exc
+            except (psycopg.Error, OSError, SchemaStateError) as exc:
+                raise ProjectStoreError(
+                    "PostgreSQL schema is not on the required Alembic baseline"
+                ) from exc
 
     @staticmethod
     def content_hash(content: str) -> str:
@@ -432,12 +342,7 @@ class PostgresProjectStore:
         except (psycopg.Error, OSError) as exc:
             raise ProjectStoreError("PostgreSQL document version write failed") from exc
 
-    def enrich_sources(
-        self,
-        sources: list[Source],
-        *,
-        project_id: str | None = None,
-    ) -> list[Source]:
+    def enrich_sources(self, sources: list[Source]) -> list[Source]:
         if not self.configured or not sources:
             return sources
         self._ensure_schema()
@@ -446,24 +351,19 @@ class PostgresProjectStore:
             with self._connect() as connection:
                 rows = connection.execute(
                     """
-                    SELECT c.chunk_id, c.document_id, c.content, c.line_start, c.line_end,
+                    SELECT c.chunk_id, c.content, c.line_start, c.line_end,
                            c.metadata, v.document_version_id, v.path, v.language
                     FROM document_chunks c
                     JOIN document_versions v
                       ON v.document_version_id = c.document_version_id
-                    WHERE c.chunk_id = ANY(%s)
-                      AND (%s::text IS NULL OR c.project_id = %s)
-                      AND v.is_current
+                    WHERE c.chunk_id = ANY(%s) AND v.is_current
                     """,
-                    (chunk_ids, project_id, project_id),
+                    (chunk_ids,),
                 ).fetchall()
-            by_id = {
-                (str(row["chunk_id"]), str(row["document_id"])): row
-                for row in rows
-            }
+            by_id = {row["chunk_id"]: row for row in rows}
             enriched: list[Source] = []
             for source in sources:
-                row = by_id.get((source.chunk_id, source.document_id))
+                row = by_id.get(source.chunk_id)
                 if row is None:
                     enriched.append(source)
                     continue

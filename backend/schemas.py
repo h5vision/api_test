@@ -12,6 +12,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     field_validator,
     model_validator,
 )
@@ -194,7 +195,7 @@ class MetadataListResponse(BaseModel):
 class SearchRequest(BaseModel):
     project_id: str = Field(default="default", min_length=1)
     query: str = Field(..., min_length=1)
-    top_k: int = Field(default=5, ge=1, le=50)
+    top_k: int = Field(default=5, ge=1, le=20)
 
 
 class Source(BaseModel):
@@ -218,7 +219,188 @@ class SearchResponse(BaseModel):
     query: str
     results: list[Source]
     embedding_provider: str
-    
+    embedding_profile_id: str | None = None
+    vector_index_id: str | None = None
+    snapshot_id: str | None = None
+    generation_id: str | None = None
+    snapshot_vector_binding_id: str | None = None
+    vector_route_revision: int | None = Field(default=None, ge=0)
+
+
+# Previous Vision-owned /v1/chat contract. It remains here as a commented
+# migration reference while the Team-vision extension contract is active.
+#
+# class HistoryMessage(BaseModel):
+#     model_config = ConfigDict(extra="forbid")
+#
+#     role: Literal["user", "assistant"]
+#     content: str = Field(..., min_length=1, max_length=100_000)
+#
+#
+# class ChatRequest(BaseModel):
+#     model_config = ConfigDict(
+#         extra="forbid",
+#         json_schema_extra={
+#             "examples": [
+#                 {
+#                     "schema_version": "1.0",
+#                     "client_request_id": "vscode-1710000000000-001",
+#                     "project_id": "Vision",
+#                     "session_id": "Vision",
+#                     "model_id": "backendai-default",
+#                     "message": "이 프로젝트의 실행 구조를 설명해줘",
+#                     "top_k": 5,
+#                     "history": [],
+#                     "stream": False,
+#                 }
+#             ]
+#         },
+#     )
+#
+#     schema_version: Literal["1.0"] | None = Field(
+#         default=None,
+#         description="Optional request schema marker. Null or omission is treated as v1.",
+#     )
+#     client_request_id: str | None = Field(
+#         default=None,
+#         max_length=128,
+#         pattern=r"^(?:|[A-Za-z0-9._:-]{1,128})$",
+#         description=(
+#             "Frontend correlation ID. It is echoed back but is not an idempotency "
+#             "key. A blank string is normalized to null."
+#         ),
+#     )
+#     project_id: str = Field(
+#         ...,
+#         min_length=1,
+#         max_length=255,
+#         description="Required PostgreSQL/Qdrant project scope.",
+#     )
+#     message: str = Field(
+#         ...,
+#         min_length=1,
+#         max_length=100_000,
+#         validation_alias=AliasChoices("message", "prompt"),
+#         description=(
+#             "Canonical v1 question field. "
+#             "The legacy prompt alias is accepted until v2."
+#         ),
+#     )
+#     session_id: str = Field(..., min_length=1, max_length=255)
+#     model_id: str | None = Field(
+#         default=None,
+#         max_length=255,
+#         description=(
+#             "Public model ID. A blank string is normalized to null "
+#             "and the default model is used."
+#         ),
+#     )
+#     top_k: int | None = Field(
+#         default=None,
+#         ge=1,
+#         le=20,
+#         description="Null or omission uses 5.",
+#     )
+#     history: list[HistoryMessage] = Field(..., max_length=20)
+#     stream: Literal[False] | None = Field(
+#         default=None,
+#         description="Null or omission uses false. v1 does not support streaming.",
+#     )
+#
+#     @field_validator("client_request_id", "model_id", mode="before")
+#     @classmethod
+#     def normalize_blank_optional_chat_fields(cls, value: Any) -> Any:
+#         if isinstance(value, str) and not value.strip():
+#             return None
+#         return value
+#
+#     @field_validator("project_id", "session_id", "model_id", "message")
+#     @classmethod
+#     def normalize_chat_text(cls, value: str | None) -> str | None:
+#         if value is None:
+#             return None
+#         normalized = value.strip()
+#         if not normalized:
+#             raise ValueError("chat field must not be blank")
+#         return normalized
+#
+#
+# class ChatTiming(BaseModel):
+#     retrieval_ms: int = Field(..., ge=0)
+#     generation_ms: int = Field(..., ge=0)
+#     total_ms: int = Field(..., ge=0)
+#
+#
+# class ChatMetadata(BaseModel):
+#     ai_provider: Literal["backendai", "nvidia", "groq", "local"]
+#     ai_model: str
+#     embedding_provider: str
+#     embedding_model: str
+#     index_version: str
+#     top_k: int = Field(..., ge=1, le=20)
+#     session_scope: str
+#     history_messages: int = Field(..., ge=0, le=20)
+#     source_count: int = Field(..., ge=0, le=20)
+#
+#
+# class ChatResponse(BaseModel):
+#     model_config = ConfigDict(
+#         extra="forbid",
+#         json_schema_extra={
+#             "examples": [
+#                 {
+#                     "schema_version": "1.0",
+#                     "request_id": "req_0123456789abcdef",
+#                     "client_request_id": "vscode-1710000000000-001",
+#                     "created_at": "2026-07-22T05:00:00Z",
+#                     "status": "completed",
+#                     "project_id": "Vision",
+#                     "session_id": "Vision",
+#                     "requested_model_id": "backendai-default",
+#                     "used_model_id": "backendai-default",
+#                     "provider": "backendai",
+#                     "fallback_used": False,
+#                     "finish_reason": "stop",
+#                     "answer": "프로젝트 실행 구조는 다음과 같습니다. [1]",
+#                     "sources": [],
+#                     "timing": {
+#                         "retrieval_ms": 25,
+#                         "generation_ms": 840,
+#                         "total_ms": 865,
+#                     },
+#                     "metadata": {
+#                         "ai_provider": "backendai",
+#                         "ai_model": "selected-runtime-model",
+#                         "embedding_provider": "ollama",
+#                         "embedding_model": "selected-embedding-model",
+#                         "index_version": "selected-index-version",
+#                         "top_k": 5,
+#                         "session_scope": "Vision",
+#                         "history_messages": 0,
+#                         "source_count": 0,
+#                     },
+#                 }
+#             ]
+#         },
+#     )
+#
+#     schema_version: Literal["1.0"] = API_SCHEMA_VERSION
+#     request_id: str
+#     client_request_id: str | None = None
+#     created_at: datetime
+#     status: Literal["completed"] = "completed"
+#     project_id: str
+#     session_id: str
+#     requested_model_id: str
+#     used_model_id: str
+#     provider: Literal["backendai", "nvidia", "groq", "local"]
+#     fallback_used: bool
+#     finish_reason: Literal["stop"] = "stop"
+#     answer: str
+#     sources: list[Source]
+#     timing: ChatTiming
+#     metadata: ChatMetadata
+
 
 class HistoryMessage(BaseModel):
     """Team-vision ChatMessage used by the current VS Code extension."""
@@ -237,6 +419,26 @@ class ChatContextItem(BaseModel):
     id: str | None = Field(default=None, max_length=4096)
     name: str | None = Field(default=None, max_length=512)
     value: Any = None
+
+
+class ChatSnapshotHint(BaseModel):
+    """Optional Snapshot routing hint sent separately from the chat text."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    project_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        validation_alias=AliasChoices("project_id", "projectId"),
+    )
+    snapshot_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        validation_alias=AliasChoices("snapshot_id", "snapshotId", "id"),
+    )
+    revision: str | None = Field(default=None, max_length=255)
 
 
 def _vscode_text(value: Any, *, depth: int = 0) -> str:
@@ -333,19 +535,9 @@ class ChatRequest(BaseModel):
             "examples": [
                 {
                     "role": "user",
-                    "content": "prepare_release.py 코드를 설명해줘",
-                },
-                {
-                    "project_id": "fest-api",
-                    "message": "현재 선택된 프로젝트의 실행 구조를 설명해줘",
-                    "session_id": "9efda536-b502-49e4-926d-53343a428df0",
-                    "reasoning_mode": "auto",
-                    "debug": False,
-                    "history": [],
-                    "context": (
-                        "파일: README.md\n\n"
-                        "# Project\n이 프로젝트는 VS Code AI Assistant입니다."
-                    ),
+                    "model_id": "backendai:gemma3:4b",
+                    "content": "이 프로젝트의 실행 구조를 설명해줘",
+                    "stream": True,
                 }
             ]
         },
@@ -358,10 +550,8 @@ class ChatRequest(BaseModel):
     content: str | None = Field(
         default=None,
         min_length=1,
-        max_length=100_000,
-        description=(
-            "Current frontend chat text. It is normalized to the internal message field."
-        ),
+        max_length=MAX_CHAT_REQUEST_BYTES,
+        description="Current frontend chat text, normalized to message.",
     )
     project_id: str = Field(
         default="__auto__",
@@ -374,11 +564,22 @@ class ChatRequest(BaseModel):
     )
     message: str = Field(
         default="",
-        max_length=100_000,
+        max_length=MAX_CHAT_REQUEST_BYTES,
         validation_alias=AliasChoices("message", "prompt"),
+    )
+    snapshot_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        validation_alias=AliasChoices("snapshot_id", "snapshotId"),
         description=(
-            "Legacy current-turn field. New frontend clients may send role/content."
+            "Optional immutable Snapshot ID. Explicit outer fields take precedence "
+            "over Snapshot hints embedded in message JSON."
         ),
+    )
+    snapshot: ChatSnapshotHint | None = Field(
+        default=None,
+        validation_alias=AliasChoices("snapshot", "snapshot_info", "snapshotInfo"),
     )
     session_id: str = Field(
         default="vscode-stateless",
@@ -396,7 +597,7 @@ class ChatRequest(BaseModel):
         deprecated=True,
         description=(
             "Deprecated compatibility field. /v1/chat ignores client top_k and "
-            "uses the search policy configured by rag_lab."
+            "uses the Backend adaptive retrieval policy."
         ),
     )
     history: list[HistoryMessage] = Field(default_factory=list, max_length=20)
@@ -414,25 +615,34 @@ class ChatRequest(BaseModel):
     stream: bool | None = Field(
         default=False,
         description=(
-            "false returns the frozen JSON response. true returns Server-Sent "
-            "Events with display states: meta=전송중, status=추론중, "
-            "delta=생각중, done=답변중, error=답변 실패."
+            "Backward-compatible transport override. true requests SSE and false "
+            "requests JSON. When omitted or null, the HTTP Accept header decides."
         ),
     )
     debug: bool = Field(
         default=False,
-        description=(
-            "When true, include diagnostic metadata in the chat response. "
-            "Normal frontend requests receive an empty metadata object."
-        ),
+        description="Include diagnostic response metadata only when explicitly requested.",
     )
     reasoning_mode: Literal["auto", "fast", "balanced", "deep"] | None = Field(
         default=None,
         description=(
-            "Deprecated compatibility field. rag_lab owns retrieval and prompt "
-            "assembly, so the Backend accepts but ignores this value."
+            "Optional Agentic RAG budget. Omit to use the Backend default. "
+            "auto=Backend complexity routing, fast=one retrieval, "
+            "balanced=context-aware bounded retry, deep=multi-query evidence exploration."
         ),
     )
+
+    _intake_input_fields: frozenset[str] = PrivateAttr(default_factory=frozenset)
+
+    def model_post_init(self, __context: Any) -> None:
+        extras = self.__pydantic_extra__
+        provenance = extras.pop("vision_intake_original", None) if extras else None
+        fields = provenance.get("fields", []) if isinstance(provenance, dict) else []
+        self._intake_input_fields = frozenset(str(field) for field in fields)
+
+    @property
+    def intake_input_fields(self) -> frozenset[str]:
+        return self._intake_input_fields
 
     @model_validator(mode="before")
     @classmethod
@@ -453,6 +663,9 @@ class ChatRequest(BaseModel):
         if len(encoded_request) > MAX_CHAT_REQUEST_BYTES:
             raise ValueError("chat request must not exceed 10 MB")
         raw = dict(value)
+        raw["vision_intake_original"] = {
+            "fields": [str(key) for key in value.keys() if key != "vision_intake_original"]
+        }
         request_envelope = (
             dict(raw.get("request"))
             if isinstance(raw.get("request"), dict)
@@ -493,14 +706,64 @@ class ChatRequest(BaseModel):
                 str(candidate).strip()
                 for candidate in (
                     raw.get("project_id"),
+                    raw.get("projectId"),
                     raw.get("workspace_name"),
                     workspace_name,
+                    (
+                        raw.get("snapshot", {}).get("project_id")
+                        or raw.get("snapshot", {}).get("projectId")
+                        if isinstance(raw.get("snapshot"), dict)
+                        else None
+                    ),
+                    (
+                        raw.get("snapshot_info", {}).get("project_id")
+                        or raw.get("snapshot_info", {}).get("projectId")
+                        if isinstance(raw.get("snapshot_info"), dict)
+                        else None
+                    ),
+                    (
+                        raw.get("snapshotInfo", {}).get("project_id")
+                        or raw.get("snapshotInfo", {}).get("projectId")
+                        if isinstance(raw.get("snapshotInfo"), dict)
+                        else None
+                    ),
                 )
                 if candidate is not None and str(candidate).strip()
             ),
             "__auto__",
         )
         raw["project_id"] = project_id
+
+        snapshot_value = next(
+            (
+                candidate
+                for candidate in (
+                    raw.get("snapshot"),
+                    raw.get("snapshot_info"),
+                    raw.get("snapshotInfo"),
+                )
+                if isinstance(candidate, dict)
+            ),
+            None,
+        )
+        if snapshot_value is not None:
+            raw["snapshot"] = snapshot_value
+        snapshot_id = next(
+            (
+                str(candidate).strip()
+                for candidate in (
+                    raw.get("snapshot_id"),
+                    raw.get("snapshotId"),
+                    snapshot_value.get("snapshot_id") if snapshot_value else None,
+                    snapshot_value.get("snapshotId") if snapshot_value else None,
+                    snapshot_value.get("id") if snapshot_value else None,
+                )
+                if candidate is not None and str(candidate).strip()
+            ),
+            None,
+        )
+        if snapshot_id:
+            raw["snapshot_id"] = snapshot_id
 
         history_input = raw.get("history")
         if history_input is None:
@@ -571,9 +834,15 @@ class ChatRequest(BaseModel):
             )
 
         canonical_keys = {
+            "project_id",
+            "projectId",
+            "snapshot_id",
+            "snapshotId",
+            "snapshot",
+            "snapshot_info",
+            "snapshotInfo",
             "role",
             "content",
-            "project_id",
             "message",
             "prompt",
             "session_id",
@@ -594,6 +863,7 @@ class ChatRequest(BaseModel):
             "workspace_name",
             "references",
             "command",
+            "vision_intake_original",
         }
         future_data = {
             key: item
@@ -628,12 +898,6 @@ class ChatRequest(BaseModel):
         raw.pop("request", None)
         raw.pop("chat_context", None)
         return raw
-
-    @model_validator(mode="after")
-    def require_current_user_message(self) -> "ChatRequest":
-        if not self.message.strip():
-            raise ValueError("message or content must contain the current user text")
-        return self
 
     @field_validator("client_request_id", "model_id", mode="before")
     @classmethod
@@ -678,6 +942,58 @@ class ChatRequest(BaseModel):
         return normalized
 
 
+class ChatContextRegistrationRequest(BaseModel):
+    """Optional project/Snapshot envelope sent separately from ChatRequest."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "project_id": "h5vision/fest-api",
+                    "commit_id": "0123456789abcdef0123456789abcdef01234567",
+                    "snapshot_id": None,
+                }
+            ]
+        },
+    )
+
+    project_id: str | None = Field(default=None, min_length=1, max_length=255)
+    commit_id: str | None = Field(
+        default=None,
+        pattern=r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$",
+        description="Optional 40- or 64-character Git object SHA.",
+    )
+    snapshot_id: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("project_id", "commit_id", "snapshot_id", mode="before")
+    @classmethod
+    def normalize_optional_context_text(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
+    @field_validator("commit_id")
+    @classmethod
+    def normalize_commit_id(cls, value: str | None) -> str | None:
+        return value.lower() if value else None
+
+
+class ChatContextResponse(BaseModel):
+    schema_version: Literal["1.0"] = API_SCHEMA_VERSION
+    context_id: str
+    project_id: str | None = None
+    commit_id: str | None = None
+    snapshot_id: str | None = None
+    resolution: str
+    grounding_available: bool
+    created_at: datetime
+    expires_at: datetime
+
+
 class SourceDocument(BaseModel):
     """SourceDocument returned to the current Team-vision extension."""
 
@@ -696,7 +1012,7 @@ class ChatResponse(BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "answer": "프로젝트 실행 구조는 다음과 같습니다.",
+                    "answer": "프로젝트 실행 구조는 다음과 같습니다. [1]",
                     "source": [
                         {
                             "file": "backend/app.py",
@@ -704,7 +1020,12 @@ class ChatResponse(BaseModel):
                             "score": 0.91,
                         }
                     ],
-                    "metadata": {},
+                    "metadata": {
+                        "request_id": "req_0123456789abcdef",
+                        "project_id": "h5vision/fest-api",
+                        "session_id": "9efda536-b502-49e4-926d-53343a428df0",
+                        "used_model_id": "backendai-default",
+                    },
                 }
             ]
         },
@@ -731,6 +1052,7 @@ class ModelInfo(BaseModel):
 
 class ModelListResponse(BaseModel):
     schema_version: Literal["1.0"] = API_SCHEMA_VERSION
+    catalog_revision: str
     default_model_id: str
     checked_at: datetime
     models: list[ModelInfo]
@@ -776,6 +1098,7 @@ class AIProviderWriteRequest(BaseModel):
     clear_api_key: bool = False
     enabled: bool = True
     deployment_type: Literal["cloud", "local", "remote_server"] = "remote_server"
+    chat_processing_mode: Literal["vision_managed", "provider_managed"] = "vision_managed"
 
     @field_validator("name")
     @classmethod
@@ -858,13 +1181,12 @@ class AIProviderRecord(BaseModel):
     api_key_hint: str | None = None
     enabled: bool
     deployment_type: Literal["cloud", "local", "remote_server"]
+    chat_processing_mode: Literal["vision_managed", "provider_managed"] = "vision_managed"
     status: Literal["unknown", "online", "degraded", "offline", "disabled"]
     error: str | None = None
     latency_ms: int = Field(default=0, ge=0)
     model_count: int = Field(default=0, ge=0)
     models: list[str] = Field(default_factory=list)
-    embedding_model_count: int = Field(default=0, ge=0)
-    embedding_models: list[str] = Field(default_factory=list)
     last_checked_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -875,32 +1197,6 @@ class AIProviderListResponse(BaseModel):
     total: int = Field(..., ge=0)
 
 
-class EmbeddingModelProbeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    provider_id: str = Field(..., min_length=1, max_length=255)
-    model_name: str = Field(..., min_length=1, max_length=512)
-
-    @field_validator("provider_id", "model_name")
-    @classmethod
-    def normalize_embedding_probe_fields(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("embedding probe field must not be blank")
-        return normalized
-
-
-class EmbeddingModelProbeResponse(BaseModel):
-    provider_id: str
-    provider_name: str
-    protocol: Literal["ollama", "openai"]
-    base_url: str
-    deployment_type: Literal["cloud", "local", "remote_server"]
-    model_name: str
-    dimension: int = Field(..., ge=1, le=65_536)
-    latency_ms: int = Field(..., ge=0)
-
-
 class OllamaScanTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -908,7 +1204,6 @@ class OllamaScanTarget(BaseModel):
     base_url: str
     status: Literal["online", "degraded", "offline"]
     models: list[str] = Field(default_factory=list)
-    embedding_models: list[str] = Field(default_factory=list)
     skipped_non_chat_models: list[str] = Field(default_factory=list)
     latency_ms: int = Field(default=0, ge=0)
     error: str | None = None
@@ -922,30 +1217,6 @@ class OllamaScanResponse(BaseModel):
     discovered_servers: int = Field(..., ge=0)
     registered_providers: int = Field(..., ge=0)
     chat_models: int = Field(..., ge=0)
-    embedding_models: int = Field(..., ge=0)
-
-
-class CloudProviderScanTarget(BaseModel):
-    name: str
-    base_url: str
-    configured: bool
-    status: Literal["online", "degraded", "offline", "not_configured"]
-    chat_models: list[str] = Field(default_factory=list)
-    embedding_models: list[str] = Field(default_factory=list)
-    skipped_models: list[str] = Field(default_factory=list)
-    latency_ms: int = Field(default=0, ge=0)
-    error: str | None = None
-    registered: bool = False
-    provider_id: str | None = None
-
-
-class CloudProviderScanResponse(BaseModel):
-    checked_at: datetime
-    targets: list[CloudProviderScanTarget]
-    configured_providers: int = Field(..., ge=0)
-    registered_providers: int = Field(..., ge=0)
-    chat_models: int = Field(..., ge=0)
-    embedding_models: int = Field(..., ge=0)
 
 
 class CloudProviderCredentialRequest(BaseModel):
@@ -1308,6 +1579,52 @@ class ChatAuditLogListResponse(BaseModel):
     logs: list[ChatAuditLog]
 
 
+class ChatSessionMessage(BaseModel):
+    request_id: str
+    received_at: datetime
+    completed_at: datetime | None = None
+    question: str | None = None
+    question_truncated: bool = False
+    answer: str | None = None
+    answer_truncated: bool = False
+    status: str
+    status_code: int | None = None
+    requested_model_id: str | None = None
+    used_model_id: str | None = None
+    provider: str | None = None
+    source_count: int | None = None
+    duration_ms: int | None = None
+    error: str | None = None
+
+
+class ChatSessionSummary(BaseModel):
+    session_id: str
+    title: str
+    project_id: str
+    last_message_at: datetime
+    message_count: int = Field(..., ge=1)
+    status: str
+    model_id: str | None = None
+    provider: str | None = None
+    messages: list[ChatSessionMessage] = Field(default_factory=list)
+
+
+class ChatSessionUser(BaseModel):
+    user_key: str
+    display_name: str
+    client_id: str | None = None
+    last_message_at: datetime
+    sessions: list[ChatSessionSummary] = Field(default_factory=list)
+
+
+class ChatSessionListResponse(BaseModel):
+    checked_at: datetime
+    retention_days: int = 7
+    users: list[ChatSessionUser] = Field(default_factory=list)
+    total_users: int = Field(..., ge=0)
+    total_sessions: int = Field(..., ge=0)
+
+
 class FrontendRegistrationEvent(BaseModel):
     event_id: int
     occurred_at: datetime
@@ -1436,6 +1753,7 @@ class FrontendClientWriteRequest(BaseModel):
     ip: str = Field(..., min_length=7, max_length=15)
     port: int = Field(..., ge=1, le=65535)
     enabled: bool = True
+    chat_deep_normalization_mode: Literal["inherit", "auto", "off"] = "inherit"
 
     @field_validator("name")
     @classmethod
@@ -1463,6 +1781,7 @@ class FrontendClientRecord(BaseModel):
     ip: str
     port: int
     enabled: bool
+    chat_deep_normalization_mode: Literal["inherit", "auto", "off"] = "inherit"
     registration_type: Literal["admin", "auto"] = "admin"
     last_seen_ip: str | None = None
     last_seen_at: datetime | None = None
@@ -1478,6 +1797,20 @@ class FrontendClientListResponse(BaseModel):
     total: int
     enabled: int
     reachable: int
+
+
+class ChatIntakeSettingsUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    deep_normalization_enabled: bool
+    fallback_mode: Literal["raw_message"] = "raw_message"
+
+
+class ChatIntakeSettingsResponse(BaseModel):
+    deep_normalization_enabled: bool
+    fallback_mode: Literal["raw_message"]
+    basic_normalization_enabled: Literal[True] = True
+    updated_at: datetime
 
 
 class NetworkEndpointSettings(BaseModel):
@@ -1504,9 +1837,16 @@ class NetworkSettingsUpdateRequest(BaseModel):
     backendai: NetworkEndpointSettings
 
 
+class NetworkEndpointSettingsResponse(BaseModel):
+    ip: str = ""
+    port: int = 0
+
+
 class NetworkSettingsResponse(BaseModel):
-    frontend: NetworkEndpointSettings
-    backendai: NetworkEndpointSettings
+    configured: bool = True
+    setup_required: bool = False
+    frontend: NetworkEndpointSettingsResponse
+    backendai: NetworkEndpointSettingsResponse
     updated_at: datetime | None = None
     frontend_reachable: bool
     frontend_latency_ms: int
@@ -1538,19 +1878,24 @@ class RuntimeGroqSettingsWrite(BaseModel):
         return normalized
 
 
-class RuntimeGroqSettingsResponse(RuntimeGroqSettingsWrite):
-    public_model_id: str
-    api_key_configured: bool
+class RuntimeGroqSettingsResponse(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    model: str = ""
+    public_model_id: str = "groq-default"
+    api_key_configured: bool = False
 
 
 class RuntimeVectorSettingsWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    vector_target_id: str | None = Field(default=None, max_length=255)
+    embedding_profile_id: str | None = Field(default=None, max_length=255)
     host: str = Field(..., min_length=1, max_length=253)
     port: int = Field(..., ge=1, le=65535)
     collection: str = Field(..., min_length=1, max_length=255)
     embedding_deployment: Literal["api", "local"]
-    embedding_provider: Literal["ollama", "nvidia", "openai"]
+    embedding_provider: Literal["ollama", "openai", "nvidia"]
     embedding_provider_id: str | None = Field(default=None, max_length=255)
     embedding_base_url: str = Field(..., min_length=1, max_length=2048)
     embedding_model: str = Field(..., min_length=1, max_length=255)
@@ -1596,30 +1941,35 @@ class RuntimeVectorSettingsWrite(BaseModel):
             raise ValueError("vector setting must not be blank")
         return normalized
 
-    @field_validator("embedding_provider_id")
-    @classmethod
-    def normalize_embedding_provider_id(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return value.strip() or None
 
-
-class RuntimeVectorSettingsResponse(RuntimeVectorSettingsWrite):
-    provider: str
-    active_host: str
-    active_port: int
-    active_collection: str
-    active_embedding_deployment: Literal["api", "local"]
-    active_embedding_provider: str
-    active_embedding_provider_id: str | None = None
-    active_embedding_base_url: str
-    active_embedding_model: str
-    active_embedding_model_id: str
-    active_embedding_dimension: int
-    active_embedding_batch_size: int
-    active_index_version: str
-    restart_required: bool
-    reindex_required: bool
+class RuntimeVectorSettingsResponse(BaseModel):
+    provider: str = "qdrant"
+    vector_target_id: str = ""
+    embedding_profile_id: str = ""
+    host: str = ""
+    port: int = 0
+    collection: str = ""
+    embedding_deployment: str = ""
+    embedding_provider: str = ""
+    embedding_base_url: str = ""
+    embedding_model: str = ""
+    embedding_model_id: str = ""
+    embedding_dimension: int = 0
+    embedding_batch_size: int = 0
+    index_version: str = ""
+    active_host: str = ""
+    active_port: int = 0
+    active_collection: str = ""
+    active_embedding_deployment: str = ""
+    active_embedding_provider: str = ""
+    active_embedding_base_url: str = ""
+    active_embedding_model: str = ""
+    active_embedding_model_id: str = ""
+    active_embedding_dimension: int = 0
+    active_embedding_batch_size: int = 0
+    active_index_version: str = ""
+    restart_required: bool = False
+    reindex_required: bool = False
 
 
 class RuntimeServiceSettingsUpdateRequest(BaseModel):
@@ -1639,10 +1989,347 @@ class RuntimeServiceSettingsUpdateRequest(BaseModel):
 
 
 class RuntimeServiceSettingsResponse(BaseModel):
+    configured: bool = True
+    setup_required: bool = False
+    missing: list[str] = Field(default_factory=list)
     groq: RuntimeGroqSettingsResponse
-    default_model_id: str
+    default_model_id: str = ""
     vector: RuntimeVectorSettingsResponse
     updated_at: datetime | None = None
+
+
+class RuntimeSetupStatusResponse(BaseModel):
+    status: Literal["configured", "setup_required"]
+    configured: bool
+    missing: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    service_settings_configured: bool
+    network_settings_configured: bool
+    vector_target_configured: bool = False
+    embedding_profile_configured: bool = False
+
+
+class VectorTargetWriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(default="Qdrant", min_length=1, max_length=255)
+    endpoint: str = Field(..., min_length=8, max_length=2048)
+    credential_ref: str | None = Field(default=None, max_length=512)
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("endpoint must be an absolute HTTP(S) URL")
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("endpoint must not contain path, query, or fragment")
+        return normalized
+
+
+class VectorTargetRecordResponse(BaseModel):
+    vector_target_id: str
+    tenant_id: str
+    name: str
+    engine: str
+    endpoint: str
+    credential_ref: str | None = None
+    deployment_type: str
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    error: str | None = None
+    latency_ms: int | None = None
+    last_checked_at: datetime | None = None
+    active: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class VectorTargetListResponse(BaseModel):
+    targets: list[VectorTargetRecordResponse] = Field(default_factory=list)
+    active_vector_target_id: str | None = None
+
+
+class VectorIndexRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    vector_index_id: str
+    tenant_id: str
+    name: str
+    vector_target_id: str
+    embedding_profile_id: str
+    collection: str
+    selector: dict[str, Any]
+    index_version: str
+    distance_metric: Literal["cosine", "dot", "euclid", "manhattan"]
+    ownership_mode: Literal["vision_managed", "external_attached"]
+    query_strategy: str
+    status: Literal["building", "ready", "retired", "unavailable", "disabled"]
+    created_at: datetime
+    updated_at: datetime
+
+
+class VectorIndexListResponse(BaseModel):
+    indexes: list[VectorIndexRecordResponse]
+    total: int = Field(..., ge=0)
+
+
+class ExternalVectorIndexDiscoveryItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collection: str
+    dimension: int | None = None
+    distance_metric: str | None = None
+    vector_type: str | None = None
+    points_count: int | None = Field(default=None, ge=0)
+    status: str
+
+
+class ExternalVectorIndexDiscoveryResponse(BaseModel):
+    vector_target_id: str
+    indexes: list[ExternalVectorIndexDiscoveryItem] = Field(default_factory=list)
+    total: int = Field(..., ge=0)
+
+
+class ExternalVectorIndexAttachRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, max_length=255)
+    vector_target_id: str = Field(..., min_length=1, max_length=255)
+    embedding_profile_id: str = Field(..., min_length=1, max_length=255)
+    collection: str = Field(..., min_length=1, max_length=255)
+    selector: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    index_version: str = Field(default="external", min_length=1, max_length=255)
+    distance_metric: Literal["cosine", "dot", "euclid", "manhattan"] | None = None
+    query_strategy: Literal["qdrant-query-api"] = "qdrant-query-api"
+
+    @field_validator("name")
+    @classmethod
+    def normalize_external_index_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("vector_target_id", "embedding_profile_id", "collection", "index_version")
+    @classmethod
+    def normalize_external_index_fields(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("external VectorIndex field must not be blank")
+        return normalized
+
+
+class ExternalVectorIndexVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    embedding_profile_attested: bool = False
+    sample_limit: int = Field(default=10, ge=1, le=100)
+
+
+class ExternalVectorIndexVerificationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    vector_index_id: str
+    tenant_id: str
+    verification_state: Literal["unverified", "compatible", "incompatible", "unavailable"]
+    verification_method: Literal["qdrant_probe"]
+    embedding_profile_attested: bool
+    expected_dimension: int = Field(..., ge=1)
+    observed_dimension: int | None = Field(default=None, ge=1)
+    expected_distance_metric: str
+    observed_distance_metric: str | None = None
+    observed_vector_type: str | None = None
+    observed_points_count: int | None = Field(default=None, ge=0)
+    selector_points_count: int | None = Field(default=None, ge=0)
+    sample_size: int = Field(default=0, ge=0)
+    sample_payload_keys: list[str] = Field(default_factory=list)
+    last_verified_at: datetime | None = None
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExternalVectorIndexAttachResponse(BaseModel):
+    index: VectorIndexRecordResponse
+    verification: ExternalVectorIndexVerificationResponse
+
+
+class ExternalSnapshotVectorBindingVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str = Field(..., min_length=1, max_length=255)
+    vector_index_id: str = Field(..., min_length=1, max_length=255)
+    mode: Literal["probe", "manual"] = "probe"
+    snapshot_attested: bool = False
+    sample_limit: int = Field(default=25, ge=1, le=100)
+
+
+class SnapshotVectorBindingRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_id: str
+    tenant_id: str
+    snapshot_id: str
+    vector_index_id: str
+    generation_id: str | None = None
+    binding_source: Literal["managed_generation", "external_verification"]
+    verification_state: Literal["pending", "verified", "failed", "revoked"]
+    verification_method: Literal["managed_build", "external_probe", "manual"]
+    snapshot_fingerprint: str
+    vector_index_identity_key: str
+    verification_evidence: dict[str, Any] = Field(default_factory=dict)
+    verified_at: datetime | None = None
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SnapshotVectorBindingListResponse(BaseModel):
+    bindings: list[SnapshotVectorBindingRecordResponse]
+    total: int = Field(..., ge=0)
+
+
+class ProjectVectorRouteCandidateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_id: str
+    snapshot_id: str
+    generation_id: str | None = None
+    generation_status: str | None = None
+    vector_index_id: str
+    ownership_mode: Literal["vision_managed", "external_attached"]
+    binding_source: Literal["managed_generation", "external_verification"]
+    verification_method: Literal["managed_build", "external_probe", "manual"]
+    vector_target_id: str
+    embedding_profile_id: str
+    vector_index_status: str
+    vector_target_status: str
+    embedding_profile_status: str
+    external_verification_state: str | None = None
+    payload_keys: list[str] = Field(default_factory=list)
+    eligible: bool
+    routable: bool
+    active: bool = False
+    reason: str | None = None
+
+
+class ProjectVectorRouteRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+    tenant_id: str
+    active_binding_id: str | None = None
+    routing_mode: Literal["managed_auto", "pinned"]
+    revision: int = Field(..., ge=0)
+    selected_by: str | None = None
+    selected_at: datetime | None = None
+    reason: str | None = None
+    active: ProjectVectorRouteCandidateResponse | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectVectorRouteWriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_id: str = Field(..., min_length=1, max_length=255)
+    routing_mode: Literal["managed_auto", "pinned"] = "pinned"
+    expected_revision: int = Field(..., ge=0)
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class ProjectVectorRouteClearRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(..., ge=0)
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class ProjectVectorRouteCandidateListResponse(BaseModel):
+    project_id: str
+    active_binding_id: str | None = None
+    routing_mode: Literal["managed_auto", "pinned"]
+    revision: int = Field(..., ge=0)
+    candidates: list[ProjectVectorRouteCandidateResponse] = Field(default_factory=list)
+
+
+class ProjectVectorRouteEventResponse(BaseModel):
+    event_id: str
+    project_id: str
+    tenant_id: str
+    from_binding_id: str | None = None
+    to_binding_id: str | None = None
+    routing_mode: Literal["managed_auto", "pinned"]
+    actor: str | None = None
+    reason: str | None = None
+    revision: int = Field(..., ge=1)
+    created_at: datetime
+
+
+class ProjectVectorRouteEventListResponse(BaseModel):
+    project_id: str
+    events: list[ProjectVectorRouteEventResponse] = Field(default_factory=list)
+
+
+class EmbeddingProfileWriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(default="Embedding Profile", min_length=1, max_length=255)
+    deployment: Literal["api", "local"]
+    provider: Literal["ollama", "openai", "nvidia"]
+    base_url: str = Field(..., min_length=8, max_length=2048)
+    model: str = Field(..., min_length=1, max_length=255)
+    model_id: str = Field(..., min_length=1, max_length=255)
+    dimension: int = Field(..., ge=1, le=65_536)
+    batch_size: int = Field(default=16, ge=1, le=256)
+    credential_ref: str | None = Field(default=None, max_length=512)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("base_url must be an absolute HTTP(S) URL")
+        if parsed.fragment:
+            raise ValueError("base_url must not contain a fragment")
+        return normalized
+
+    @field_validator("name", "model", "model_id")
+    @classmethod
+    def normalize_embedding_profile_fields(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("embedding profile field must not be blank")
+        return normalized
+
+
+class EmbeddingProfileRecordResponse(BaseModel):
+    embedding_profile_id: str
+    tenant_id: str
+    name: str
+    deployment: str
+    provider: str
+    base_url: str
+    model: str
+    model_id: str
+    dimension: int
+    batch_size: int
+    credential_ref: str | None = None
+    status: str
+    error: str | None = None
+    latency_ms: int | None = None
+    last_checked_at: datetime | None = None
+    active: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class EmbeddingProfileListResponse(BaseModel):
+    profiles: list[EmbeddingProfileRecordResponse] = Field(default_factory=list)
+    active_embedding_profile_id: str | None = None
 
 
 UploadEntryType = Literal["file", "directory"]
@@ -1971,7 +2658,7 @@ class ProjectTreeResponse(BaseModel):
     schema_version: Literal["1.0"] = API_SCHEMA_VERSION
     project_id: str
     snapshot_id: str
-    generation_id: str
+    generation_id: str | None = None
     revision: str | None = None
     prefix: str = ""
     entries: list[ProjectTreeEntry]
@@ -1982,12 +2669,33 @@ class ProjectFileResponse(BaseModel):
     schema_version: Literal["1.0"] = API_SCHEMA_VERSION
     project_id: str
     snapshot_id: str
-    generation_id: str
+    generation_id: str | None = None
     path: str
     language: str | None = None
     size_bytes: int = Field(default=0, ge=0)
     content_sha256: str
     content: str
+
+
+class ProjectBriefingResponse(BaseModel):
+    """Stable Vision projection of the external RAG briefing artifact."""
+
+    schema_version: Literal["1.0"] = API_SCHEMA_VERSION
+    project_id: str
+    external_project_id: str
+    briefing: str
+    references: list[dict[str, Any]] = Field(default_factory=list)
+    reference_files: list[dict[str, Any]] = Field(default_factory=list)
+    mentioned_files: list[dict[str, Any]] = Field(default_factory=list)
+    structure: dict[str, Any] = Field(default_factory=dict)
+    commit: str | None = None
+    index_commit: str | None = None
+    requested_commit_id: str | None = None
+    revision_status: Literal["same", "different", "unknown"] = "unknown"
+    generated_at: str | None = None
+    outdated: bool = False
+    ok: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class VectorIndexValidationResponse(BaseModel):

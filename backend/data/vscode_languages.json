@@ -1,0 +1,1636 @@
+{
+  "schema_version": "1.0",
+  "registry_revision": "df53daabb18cd157bdb08c7f01c34df936cf12f4",
+  "source": "microsoft/vscode contributes.languages",
+  "source_repository": "https://github.com/microsoft/vscode",
+  "source_version": "1.132.0",
+  "source_commit": "df53daabb18cd157bdb08c7f01c34df936cf12f4",
+  "generated_at": "2026-08-10T07:01:50.787159+00:00",
+  "license": "MIT",
+  "language_count": 75,
+  "languages": [
+    {
+      "id": "bat",
+      "aliases": [
+        "bat",
+        "Batch"
+      ],
+      "extensions": [
+        ".bat",
+        ".cmd"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "bat"
+      ]
+    },
+    {
+      "id": "bibtex",
+      "aliases": [
+        "BibTeX",
+        "bibtex"
+      ],
+      "extensions": [
+        ".bib"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "latex"
+      ]
+    },
+    {
+      "id": "c",
+      "aliases": [
+        "C",
+        "c"
+      ],
+      "extensions": [
+        ".c",
+        ".i"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "cpp"
+      ]
+    },
+    {
+      "id": "chatagent",
+      "aliases": [
+        "Agent",
+        "chat agent"
+      ],
+      "extensions": [
+        ".agent.md",
+        ".chatmode.md"
+      ],
+      "filenames": [],
+      "filename_patterns": [
+        "**/.claude/agents/*.md",
+        "**/.github/agents/*.md"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "prompt"
+      ]
+    },
+    {
+      "id": "clojure",
+      "aliases": [
+        "Clojure",
+        "clojure"
+      ],
+      "extensions": [
+        ".clj",
+        ".cljc",
+        ".cljs",
+        ".cljx",
+        ".clojure",
+        ".edn"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "clojure"
+      ]
+    },
+    {
+      "id": "coffeescript",
+      "aliases": [
+        "coffee",
+        "CoffeeScript",
+        "coffeescript"
+      ],
+      "extensions": [
+        ".coffee",
+        ".cson",
+        ".iced"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "coffeescript"
+      ]
+    },
+    {
+      "id": "cpp",
+      "aliases": [
+        "C++",
+        "Cpp",
+        "cpp"
+      ],
+      "extensions": [
+        ".c++",
+        ".c++m",
+        ".cc",
+        ".ccm",
+        ".cpp",
+        ".cppm",
+        ".cxx",
+        ".cxxm",
+        ".h",
+        ".h++",
+        ".h.in",
+        ".hh",
+        ".hpp",
+        ".hpp.in",
+        ".hxx",
+        ".ii",
+        ".inl",
+        ".ino",
+        ".ipp",
+        ".ixx",
+        ".mpp",
+        ".mxx",
+        ".tpp",
+        ".txx"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "cpp"
+      ]
+    },
+    {
+      "id": "cpp_embedded_latex",
+      "aliases": [],
+      "extensions": [],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "latex"
+      ]
+    },
+    {
+      "id": "csharp",
+      "aliases": [
+        "C#",
+        "csharp"
+      ],
+      "extensions": [
+        ".cake",
+        ".cs",
+        ".csx"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "csharp"
+      ]
+    },
+    {
+      "id": "css",
+      "aliases": [
+        "CSS",
+        "css"
+      ],
+      "extensions": [
+        ".css"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "css"
+      ]
+    },
+    {
+      "id": "cuda-cpp",
+      "aliases": [
+        "CUDA C++"
+      ],
+      "extensions": [
+        ".cu",
+        ".cuh"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "cpp"
+      ]
+    },
+    {
+      "id": "dart",
+      "aliases": [
+        "Dart"
+      ],
+      "extensions": [
+        ".dart"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "dart"
+      ]
+    },
+    {
+      "id": "diff",
+      "aliases": [
+        "Diff",
+        "diff"
+      ],
+      "extensions": [
+        ".diff",
+        ".patch",
+        ".rej"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "diff"
+      ]
+    },
+    {
+      "id": "dockercompose",
+      "aliases": [
+        "Compose",
+        "compose"
+      ],
+      "extensions": [],
+      "filenames": [],
+      "filename_patterns": [
+        "*docker*compose*.yaml",
+        "*docker*compose*.yml",
+        "compose.*.yaml",
+        "compose.*.yml",
+        "compose.yaml",
+        "compose.yml"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "yaml"
+      ]
+    },
+    {
+      "id": "dockerfile",
+      "aliases": [
+        "Containerfile",
+        "Docker",
+        "Dockerfile"
+      ],
+      "extensions": [
+        ".containerfile",
+        ".dockerfile"
+      ],
+      "filenames": [
+        "Containerfile",
+        "Dockerfile"
+      ],
+      "filename_patterns": [
+        "Containerfile.*",
+        "Dockerfile.*"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "docker"
+      ]
+    },
+    {
+      "id": "dotenv",
+      "aliases": [
+        "Dotenv"
+      ],
+      "extensions": [
+        ".env"
+      ],
+      "filenames": [
+        ".env",
+        ".flaskenv",
+        "user-dirs.dirs"
+      ],
+      "filename_patterns": [
+        ".env.*"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "dotenv"
+      ]
+    },
+    {
+      "id": "fsharp",
+      "aliases": [
+        "F#",
+        "FSharp",
+        "fsharp"
+      ],
+      "extensions": [
+        ".fs",
+        ".fsi",
+        ".fsscript",
+        ".fsx"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "fsharp"
+      ]
+    },
+    {
+      "id": "git-commit",
+      "aliases": [
+        "Git Commit Message",
+        "git-commit"
+      ],
+      "extensions": [],
+      "filenames": [
+        "COMMIT_EDITMSG",
+        "MERGE_MSG"
+      ],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "git-base"
+      ]
+    },
+    {
+      "id": "git-rebase",
+      "aliases": [
+        "Git Rebase Message",
+        "git-rebase"
+      ],
+      "extensions": [],
+      "filenames": [
+        "git-rebase-todo"
+      ],
+      "filename_patterns": [
+        "**/rebase-merge/done"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "git-base"
+      ]
+    },
+    {
+      "id": "go",
+      "aliases": [
+        "Go"
+      ],
+      "extensions": [
+        ".go"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "go"
+      ]
+    },
+    {
+      "id": "groovy",
+      "aliases": [
+        "Groovy",
+        "groovy"
+      ],
+      "extensions": [
+        ".gradle",
+        ".groovy",
+        ".gvy",
+        ".jenkinsfile",
+        ".nf"
+      ],
+      "filenames": [
+        "Jenkinsfile"
+      ],
+      "filename_patterns": [
+        "Jenkinsfile*"
+      ],
+      "first_lines": [
+        "^#!.*\\bgroovy\\b"
+      ],
+      "contributors": [
+        "groovy"
+      ]
+    },
+    {
+      "id": "handlebars",
+      "aliases": [
+        "Handlebars",
+        "handlebars"
+      ],
+      "extensions": [
+        ".handlebars",
+        ".hbs",
+        ".hjs"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "handlebars"
+      ]
+    },
+    {
+      "id": "hlsl",
+      "aliases": [
+        "HLSL",
+        "hlsl"
+      ],
+      "extensions": [
+        ".cginc",
+        ".compute",
+        ".fx",
+        ".fxh",
+        ".hlsl",
+        ".hlsli",
+        ".psh",
+        ".vsh"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "hlsl"
+      ]
+    },
+    {
+      "id": "html",
+      "aliases": [
+        "htm",
+        "HTML",
+        "html",
+        "xhtml"
+      ],
+      "extensions": [
+        ".asp",
+        ".aspx",
+        ".ejs",
+        ".htm",
+        ".html",
+        ".jshtm",
+        ".jsp",
+        ".mdoc",
+        ".rhtml",
+        ".shtml",
+        ".volt",
+        ".xht",
+        ".xhtml"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "html"
+      ]
+    },
+    {
+      "id": "ignore",
+      "aliases": [
+        "Ignore",
+        "ignore"
+      ],
+      "extensions": [
+        ".git-blame-ignore-revs",
+        ".gitignore",
+        ".gitignore_global",
+        ".npmignore"
+      ],
+      "filenames": [
+        ".vscodeignore"
+      ],
+      "filename_patterns": [
+        ".copilotignore"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "copilot-chat",
+        "extension-editing",
+        "git-base",
+        "npm"
+      ]
+    },
+    {
+      "id": "ini",
+      "aliases": [
+        "Ini",
+        "ini"
+      ],
+      "extensions": [
+        ".ini"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "ini"
+      ]
+    },
+    {
+      "id": "instructions",
+      "aliases": [
+        "Instructions",
+        "instructions"
+      ],
+      "extensions": [
+        ".instructions.md",
+        "copilot-instructions.md"
+      ],
+      "filenames": [],
+      "filename_patterns": [
+        "**/.claude/rules/**/*.md"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "prompt"
+      ]
+    },
+    {
+      "id": "jade",
+      "aliases": [
+        "Jade",
+        "jade",
+        "Pug"
+      ],
+      "extensions": [
+        ".jade",
+        ".pug"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "pug"
+      ]
+    },
+    {
+      "id": "java",
+      "aliases": [
+        "Java",
+        "java"
+      ],
+      "extensions": [
+        ".jav",
+        ".java"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "java"
+      ]
+    },
+    {
+      "id": "javascript",
+      "aliases": [
+        "JavaScript",
+        "javascript",
+        "js"
+      ],
+      "extensions": [
+        ".cjs",
+        ".es6",
+        ".js",
+        ".mjs",
+        ".pac"
+      ],
+      "filenames": [
+        "jakefile"
+      ],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#!.*\\bnode"
+      ],
+      "contributors": [
+        "javascript"
+      ]
+    },
+    {
+      "id": "javascriptreact",
+      "aliases": [
+        "JavaScript JSX",
+        "JavaScript React",
+        "jsx"
+      ],
+      "extensions": [
+        ".jsx"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "javascript"
+      ]
+    },
+    {
+      "id": "json",
+      "aliases": [
+        "JSON",
+        "json"
+      ],
+      "extensions": [
+        ".bowerrc",
+        ".code-profile",
+        ".css.map",
+        ".geojson",
+        ".har",
+        ".ipynb",
+        ".js.map",
+        ".jscsrc",
+        ".jslintrc",
+        ".json",
+        ".jsonld",
+        ".ts.map",
+        ".tsbuildinfo",
+        ".vuerc",
+        ".webmanifest"
+      ],
+      "filenames": [
+        ".watchmanconfig",
+        "composer.lock"
+      ],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "configuration-editing",
+        "json",
+        "typescript"
+      ]
+    },
+    {
+      "id": "jsonc",
+      "aliases": [
+        "JSON with Comments"
+      ],
+      "extensions": [
+        ".babelrc",
+        ".code-workspace",
+        ".eslintrc",
+        ".eslintrc.json",
+        ".hintrc",
+        ".jsfmtrc",
+        ".jshintrc",
+        ".jsonc",
+        ".swcrc",
+        ".toolset.jsonc",
+        "color-theme.json",
+        "icon-theme.json",
+        "language-configuration.json"
+      ],
+      "filenames": [
+        ".babelrc.json",
+        ".devcontainer.json",
+        ".ember-cli",
+        "argv.json",
+        "babel.config.json",
+        "bun.lock",
+        "devcontainer.json",
+        "extensions.json",
+        "jsconfig.json",
+        "keybindings.json",
+        "launch.json",
+        "mcp.json",
+        "profiles.json",
+        "settings.json",
+        "tasks.json",
+        "tsconfig.json",
+        "typedoc.json"
+      ],
+      "filename_patterns": [
+        "**/.github/hooks/*.json",
+        "jsconfig-*.json",
+        "jsconfig.*.json",
+        "tsconfig-*.json",
+        "tsconfig.*.json"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "configuration-editing",
+        "json",
+        "typescript"
+      ]
+    },
+    {
+      "id": "jsonl",
+      "aliases": [
+        "JSON Lines"
+      ],
+      "extensions": [
+        ".jsonl",
+        ".ndjson"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "json"
+      ]
+    },
+    {
+      "id": "jsx-tags",
+      "aliases": [],
+      "extensions": [],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "javascript"
+      ]
+    },
+    {
+      "id": "julia",
+      "aliases": [
+        "Julia",
+        "julia"
+      ],
+      "extensions": [
+        ".jl"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#!\\s*/.*\\bjulia[0-9.-]*\\b"
+      ],
+      "contributors": [
+        "julia"
+      ]
+    },
+    {
+      "id": "juliamarkdown",
+      "aliases": [
+        "Julia Markdown",
+        "juliamarkdown"
+      ],
+      "extensions": [
+        ".jmd"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "julia"
+      ]
+    },
+    {
+      "id": "latex",
+      "aliases": [
+        "LaTeX",
+        "latex"
+      ],
+      "extensions": [
+        ".ctx",
+        ".ltx",
+        ".tex"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "latex"
+      ]
+    },
+    {
+      "id": "less",
+      "aliases": [
+        "Less",
+        "less"
+      ],
+      "extensions": [
+        ".less"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "less"
+      ]
+    },
+    {
+      "id": "log",
+      "aliases": [
+        "Log"
+      ],
+      "extensions": [
+        "*.log.?",
+        ".log"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "log"
+      ]
+    },
+    {
+      "id": "lua",
+      "aliases": [
+        "Lua",
+        "lua"
+      ],
+      "extensions": [
+        ".lua"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "lua"
+      ]
+    },
+    {
+      "id": "makefile",
+      "aliases": [
+        "Makefile",
+        "makefile"
+      ],
+      "extensions": [
+        ".mak",
+        ".mk"
+      ],
+      "filenames": [
+        "GNUmakefile",
+        "Makefile",
+        "makefile",
+        "OCamlMakefile"
+      ],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#!\\s*/usr/bin/make"
+      ],
+      "contributors": [
+        "make"
+      ]
+    },
+    {
+      "id": "markdown",
+      "aliases": [
+        "Markdown",
+        "markdown"
+      ],
+      "extensions": [
+        ".copilotmd",
+        ".litcoffee",
+        ".markdn",
+        ".markdown",
+        ".md",
+        ".mdown",
+        ".mdtext",
+        ".mdtxt",
+        ".mdwn",
+        ".mkd",
+        ".mkdn",
+        ".ron",
+        ".ronn",
+        ".workbook"
+      ],
+      "filenames": [],
+      "filename_patterns": [
+        "**/.cursor/**/*.mdc"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "copilot-chat",
+        "markdown"
+      ]
+    },
+    {
+      "id": "markdown-math",
+      "aliases": [],
+      "extensions": [],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "markdown-math"
+      ]
+    },
+    {
+      "id": "markdown_latex_combined",
+      "aliases": [],
+      "extensions": [],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "latex"
+      ]
+    },
+    {
+      "id": "objective-c",
+      "aliases": [
+        "Objective-C"
+      ],
+      "extensions": [
+        ".m"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "objective-c"
+      ]
+    },
+    {
+      "id": "objective-cpp",
+      "aliases": [
+        "Objective-C++"
+      ],
+      "extensions": [
+        ".mm"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "objective-c"
+      ]
+    },
+    {
+      "id": "perl",
+      "aliases": [
+        "Perl",
+        "perl"
+      ],
+      "extensions": [
+        ".PL",
+        ".pl",
+        ".pm",
+        ".pod",
+        ".psgi",
+        ".t"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#!.*\\bperl\\b"
+      ],
+      "contributors": [
+        "perl"
+      ]
+    },
+    {
+      "id": "php",
+      "aliases": [
+        "PHP",
+        "php"
+      ],
+      "extensions": [
+        ".ctp",
+        ".php",
+        ".php4",
+        ".php5",
+        ".phtml"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#!\\s*/.*\\bphp\\b"
+      ],
+      "contributors": [
+        "php"
+      ]
+    },
+    {
+      "id": "powershell",
+      "aliases": [
+        "PowerShell",
+        "powershell",
+        "ps",
+        "ps1",
+        "pwsh"
+      ],
+      "extensions": [
+        ".ps1",
+        ".psd1",
+        ".psm1",
+        ".psrc",
+        ".pssc"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#!\\s*/.*\\bpwsh\\b"
+      ],
+      "contributors": [
+        "powershell"
+      ]
+    },
+    {
+      "id": "prompt",
+      "aliases": [
+        "Prompt",
+        "prompt"
+      ],
+      "extensions": [
+        ".prompt.md"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "prompt"
+      ]
+    },
+    {
+      "id": "properties",
+      "aliases": [
+        "Properties",
+        "properties"
+      ],
+      "extensions": [
+        ".cfg",
+        ".conf",
+        ".directory",
+        ".editorconfig",
+        ".gitattributes",
+        ".gitconfig",
+        ".gitmodules",
+        ".npmrc",
+        ".properties",
+        ".repo"
+      ],
+      "filenames": [
+        "gitconfig"
+      ],
+      "filename_patterns": [
+        "**/.config/git/config",
+        "**/.git/config"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "ini",
+        "npm"
+      ]
+    },
+    {
+      "id": "python",
+      "aliases": [
+        "py",
+        "Python"
+      ],
+      "extensions": [
+        ".cpy",
+        ".gyp",
+        ".gypi",
+        ".ipy",
+        ".py",
+        ".pyi",
+        ".pyt",
+        ".pyw",
+        ".rpy"
+      ],
+      "filenames": [
+        "SConscript",
+        "SConstruct"
+      ],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#!\\s*/?.*\\bpython[0-9.-]*\\b"
+      ],
+      "contributors": [
+        "python"
+      ]
+    },
+    {
+      "id": "r",
+      "aliases": [
+        "R",
+        "r"
+      ],
+      "extensions": [
+        ".R",
+        ".Rhistory",
+        ".Rprofile",
+        ".rt"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "r"
+      ]
+    },
+    {
+      "id": "raku",
+      "aliases": [
+        "Perl6",
+        "perl6",
+        "Raku"
+      ],
+      "extensions": [
+        ".nqp",
+        ".p6",
+        ".pl6",
+        ".pm6",
+        ".raku",
+        ".rakudoc",
+        ".rakumod",
+        ".rakutest"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [
+        "(^#!.*\\bperl6\\b)|use\\s+v6|raku|=begin\\spod|my\\sclass"
+      ],
+      "contributors": [
+        "perl"
+      ]
+    },
+    {
+      "id": "razor",
+      "aliases": [
+        "Razor",
+        "razor"
+      ],
+      "extensions": [
+        ".cshtml",
+        ".razor"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "razor"
+      ]
+    },
+    {
+      "id": "restructuredtext",
+      "aliases": [
+        "reStructuredText"
+      ],
+      "extensions": [
+        ".rst"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "restructuredtext"
+      ]
+    },
+    {
+      "id": "ruby",
+      "aliases": [
+        "rb",
+        "Ruby"
+      ],
+      "extensions": [
+        ".erb",
+        ".gemspec",
+        ".podspec",
+        ".rake",
+        ".rb",
+        ".rbi",
+        ".rbx",
+        ".rjs",
+        ".ru"
+      ],
+      "filenames": [
+        "appfile",
+        "appraisals",
+        "berksfile",
+        "berksfile.lock",
+        "brewfile",
+        "capfile",
+        "cheffile",
+        "dangerfile",
+        "deliverfile",
+        "fastfile",
+        "gemfile",
+        "guardfile",
+        "gymfile",
+        "hobofile",
+        "matchfile",
+        "podfile",
+        "puppetfile",
+        "rakefile",
+        "rantfile",
+        "scanfile",
+        "snapfile",
+        "thorfile",
+        "vagrantfile"
+      ],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#!\\s*/.*\\bruby\\b"
+      ],
+      "contributors": [
+        "ruby"
+      ]
+    },
+    {
+      "id": "rust",
+      "aliases": [
+        "Rust",
+        "rust"
+      ],
+      "extensions": [
+        ".rs"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "rust"
+      ]
+    },
+    {
+      "id": "scss",
+      "aliases": [
+        "SCSS",
+        "scss"
+      ],
+      "extensions": [
+        ".scss"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "scss"
+      ]
+    },
+    {
+      "id": "search-result",
+      "aliases": [
+        "Search Result"
+      ],
+      "extensions": [
+        ".code-search"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "search-result"
+      ]
+    },
+    {
+      "id": "shaderlab",
+      "aliases": [
+        "ShaderLab",
+        "shaderlab"
+      ],
+      "extensions": [
+        ".shader"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "shaderlab"
+      ]
+    },
+    {
+      "id": "shellscript",
+      "aliases": [
+        "bash",
+        "csh",
+        "fish",
+        "ksh",
+        "sh",
+        "Shell Script",
+        "shellscript",
+        "zsh"
+      ],
+      "extensions": [
+        ".bash",
+        ".bash_aliases",
+        ".bash_login",
+        ".bash_logout",
+        ".bash_profile",
+        ".bashrc",
+        ".csh",
+        ".cshrc",
+        ".ebuild",
+        ".eclass",
+        ".fish",
+        ".ksh",
+        ".profile",
+        ".sh",
+        ".tcshrc",
+        ".xprofile",
+        ".Xsession",
+        ".xsession",
+        ".xsessionrc",
+        ".yash_profile",
+        ".yashrc",
+        ".zlogin",
+        ".zlogout",
+        ".zprofile",
+        ".zsh",
+        ".zsh-theme",
+        ".zshenv",
+        ".zshrc"
+      ],
+      "filenames": [
+        ".envrc",
+        ".hushlogin",
+        "APKBUILD",
+        "bashrc_Apple_Terminal",
+        "PKGBUILD",
+        "zlogin",
+        "zlogout",
+        "zprofile",
+        "zshenv",
+        "zshrc",
+        "zshrc_Apple_Terminal"
+      ],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#!.*\\b(bash|fish|zsh|sh|ksh|dtksh|pdksh|mksh|ash|dash|yash|sh|csh|jcsh|tcsh|itcsh).*|^#\\s*-\\*-[^*]*mode:\\s*shell-script[^*]*-\\*-"
+      ],
+      "contributors": [
+        "shellscript"
+      ]
+    },
+    {
+      "id": "skill",
+      "aliases": [
+        "Skill",
+        "skill"
+      ],
+      "extensions": [],
+      "filenames": [
+        "SKILL.md"
+      ],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "prompt"
+      ]
+    },
+    {
+      "id": "snippets",
+      "aliases": [
+        "Code Snippets"
+      ],
+      "extensions": [
+        ".code-snippets"
+      ],
+      "filenames": [],
+      "filename_patterns": [
+        "**/snippets*.json",
+        "**/User/profiles/*/snippets/*.json",
+        "**/User/snippets/*.json"
+      ],
+      "first_lines": [],
+      "contributors": [
+        "json"
+      ]
+    },
+    {
+      "id": "sql",
+      "aliases": [
+        "MS SQL",
+        "T-SQL"
+      ],
+      "extensions": [
+        ".dsql",
+        ".sql"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "sql"
+      ]
+    },
+    {
+      "id": "swift",
+      "aliases": [
+        "Swift",
+        "swift"
+      ],
+      "extensions": [
+        ".swift"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "swift"
+      ]
+    },
+    {
+      "id": "tex",
+      "aliases": [
+        "TeX",
+        "tex"
+      ],
+      "extensions": [
+        ".bbx",
+        ".cbx",
+        ".cls",
+        ".sty"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "latex"
+      ]
+    },
+    {
+      "id": "typescript",
+      "aliases": [
+        "ts",
+        "TypeScript",
+        "typescript"
+      ],
+      "extensions": [
+        ".cts",
+        ".mts",
+        ".ts"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#!.*\\b(deno|bun|ts-node)\\b"
+      ],
+      "contributors": [
+        "typescript"
+      ]
+    },
+    {
+      "id": "typescriptreact",
+      "aliases": [
+        "tsx",
+        "TypeScript JSX",
+        "TypeScript React"
+      ],
+      "extensions": [
+        ".tsx"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "typescript"
+      ]
+    },
+    {
+      "id": "vb",
+      "aliases": [
+        "vb",
+        "Visual Basic"
+      ],
+      "extensions": [
+        ".bas",
+        ".brs",
+        ".vb",
+        ".vba",
+        ".vbs"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "vb"
+      ]
+    },
+    {
+      "id": "wat",
+      "aliases": [
+        "WebAssembly Text Format"
+      ],
+      "extensions": [
+        ".wasm",
+        ".wat"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [
+        "^\\(module"
+      ],
+      "contributors": [
+        "js-debug"
+      ]
+    },
+    {
+      "id": "xml",
+      "aliases": [
+        "XML",
+        "xml"
+      ],
+      "extensions": [
+        ".ascx",
+        ".atom",
+        ".axaml",
+        ".axml",
+        ".bpmn",
+        ".cpt",
+        ".csl",
+        ".csproj",
+        ".csproj.user",
+        ".dita",
+        ".ditamap",
+        ".dtd",
+        ".dtml",
+        ".ent",
+        ".fsproj",
+        ".fxml",
+        ".iml",
+        ".isml",
+        ".jmx",
+        ".launch",
+        ".menu",
+        ".mod",
+        ".mxml",
+        ".nuspec",
+        ".opml",
+        ".owl",
+        ".proj",
+        ".props",
+        ".pt",
+        ".publishsettings",
+        ".pubxml",
+        ".pubxml.user",
+        ".rbxlx",
+        ".rbxmx",
+        ".rdf",
+        ".rng",
+        ".rss",
+        ".shproj",
+        ".slnx",
+        ".storyboard",
+        ".svg",
+        ".targets",
+        ".tld",
+        ".tmx",
+        ".vbproj",
+        ".vbproj.user",
+        ".vcxproj",
+        ".vcxproj.filters",
+        ".wixproj",
+        ".wsdl",
+        ".wxi",
+        ".wxl",
+        ".wxs",
+        ".xaml",
+        ".xbl",
+        ".xib",
+        ".xlf",
+        ".xliff",
+        ".xml",
+        ".xoml",
+        ".xpdl",
+        ".xsd",
+        ".xul"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [
+        "(\\<\\?xml.*)|(\\<svg)|(\\<\\!doctype\\s+svg)"
+      ],
+      "contributors": [
+        "xml"
+      ]
+    },
+    {
+      "id": "xsl",
+      "aliases": [
+        "XSL",
+        "xsl"
+      ],
+      "extensions": [
+        ".xsl",
+        ".xslt"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [],
+      "contributors": [
+        "xml"
+      ]
+    },
+    {
+      "id": "yaml",
+      "aliases": [
+        "YAML",
+        "yaml"
+      ],
+      "extensions": [
+        ".cff",
+        ".eyaml",
+        ".eyml",
+        ".winget",
+        ".yaml",
+        ".yaml-tmlanguage",
+        ".yaml-tmpreferences",
+        ".yaml-tmtheme",
+        ".yml"
+      ],
+      "filenames": [],
+      "filename_patterns": [],
+      "first_lines": [
+        "^#cloud-config"
+      ],
+      "contributors": [
+        "yaml"
+      ]
+    }
+  ]
+}

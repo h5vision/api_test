@@ -21,6 +21,9 @@ def test_snapshot_frontend_is_a_real_route_module():
     assert "/snapshots/status" in snapshots
     assert "/tree" in snapshots
     assert "/file?path=" in snapshots
+    assert "/snapshots/repositories/" in snapshots
+    assert "data-repository-id" in snapshots
+    assert "snapshot-show-all" in snapshots
     assert "X-Vision-Snapshot-Token" not in snapshots
     assert "SNAPSHOT_MVP_TOKEN" not in snapshots
     assert "Snapshot ???湲곕줉" not in main

@@ -9,6 +9,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .config import Settings
+from .schema_guard import SchemaStateError, require_schema
 from .schemas import (
     MetadataRecord,
     MetadataUpsertRequest,
@@ -45,86 +46,12 @@ class PostgresMetadataStore:
                 return
             try:
                 with self._connect() as connection:
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS frontend_metadata (
-                            metadata_id UUID PRIMARY KEY,
-                            project_id TEXT NOT NULL,
-                            session_id TEXT,
-                            scope TEXT NOT NULL CHECK (
-                                scope IN ('project', 'session', 'document', 'custom')
-                            ),
-                            entity_id TEXT NOT NULL,
-                            source TEXT NOT NULL,
-                            payload JSONB NOT NULL,
-                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            UNIQUE (project_id, scope, entity_id)
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_frontend_metadata_project_updated
-                        ON frontend_metadata (project_id, updated_at DESC)
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS frontend_documents (
-                            project_id TEXT NOT NULL,
-                            document_id TEXT NOT NULL,
-                            path TEXT,
-                            language TEXT,
-                            type TEXT NOT NULL,
-                            string_value TEXT,
-                            details JSONB NOT NULL DEFAULT '{}'::jsonb,
-                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            PRIMARY KEY (project_id, document_id)
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        ALTER TABLE frontend_documents
-                        ADD COLUMN IF NOT EXISTS string_value TEXT
-                        """
-                    )
-                    connection.execute(
-                        """
-                        ALTER TABLE frontend_documents
-                        ALTER COLUMN string_value DROP NOT NULL
-                        """
-                    )
-                    connection.execute(
-                        """
-                        ALTER TABLE frontend_documents
-                        ADD COLUMN IF NOT EXISTS type TEXT
-                        """
-                    )
-                    connection.execute(
-                        """
-                        ALTER TABLE frontend_documents
-                        ADD COLUMN IF NOT EXISTS details JSONB NOT NULL DEFAULT '{}'::jsonb
-                        """
-                    )
-                    connection.execute(
-                        """
-                        UPDATE frontend_documents
-                        SET type = string_value
-                        WHERE type IS NULL AND string_value IS NOT NULL
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS idx_frontend_documents_project_updated
-                        ON frontend_documents (project_id, updated_at DESC)
-                        """
-                    )
+                    require_schema(connection)
                 self._initialized = True
-            except (psycopg.Error, OSError) as exc:
-                raise MetadataStoreError("PostgreSQL metadata schema is unavailable") from exc
+            except (psycopg.Error, OSError, SchemaStateError) as exc:
+                raise MetadataStoreError(
+                    "PostgreSQL schema is not on the required Alembic baseline"
+                ) from exc
 
     @staticmethod
     def _to_record(row: dict[str, Any]) -> MetadataRecord:

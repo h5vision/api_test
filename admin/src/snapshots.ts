@@ -54,6 +54,13 @@ type SnapshotRecord = {
 };
 
 
+type SnapshotListResponse = {
+  repository_id: string;
+  snapshots: SnapshotRecord[];
+  total: number;
+};
+
+
 type SnapshotOverview = {
   status: SnapshotAdminStatus;
   repositories: RepositoryRecord[];
@@ -152,7 +159,9 @@ let adminBaseUrl = "/admin-api";
 let currentPage = 1;
 const pageSize = 50;
 let overview: SnapshotOverview | null = null;
+let repositorySnapshots: SnapshotRecord[] = [];
 let currentTree: TreeEntry[] = [];
+let selectedRepositoryId: string | null = null;
 let selectedSnapshotId: string | null = null;
 let initialized = false;
 let refreshTimer: number | null = null;
@@ -248,8 +257,9 @@ function renderStatus(status: SnapshotAdminStatus): void {
 
 
 function repositoryMarkup(repository: RepositoryRecord): string {
+  const active = selectedRepositoryId === repository.repository_id;
   return `
-    <article class="rounded-xl border border-white/7 bg-white/2 p-3">
+    <button type="button" data-repository-id="${escapeHtml(repository.repository_id)}" class="w-full rounded-xl border p-3 text-left transition ${active ? "border-mint-300/30 bg-mint-400/8" : "border-white/7 bg-white/2 hover:border-white/15 hover:bg-white/4"}">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
           <p class="truncate text-[11px] font-semibold text-white/80">${escapeHtml(repository.repository_full_name)}</p>
@@ -261,8 +271,9 @@ function repositoryMarkup(repository: RepositoryRecord): string {
         <span>${escapeHtml(repository.default_branch)}</span>
         <span>${escapeHtml(formatDate(repository.updated_at))}</span>
       </div>
-    </article>`;
+    </button>`;
 }
+
 
 
 function snapshotMarkup(snapshot: SnapshotRecord): string {
@@ -284,25 +295,43 @@ function snapshotMarkup(snapshot: SnapshotRecord): string {
 }
 
 
+function selectedRepository(): RepositoryRecord | null {
+  return overview?.repositories.find((repository) => repository.repository_id === selectedRepositoryId) || null;
+}
+
+
+function renderSnapshotRecords(): void {
+  const repository = selectedRepository();
+  const snapshots = selectedRepositoryId ? repositorySnapshots : (overview?.snapshots || []);
+  setText("snapshot-list-title", repository ? `${repository.repository_full_name} Snapshots` : "전체 Commit Snapshots");
+  setHtml(
+    "snapshot-record-list",
+    snapshots.map(snapshotMarkup).join("")
+      || `<p class="py-8 text-center text-xs text-white/30">${repository ? "이 Repository에 저장된 Snapshot이 없습니다." : "저장된 Snapshot이 없습니다."}</p>`,
+  );
+  if (repository) {
+    setText("snapshot-page-label", `${snapshots.length}개 Snapshot · ${repository.default_branch}`);
+  } else if (overview) {
+    setText("snapshot-page-label", `${overview.page} 페이지 · ${overview.total_snapshots}개 Snapshot`);
+  }
+  const previous = document.querySelector<HTMLButtonElement>("#snapshot-page-previous");
+  const next = document.querySelector<HTMLButtonElement>("#snapshot-page-next");
+  if (previous) previous.disabled = selectedRepositoryId !== null || !overview || overview.page <= 1;
+  if (next) next.disabled = selectedRepositoryId !== null || !overview || (!overview.has_more_snapshots && !overview.has_more_repositories);
+}
+
+
 function renderOverview(value: SnapshotOverview): void {
   overview = value;
   renderStatus(value.status);
   setHtml(
     "snapshot-repository-list",
     value.repositories.map(repositoryMarkup).join("")
-      || '<p class="py-8 text-center text-xs text-white/30">\uB4F1\uB85D\uB41C Repository\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.</p>',
+      || '<p class="py-8 text-center text-xs text-white/30">등록된 Repository가 없습니다.</p>',
   );
-  setHtml(
-    "snapshot-record-list",
-    value.snapshots.map(snapshotMarkup).join("")
-      || '<p class="py-8 text-center text-xs text-white/30">\uC800\uC7A5\uB41C Snapshot\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.</p>',
-  );
-  setText("snapshot-page-label", `${value.page} \uD398\uC774\uC9C0 \u00B7 ${value.total_snapshots}\uAC1C Snapshot`);
-  const previous = document.querySelector<HTMLButtonElement>("#snapshot-page-previous");
-  const next = document.querySelector<HTMLButtonElement>("#snapshot-page-next");
-  if (previous) previous.disabled = value.page <= 1;
-  if (next) next.disabled = !value.has_more_snapshots && !value.has_more_repositories;
+  renderSnapshotRecords();
 }
+
 
 
 function detailRow(label: string, value: string): string {
@@ -398,6 +427,7 @@ async function importRepositorySnapshot(event: SubmitEvent): Promise<void> {
     });
     currentPage = 1;
     await refreshAll();
+    await selectRepository(value.repository.repository_id);
     const state = value.deduplicated
       ? "\uAE30\uC874 Snapshot \uC7AC\uC0AC\uC6A9"
       : "\uC0C8 Snapshot \uB4F1\uB85D";
@@ -427,10 +457,15 @@ async function refreshAll(): Promise<void> {
   const button = document.querySelector<HTMLButtonElement>("#snapshot-page-refresh");
   if (button) button.disabled = true;
   try {
-    const [status, value] = await Promise.all([
+    const repositoryRequest = selectedRepositoryId
+      ? requestJson<SnapshotListResponse>(`/snapshots/repositories/${encodeURIComponent(selectedRepositoryId)}/snapshots?limit=500`)
+      : Promise.resolve(null);
+    const [status, value, repositoryValue] = await Promise.all([
       requestJson<SnapshotAdminStatus>("/snapshots/status"),
       requestJson<SnapshotOverview>(`/snapshots?page=${currentPage}&page_size=${pageSize}`),
+      repositoryRequest,
     ]);
+    if (repositoryValue) repositorySnapshots = repositoryValue.snapshots;
     renderStatus(status);
     renderOverview(value);
     setText("snapshot-last-refresh", `\uB9C8\uC9C0\uB9C9 \uAC31\uC2E0 ${new Date().toLocaleString("ko-KR")}`);
@@ -439,6 +474,45 @@ async function refreshAll(): Promise<void> {
   } finally {
     if (button) button.disabled = false;
   }
+}
+
+
+function clearSnapshotSelection(): void {
+  selectedSnapshotId = null;
+  currentTree = [];
+  setHtml("snapshot-detail", '<p class="text-xs text-white/30">Snapshot을 선택하세요.</p>');
+  setHtml("snapshot-tree-list", '<p class="py-8 text-center text-xs text-white/30">Snapshot을 선택하세요.</p>');
+  setText("snapshot-tree-count", "0/0");
+  setHtml("snapshot-file-content", "");
+  setText("snapshot-file-title", "파일을 선택하세요");
+  setText("snapshot-file-meta", "Tree에서 UTF-8 파일을 선택하면 내용을 표시합니다.");
+}
+
+
+async function selectRepository(repositoryId: string): Promise<void> {
+  selectedRepositoryId = repositoryId;
+  repositorySnapshots = [];
+  clearSnapshotSelection();
+  if (overview) renderOverview(overview);
+  setHtml("snapshot-record-list", '<p class="py-8 text-center text-xs text-white/30">Repository Snapshot을 조회하고 있습니다.</p>');
+  try {
+    const value = await requestJson<SnapshotListResponse>(
+      `/snapshots/repositories/${encodeURIComponent(repositoryId)}/snapshots?limit=500`,
+    );
+    repositorySnapshots = value.snapshots;
+    renderSnapshotRecords();
+  } catch (error) {
+    repositorySnapshots = [];
+    showError("snapshot-record-list", error);
+  }
+}
+
+
+function showAllSnapshots(): void {
+  selectedRepositoryId = null;
+  repositorySnapshots = [];
+  clearSnapshotSelection();
+  if (overview) renderOverview(overview);
 }
 
 
@@ -546,11 +620,11 @@ export function snapshotAdminMarkup(): string {
 
         <div class="grid gap-4 xl:grid-cols-[minmax(260px,0.8fr)_minmax(320px,1fr)]">
           <article class="panel rounded-2xl p-4">
-            <h2 class="text-sm font-semibold text-white/85">Repositories</h2>
+            <div class="flex items-center justify-between gap-3"><h2 class="text-sm font-semibold text-white/85">Repositories</h2><button id="snapshot-show-all" type="button" class="rounded-lg border border-white/10 px-2.5 py-1.5 text-[9px] text-white/50 hover:border-white/20 hover:text-white/75">전체 Snapshot</button></div>
             <div id="snapshot-repository-list" class="mt-3 max-h-[480px] space-y-2 overflow-y-auto"><p class="text-xs text-white/30">\uC870\uD68C \uC911</p></div>
           </article>
           <article class="panel rounded-2xl p-4">
-            <div class="flex items-center justify-between gap-3"><h2 class="text-sm font-semibold text-white/85">Commit Snapshots</h2><span id="snapshot-page-label" class="font-mono text-[9px] text-white/30">\uC870\uD68C \uC911</span></div>
+            <div class="flex items-center justify-between gap-3"><h2 id="snapshot-list-title" class="text-sm font-semibold text-white/85">전체 Commit Snapshots</h2><span id="snapshot-page-label" class="font-mono text-[9px] text-white/30">\uC870\uD68C \uC911</span></div>
             <div id="snapshot-record-list" class="mt-3 max-h-[480px] space-y-2 overflow-y-auto"><p class="text-xs text-white/30">\uC870\uD68C \uC911</p></div>
             <div class="mt-3 flex justify-end gap-2"><button id="snapshot-page-previous" type="button" class="rounded-lg border border-white/10 px-3 py-2 text-[10px] text-white/55 disabled:opacity-30">\uC774\uC804</button><button id="snapshot-page-next" type="button" class="rounded-lg border border-white/10 px-3 py-2 text-[10px] text-white/55 disabled:opacity-30">\uB2E4\uC74C</button></div>
           </article>
@@ -594,6 +668,12 @@ export function initializeSnapshotAdmin(value: string): void {
     currentPage += 1;
     void loadOverview();
   });
+  document.getElementById("snapshot-repository-list")?.addEventListener("click", (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-repository-id]");
+    const repositoryId = button?.dataset.repositoryId;
+    if (repositoryId) void selectRepository(repositoryId);
+  });
+  document.getElementById("snapshot-show-all")?.addEventListener("click", showAllSnapshots);
   document.getElementById("snapshot-record-list")?.addEventListener("click", (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-snapshot-id]");
     const snapshotId = button?.dataset.snapshotId;

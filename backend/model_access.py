@@ -8,6 +8,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .config import Settings
+from .schema_guard import SchemaStateError, require_schema
 
 
 class ModelAccessPolicyError(RuntimeError):
@@ -44,19 +45,11 @@ class PostgresModelAccessPolicyStore:
                 return
             try:
                 with self._connect() as connection:
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS model_access_policies (
-                            model_id TEXT PRIMARY KEY,
-                            enabled BOOLEAN NOT NULL,
-                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
+                    require_schema(connection)
                 self._initialized = True
-            except (psycopg.Error, OSError) as exc:
+            except (psycopg.Error, OSError, SchemaStateError) as exc:
                 raise ModelAccessPolicyError(
-                    "PostgreSQL model access policy store is unavailable"
+                    "PostgreSQL schema is not on the required P2 revision"
                 ) from exc
 
     def _default_enabled(self, model_id: str) -> bool:
@@ -69,8 +62,7 @@ class PostgresModelAccessPolicyStore:
         return model_id in {
             self._settings.backendai_public_model_id,
             self._settings.nvidia_public_model_id,
-            self._settings.groq_public_model_id,
-            "local-test",
+            self._settings.groq_public_model_id
         }
 
     def _load(self, *, refresh: bool = False) -> None:

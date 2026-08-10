@@ -55,6 +55,43 @@ class BackendAIStreamingTests(unittest.TestCase):
         self.assertEqual(stream.inference_protocol, "ollama")
         self.assertEqual(stream.inference_endpoint, "192.0.2.10:11500")
 
+    def test_generate_callback_uses_the_real_ollama_stream(self) -> None:
+        configured = replace(
+            settings,
+            backendai_base_url="http://192.0.2.10:11500",
+            backendai_model="",
+            backendai_public_model_id="backendai-default",
+        )
+        router = GenerationRouter(configured)
+        router.backendai_status = lambda force=False: {
+            "connected": True,
+            "models": ["auto-detected:7b"],
+        }
+        response = _FakeResponse(
+            [
+                b'{"message":{"content":"real"},"done":false}\n',
+                b'{"message":{"content":" stream"},"done":true}\n',
+            ]
+        )
+        observed: list[str] = []
+
+        with patch("backend.generation.urllib.request.urlopen", return_value=response):
+            result = router.generate(
+                "backendai-default",
+                "question",
+                [],
+                [],
+                "",
+                "__unscoped__",
+                "session",
+                request_id="req-callback",
+                delta_callback=observed.append,
+            )
+
+        self.assertEqual(observed, ["real", " stream"])
+        self.assertEqual(result.answer, "real stream")
+        self.assertEqual(result.used_model_name, "auto-detected:7b")
+
 
 if __name__ == "__main__":
     unittest.main()

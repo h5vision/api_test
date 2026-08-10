@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vision-api
+  namespace: vision
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vision-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vision-worker
+  namespace: vision
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vision-worker

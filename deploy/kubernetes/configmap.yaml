@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vision-bootstrap
+  namespace: vision
+data:
+  BACKEND_HOST: "0.0.0.0"
+  BACKEND_PORT: "8000"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "vision"
+  POSTGRES_USER: "vision"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  TASK_QUEUE_NAME: "vision:tasks:indexing"
+  TASK_CONSUMER_GROUP: "vision:tasks:indexing:workers"
+  UPLOAD_ROOT: "/shared/uploads"
+  PROJECT_DB_LOCAL_ROOT: "/shared/projects"
+  OFFLINE_EMBEDDING_ROOT: "/shared/embedding-results"
+  WORKER_HEARTBEAT_TTL_SECONDS: "45"
+  WORKER_LEASE_RENEW_SECONDS: "30"
+  WORKER_POLL_BLOCK_MS: "5000"

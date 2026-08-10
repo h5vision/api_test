@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vision-worker
+  namespace: vision
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vision-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vision-worker
+        app.kubernetes.io/part-of: vision
+    spec:
+      terminationGracePeriodSeconds: 1800
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: worker
+          image: vision-backend:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "backend.worker"]
+          envFrom:
+            - configMapRef:
+                name: vision-bootstrap
+            - secretRef:
+                name: vision-secrets
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: shared-workspace
+              mountPath: /shared
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            exec:
+              command: ["python", "-m", "backend.worker_probe"]
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            exec:
+              command: ["python", "-m", "backend.worker_probe"]
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: shared-workspace
+          persistentVolumeClaim:
+            claimName: vision-shared-workspace
+        - name: tmp
+          emptyDir: {}

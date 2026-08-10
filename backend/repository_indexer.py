@@ -13,10 +13,20 @@ from dulwich.porcelain import status as git_status
 from dulwich.repo import Repo
 
 from .config import Settings
+from .project_snapshots.contracts import (
+    canonical_snapshot_kind,
+    snapshot_fingerprint,
+    snapshot_id_from_fingerprint,
+)
 from .repository_store import PostgresRepositoryStore, RepositoryStoreError
 from .services import EmbeddingService, ServiceError
 from .text import chunk_text_with_metadata
-from .vector_store import QdrantVectorStore, SQLiteVectorStore
+from .vector_store import ManagedVectorStore
+from .vector_indexes import PostgresVectorIndexStore, VectorIndexStoreError
+from .project_vector_routes import PostgresProjectVectorRouteStore, ProjectVectorRouteStoreError
+from .snapshot_vector_bindings import (
+    PostgresSnapshotVectorBindingStore, SnapshotVectorBindingStoreError,
+)
 
 
 class RepositoryIndexingError(RuntimeError):
@@ -161,12 +171,74 @@ class RepositoryIndexer:
         settings: Settings,
         store: PostgresRepositoryStore,
         embedding_service: EmbeddingService,
-        vector_store: SQLiteVectorStore | QdrantVectorStore,
+        vector_store: ManagedVectorStore,
+        vector_index_store: PostgresVectorIndexStore | None = None,
+        snapshot_vector_binding_store: PostgresSnapshotVectorBindingStore | None = None,
+        project_vector_route_store: PostgresProjectVectorRouteStore | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
         self.embedding_service = embedding_service
         self.vector_store = vector_store
+        self.vector_index_store = vector_index_store
+        self.snapshot_vector_binding_store = snapshot_vector_binding_store
+        self.project_vector_route_store = project_vector_route_store
+
+    def _register_generation_vector_index(
+        self,
+        *,
+        project_id: str,
+        snapshot_id: str,
+        generation_id: str,
+        status: str = "building",
+    ) -> str | None:
+        if self.vector_index_store is None:
+            return None
+        if not (
+            self.settings.vector_target_id
+            and self.settings.embedding_profile_id
+            and self.settings.qdrant_collection
+            and self.settings.index_version
+        ):
+            raise RepositoryIndexingError(
+                "Persistent VectorTarget/EmbeddingProfile/index defaults are required before indexing"
+            )
+        try:
+            record = self.vector_index_store.register_generation(
+                tenant_id=self.settings.snapshot_tenant_id,
+                project_id=project_id,
+                generation_id=generation_id,
+                vector_target_id=self.settings.vector_target_id,
+                embedding_profile_id=self.settings.embedding_profile_id,
+                collection=self.settings.qdrant_collection,
+                index_version=self.settings.index_version,
+                status=status,
+            )
+            self.store.bind_generation_vector_index(
+                generation_id,
+                record.vector_index_id,
+            )
+            if self.snapshot_vector_binding_store is not None:
+                self.snapshot_vector_binding_store.register_managed_generation(
+                    snapshot_id=snapshot_id,
+                    generation_id=generation_id,
+                    vector_index_id=record.vector_index_id,
+                )
+            return record.vector_index_id
+        except (VectorIndexStoreError, SnapshotVectorBindingStoreError) as exc:
+            raise RepositoryIndexingError("Vector provenance registry write failed") from exc
+
+    def _set_generation_vector_index_status(
+        self, project_id: str, generation_id: str, status: str
+    ) -> None:
+        if self.vector_index_store is None:
+            return
+        try:
+            record = self.vector_index_store.get_generation(project_id, generation_id)
+            if record is not None:
+                self.vector_index_store.update_status(record.vector_index_id, status)
+        except VectorIndexStoreError:
+            pass
 
     def _source_root(self, relative_path: str) -> Path:
         root = self.settings.project_db_local_root.resolve()
@@ -412,8 +484,6 @@ class RepositoryIndexer:
                 content,
                 self.settings.chunk_size,
                 self.settings.chunk_overlap,
-                path=str(entry["relative_path"]),
-                language=entry.get("language"),
             )
             path_hash = hashlib.sha256(
                 entry["relative_path"].encode("utf-8")
@@ -424,14 +494,6 @@ class RepositoryIndexer:
                 "snapshot_id": snapshot_id,
             }
             for ordinal, item in enumerate(chunk_specs, start=1):
-                chunk_metadata = {
-                    **metadata,
-                    "content_type": item.get("content_type"),
-                    "path_category": item.get("path_category"),
-                    "locale": item.get("locale"),
-                    "is_translation": bool(item.get("is_translation")),
-                    "chunking_strategy": item.get("chunking_strategy"),
-                }
                 tasks.append(
                     {
                         "chunk_id": f"{path_hash}#chunk-{ordinal}",
@@ -441,7 +503,7 @@ class RepositoryIndexer:
                         "content": str(item["content"]),
                         "line_start": int(item["line_start"]),
                         "line_end": int(item["line_end"]),
-                        "metadata": chunk_metadata,
+                        "metadata": metadata,
                         "is_last": ordinal == len(chunk_specs),
                     }
                 )
@@ -534,7 +596,7 @@ class RepositoryIndexer:
             )
 
         self.store.update_job(
-            job_id, status="publishing", stage="active_generation_switch"
+            job_id, status="publishing", stage="managed_build_completion"
         )
         qdrant_count = self.vector_store.count_generation(
             source["project_id"], generation_id
@@ -546,7 +608,7 @@ class RepositoryIndexer:
                 f"expected={len(chunk_tasks)}, postgres={postgres_count}, "
                 f"qdrant={qdrant_count}"
             )
-        self.store.activate_generation(
+        completed_binding_id = self.store.complete_generation(
             source_id=source["source_id"],
             project_id=source["project_id"],
             snapshot_id=snapshot_id,
@@ -558,6 +620,21 @@ class RepositoryIndexer:
             manifest_sha256=snapshot["manifest_sha256"],
             file_count=files_processed,
             chunk_count=len(chunk_tasks),
+        )
+        if self.project_vector_route_store is not None:
+            try:
+                self.project_vector_route_store.promote_managed_binding(
+                    project_id=source["project_id"],
+                    binding_id=completed_binding_id,
+                    actor="repository_indexer",
+                    reason=f"Managed generation ready: {generation_id}",
+                )
+            except ProjectVectorRouteStoreError:
+                # Build readiness is durable even if automatic route promotion cannot
+                # complete. Admin can select the verified candidate explicitly.
+                pass
+        self._set_generation_vector_index_status(
+            source["project_id"], generation_id, "ready"
         )
         self.store.update_job(
             job_id,
@@ -585,6 +662,7 @@ class RepositoryIndexer:
             )
         except RepositoryStoreError:
             pass
+        self._set_generation_vector_index_status(project_id, generation_id, "unavailable")
         self.store.update_job(
             job_id,
             status="paused",
@@ -615,6 +693,8 @@ class RepositoryIndexer:
             )
         except RepositoryStoreError:
             pass
+        if generation_id:
+            self._set_generation_vector_index_status(project_id, generation_id, "unavailable")
         self.store.update_job(
             job_id,
             status="failed",
@@ -649,7 +729,7 @@ class RepositoryIndexer:
             source_root = self._source_root(source["root_relative_path"])
             repo = Repo(str(source_root))
             git = self._git_details(repo)
-            active = self.store.get_active_generation(source["project_id"])
+            active = self.store.get_latest_ready_generation(source["project_id"])
             if (
                 not job["force_run"]
                 and active is not None
@@ -671,7 +751,21 @@ class RepositoryIndexer:
             entries, total_bytes, manifest_sha256 = self._snapshot_entries(
                 repo, git["tree_id"]
             )
-            snapshot_id = f"snap_{git['revision'][:12]}_{uuid4().hex[:8]}"
+            snapshot_kind = canonical_snapshot_kind(
+                git["revision"], git["dirty"]
+            )
+            snapshot_id = snapshot_id_from_fingerprint(
+                snapshot_fingerprint(
+                    tenant_id=str(
+                        source.get("tenant_id")
+                        or self.settings.snapshot_tenant_id
+                    ),
+                    repository_id=str(source["source_id"]),
+                    snapshot_kind=snapshot_kind,
+                    revision=git["revision"],
+                    manifest_sha256=manifest_sha256,
+                )
+            )
             generation_id = f"gen_{uuid4().hex}"
             indexable_entries = [
                 entry for entry in entries if entry.get("indexable")
@@ -687,6 +781,12 @@ class RepositoryIndexer:
                 manifest_sha256=manifest_sha256,
                 entries=entries,
                 total_bytes=total_bytes,
+            )
+            self._register_generation_vector_index(
+                project_id=source["project_id"],
+                snapshot_id=snapshot_id,
+                generation_id=generation_id,
+                status="building",
             )
             self.store.update_job(
                 job_id,
@@ -784,6 +884,12 @@ class RepositoryIndexer:
                 raise RepositoryIndexingError(
                     "Embedding model or index version changed; start a new generation"
                 )
+            self._register_generation_vector_index(
+                project_id=source["project_id"],
+                snapshot_id=snapshot_id,
+                generation_id=generation_id,
+                status="building",
+            )
             entries = self.store.list_snapshot_indexable_entries(snapshot_id)
             chunk_tasks = self._chunk_tasks(
                 entries,

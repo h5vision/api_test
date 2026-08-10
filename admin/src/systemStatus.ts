@@ -58,6 +58,33 @@ type ConnectivityResponse = {
   backendai: AIConnectivity;
 };
 
+type PersistenceCapability = {
+  id: string;
+  role: string;
+  description: string;
+  status: "ready" | "degraded" | "unavailable";
+  table_count: number;
+  records_estimate: number | null;
+  missing_tables?: string[];
+  missing_columns?: string[];
+};
+
+type PersistenceStatusResponse = {
+  checked_at: string;
+  status: "ready" | "degraded" | "migration_required" | "revision_mismatch" | "unavailable";
+  implementation: { engine: string; schema: string };
+  schema: {
+    managed: boolean;
+    revision: string | null;
+    expected_revision: string;
+    baseline_compatible: boolean;
+    missing_tables: string[];
+    missing_columns: string[];
+  };
+  capabilities: PersistenceCapability[];
+  error: string | null;
+};
+
 type CommunicationEvent = {
   event_id: number;
   occurred_at: string;
@@ -151,6 +178,19 @@ type AIProbeResponse = {
   answer_preview: string;
 };
 
+type RuntimeMetricsResponse = {
+  checked_at: string;
+  active_requests: number;
+  queue_depth: number;
+  processing_tasks: number;
+  dead_tasks: number;
+  api_instances: number;
+  worker_instances: number;
+  worker_idle: number;
+  worker_busy: number;
+  worker_draining: number;
+};
+
 type ProviderDetails = {
   aiModel: string;
   embeddingModel: string;
@@ -167,6 +207,7 @@ const endpointStatusIds: Record<string, string> = {
   "GET /v1/indexing-jobs": "indexing",
   "POST /v1/client-heartbeat": "heartbeat",
   "POST /v1/documents/ingest": "ingest",
+  "POST /v1/snapshots/compare": "snapshot-compare",
   "POST /v1/projects/{project_id}/version/check": "version",
   "POST /v1/chat": "chat",
 };
@@ -174,8 +215,9 @@ const endpointStatusIds: Record<string, string> = {
 const channelLabels: Record<string, string> = {
   "frontend-fastapi": "Frontend ↔ FastAPI",
   "public-fastapi": "Public Client ↔ FastAPI",
-  rag: "FastAPI ↔ VectorDB",
-  "fastapi-ai": "FastAPI ↔ AI Server",
+  rag: "검색 질의 ↔ 근거 검색",
+  "fastapi-ai": "근거 조립 ↔ 모델 응답",
+  "snapshot-control": "Frontend ↔ Snapshot 비교",
 };
 
 const phaseLabels: Record<string, string> = {
@@ -184,6 +226,8 @@ const phaseLabels: Record<string, string> = {
   "rag.response": "RAG 검색 응답",
   "ai.request": "AI 추론 요청",
   "ai.response": "AI 추론 응답",
+  "snapshot.compare.request": "Snapshot 비교 요청",
+  "snapshot.compare.response": "Snapshot 비교 결과",
 };
 
 const escapeHtml = (value: unknown): string =>
@@ -216,17 +260,6 @@ const setText = (id: string, value: string): void => {
   const element = document.getElementById(id);
   if (element) element.textContent = value;
 };
-
-let allCommunicationEvents: CommunicationEvent[] = [];
-let allChatAuditLogs: ChatAuditLog[] = [];
-let allFrontendRegistrationEvents: FrontendRegistrationEvent[] = [];
-let communicationFilterQuery = "";
-let chatAuditFilterQuery = "";
-let frontendRegistrationFilterQuery = "";
-type LogSortOrder = "newest" | "oldest";
-let communicationLogSortOrder: LogSortOrder = "newest";
-let chatAuditLogSortOrder: LogSortOrder = "newest";
-let frontendRegistrationLogSortOrder: LogSortOrder = "newest";
 
 const badgeClasses: Record<BadgeTone, string> = {
   ok: "border-mint-300/20 bg-mint-400/7 text-mint-300",
@@ -304,6 +337,9 @@ function endpointRow(
   </div>`;
 }
 
+const capacityMetric = (label: string, id: string): string =>
+  `<div class="rounded-xl border border-white/7 bg-black/10 p-3"><p class="text-[9px] uppercase tracking-wider text-white/28">${escapeHtml(label)}</p><p id="${id}" class="mt-1 font-mono text-lg font-semibold text-white/78">--</p></div>`;
+
 const activityRow = (title: string, description: string, time: string): string =>
   `<div class="flex gap-3"><span class="mt-1.5 size-2 shrink-0 rounded-full bg-mint-300/80"></span><div class="min-w-0 flex-1 border-b border-white/6 pb-4 last:border-0 last:pb-0"><div class="flex items-start justify-between gap-4"><p class="text-sm text-white/72">${escapeHtml(title)}</p><time class="shrink-0 font-mono text-[10px] text-white/25">${escapeHtml(time)}</time></div><p class="mt-1 text-xs text-white/32">${escapeHtml(description)}</p></div></div>`;
 
@@ -316,14 +352,14 @@ export function systemStatusMarkup(
     <div class="mx-auto max-w-[1280px] px-4 py-5 sm:px-6 lg:px-8">
       <section class="enter space-y-3">
         <article class="panel rounded-2xl p-4">
-          ${sectionHeading("통신 경로 진단", "실제 Frontend 요청, FastAPI 처리, RAG 검색과 AI 응답을 분리해 확인합니다.")}
+          ${sectionHeading("요청 처리 경로", "클라이언트 요청, 검색 근거 생성, 모델 응답을 기능 단계별로 확인합니다.")}
           <div class="mt-3 grid gap-2 md:grid-cols-3">
-            ${flowCard("Frontend → FastAPI", "VS Code Extension → /v1/*", "flow-frontend-status", "flow-frontend-detail", "flow-frontend-request-id")}
-            ${flowCard("FastAPI → VectorDB", "BGE-M3 → Qdrant project scope", "flow-rag-status", "flow-rag-detail", "flow-rag-request-id")}
-            ${flowCard("FastAPI → AI Server", "Model Router → /api/chat 또는 Cloud", "flow-ai-status", "flow-ai-detail", "flow-ai-request-id")}
+            ${flowCard("클라이언트 요청 → API 처리", "Frontend contract → /v1/*", "flow-frontend-status", "flow-frontend-detail", "flow-frontend-request-id")}
+            ${flowCard("질문 → 검색 근거", "Embedding → project-scoped retrieval", "flow-rag-status", "flow-rag-detail", "flow-rag-request-id")}
+            ${flowCard("검색 근거 → 모델 응답", "Model routing → selected runtime", "flow-ai-status", "flow-ai-detail", "flow-ai-request-id")}
           </div>
           <div class="mt-3 flex flex-wrap items-center gap-2">
-            <button id="system-ai-probe" type="button" class="rounded-lg bg-mint-400 px-3 py-2 text-[10px] font-bold text-ink-950 transition hover:bg-mint-300 disabled:cursor-wait disabled:opacity-50">AI 실제 대화 Probe</button>
+            <button id="system-ai-probe" type="button" class="rounded-lg bg-mint-400 px-3 py-2 text-[10px] font-bold text-ink-950 transition hover:bg-mint-300 disabled:cursor-wait disabled:opacity-50">모델 응답 실제 Probe</button>
             <span id="system-ai-probe-result" class="text-[10px] text-white/35">수동 Probe는 선택된 기본 모델에 VISION_AI_OK 응답을 요청합니다.</span>
             <span id="system-log-updated" class="ml-auto font-mono text-[9px] text-white/23">로그 대기</span>
           </div>
@@ -331,27 +367,27 @@ export function systemStatusMarkup(
 
         <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           <article class="panel rounded-2xl p-4">
-            ${sectionHeading("서비스 토폴로지", "요청 경로와 내부 구성 요소")}
+            ${sectionHeading("실행 기능 구성", "요청을 처리하는 기능 계층과 역할")}
             <div class="mt-3 space-y-2">
-              ${serviceRow("Traefik", "LAN reverse proxy · :80/:8000", "상태 수집", "checking", icons.cloud)}
-              ${serviceRow("Granian + FastAPI", "ASGI · port 8000", "확인 중", "checking", icons.pulse, "api-service-status")}
-              ${serviceRow("AI Model", "Model routing · /v1/chat", "확인 중", "checking", icons.cube, "ai-service-status")}
-              ${serviceRow("Vector Store", "Project scoped", "확인 중", "checking", icons.database, "vector-service-status")}
-              ${serviceRow("PostgreSQL · Qdrant · Redis", "Docker internal network", "상태 수집", "idle", icons.database)}
+              ${serviceRow("요청 진입 · 라우팅", "reverse proxy · edge routing", "상태 수집", "checking", icons.cloud)}
+              ${serviceRow("API 요청 처리", "ASGI application · public contract", "확인 중", "checking", icons.pulse, "api-service-status")}
+              ${serviceRow("모델 실행 · 라우팅", "selected runtime · /v1/chat", "확인 중", "checking", icons.cube, "ai-service-status")}
+              ${serviceRow("벡터 검색", "project-scoped retrieval", "확인 중", "checking", icons.database, "vector-service-status")}
+              ${serviceRow("데이터 · 검색 · 작업 상태", "persistence · retrieval · coordination", "상태 수집", "idle", icons.database)}
             </div>
           </article>
           <article class="panel rounded-2xl p-4">
-            ${sectionHeading("Provider 구성", "API가 공개한 안전한 설정 정보")}
+            ${sectionHeading("실행 구성", "현재 선택된 모델·임베딩·검색 구현 정보")}
             <dl class="mt-3 divide-y divide-white/7">
-              ${detailRow("AI model", "ai-model")}
-              ${detailRow("Embedding", "embedding-model")}
-              ${detailRow("Vector DB", "vector-provider")}
-              ${detailRow("Backend version", "backend-version")}
+              ${detailRow("기본 모델", "ai-model")}
+              ${detailRow("임베딩 모델", "embedding-model")}
+              ${detailRow("검색 엔진", "vector-provider")}
+              ${detailRow("API 버전", "backend-version")}
             </dl>
             <p class="mt-3 text-[9px] leading-4 text-white/25">일반 통신 로그에는 본문을 저장하지 않습니다. 별도 Chat 감사 로그에는 질문·답변만 제한적으로 보관하며 Context, History 본문과 API Key는 저장하지 않습니다.</p>
           </article>
           <article class="panel rounded-2xl p-4">
-            ${sectionHeading("API Endpoint", "Frontend 팀 공개 계약")}
+            ${sectionHeading("공개 기능 계약", "Frontend가 사용하는 API 기능과 최근 처리 상태")}
             <div class="mt-3 max-h-[410px] space-y-1.5 overflow-y-auto pr-1 font-mono text-xs">
               ${endpointRow("GET", "/v1/health", "상태", "health")}
               ${endpointRow("GET", "/v1/models", "정확한 모델명", "models")}
@@ -359,6 +395,7 @@ export function systemStatusMarkup(
               ${endpointRow("GET", "/v1/indexing-jobs", "Vector화 상태", "indexing")}
               ${endpointRow("POST", "/v1/client-heartbeat", "Frontend 연결", "heartbeat")}
               ${endpointRow("POST", "/v1/documents/ingest", "인덱싱", "ingest")}
+              ${endpointRow("POST", "/v1/snapshots/compare", "Snapshot 비교", "snapshot-compare")}
               ${endpointRow("POST", "/v1/projects/{project_id}/version/check", "버전 비교", "version")}
               ${endpointRow("POST", "/v1/chat", "RAG 채팅", "chat")}
             </div>
@@ -368,17 +405,33 @@ export function systemStatusMarkup(
         </div>
 
         <article class="panel rounded-2xl p-4">
-          ${sectionHeading("요청 · 응답 통신 로그", "request_id로 Frontend API, RAG, AI 추론 단계를 추적합니다.", logRefreshAction)}
-          <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <label class="flex min-w-[240px] items-center gap-2 text-[10px] text-white/35">
-              <span>필터</span>
-              <input id="communication-log-filter" type="search" placeholder="경로 · 상태 · Client · 모델 · 오류 검색" class="w-full min-w-[220px] rounded-lg border border-white/8 bg-black/15 px-2.5 py-1.5 text-[10px] text-white/70 outline-none" />
-            </label>
-            <div class="flex items-center gap-2">
-              <label class="flex items-center gap-1.5 text-[10px] text-white/35"><span>정렬</span><select id="communication-log-sort" class="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5 text-[10px] text-white/70 outline-none"><option value="newest">최신순</option><option value="oldest">오래된순</option></select></label>
-              <span id="communication-log-filter-count" class="font-mono text-[9px] text-white/23">0건</span>
-            </div>
+          ${sectionHeading("영속 데이터 기능 상태", "현재 데이터 계층이 어떤 제품 역할을 보존하는지와 migration 소유 상태를 확인합니다.")}
+          <div class="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-white/7 bg-black/10 px-3 py-2">
+            <span id="system-persistence-badge" class="rounded-full border border-white/10 bg-white/4 px-2.5 py-1 text-[9px] text-white/42">확인 중</span>
+            <span id="system-persistence-revision" class="font-mono text-[9px] text-white/35">schema revision 확인 중</span>
+            <span id="system-persistence-engine" class="ml-auto font-mono text-[9px] text-white/25">implementation 확인 중</span>
           </div>
+          <div id="system-persistence-capabilities" class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-live="polite">
+            <p class="rounded-xl border border-white/7 bg-black/10 p-3 text-xs text-white/30 sm:col-span-2 xl:col-span-4">영속 데이터 기능을 조회하고 있습니다.</p>
+          </div>
+        </article>
+
+        <article class="panel rounded-2xl p-4">
+          ${sectionHeading("작업 처리 용량", "공유 작업 큐와 수평 확장 Worker 상태를 역할 기준으로 확인합니다.")}
+          <div class="mt-3 grid gap-2 grid-cols-2 sm:grid-cols-3 xl:grid-cols-7">
+            ${capacityMetric("Worker", "worker-total")}
+            ${capacityMetric("처리 중", "worker-busy")}
+            ${capacityMetric("대기", "worker-idle")}
+            ${capacityMetric("종료 준비", "worker-draining")}
+            ${capacityMetric("큐 대기", "worker-queue-depth")}
+            ${capacityMetric("작업 중", "worker-processing")}
+            ${capacityMetric("실패 보관", "worker-dead")}
+          </div>
+          <p id="worker-capacity-updated" class="mt-2 font-mono text-[9px] text-white/23">작업 처리 용량 조회 대기</p>
+        </article>
+
+        <article class="panel rounded-2xl p-4">
+          ${sectionHeading("요청 · 응답 통신 로그", "request_id로 Frontend API, RAG, AI 추론 단계를 추적합니다.", logRefreshAction)}
           <div class="mt-3 overflow-x-auto rounded-xl border border-white/6">
             <table class="w-full min-w-[920px] border-collapse text-left">
               <thead class="bg-black/15 text-[9px] uppercase tracking-wider text-white/28">
@@ -396,21 +449,11 @@ export function systemStatusMarkup(
               </tbody>
             </table>
           </div>
-          <p class="mt-2 text-[9px] text-white/23">최근 7일 로그를 PostgreSQL에 보관하며 화면에는 최근 60개를 표시합니다.</p>
+          <p class="mt-2 text-[9px] text-white/23">최근 7일 로그를 영속 감사 저장소에 보관하며 화면에는 최근 60개를 표시합니다.</p>
         </article>
 
         <article class="panel rounded-2xl p-4">
-          ${sectionHeading("Frontend 최초 연결 · ID 등록 로그", "첫 Chat에서 Client를 식별하고 서버 ID를 발급한 과정을 추적합니다.")}
-          <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <label class="flex min-w-[240px] items-center gap-2 text-[10px] text-white/35">
-              <span>필터</span>
-              <input id="frontend-registration-log-filter" type="search" placeholder="Client · 사용자 · IP · 등록 결과 검색" class="w-full min-w-[220px] rounded-lg border border-white/8 bg-black/15 px-2.5 py-1.5 text-[10px] text-white/70 outline-none" />
-            </label>
-            <div class="flex items-center gap-2">
-              <label class="flex items-center gap-1.5 text-[10px] text-white/35"><span>정렬</span><select id="frontend-registration-log-sort" class="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5 text-[10px] text-white/70 outline-none"><option value="newest">최신순</option><option value="oldest">오래된순</option></select></label>
-              <span id="frontend-registration-log-filter-count" class="font-mono text-[9px] text-white/23">0건</span>
-            </div>
-          </div>
+          ${sectionHeading("클라이언트 등록 · 식별 로그", "첫 요청에서 Client를 식별하고 설치별 ID를 부여한 과정을 추적합니다.")}
           <div class="mt-3 overflow-x-auto rounded-xl border border-white/6">
             <table class="w-full min-w-[1080px] border-collapse text-left">
               <thead class="bg-black/15 text-[9px] uppercase tracking-wider text-white/28">
@@ -432,17 +475,7 @@ export function systemStatusMarkup(
         </article>
 
         <article class="panel rounded-2xl p-4">
-          ${sectionHeading("Frontend Chat 감사 로그", "Frontend 질문과 AI 답변을 관리자 전용으로 확인합니다.")}
-          <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <label class="flex min-w-[240px] items-center gap-2 text-[10px] text-white/35">
-              <span>필터</span>
-              <input id="chat-audit-log-filter" type="search" placeholder="질문 · 답변 · Project · 모델 · 상태 검색" class="w-full min-w-[220px] rounded-lg border border-white/8 bg-black/15 px-2.5 py-1.5 text-[10px] text-white/70 outline-none" />
-            </label>
-            <div class="flex items-center gap-2">
-              <label class="flex items-center gap-1.5 text-[10px] text-white/35"><span>정렬</span><select id="chat-audit-log-sort" class="rounded-lg border border-white/8 bg-black/15 px-2 py-1.5 text-[10px] text-white/70 outline-none"><option value="newest">최신순</option><option value="oldest">오래된순</option></select></label>
-              <span id="chat-audit-log-filter-count" class="font-mono text-[9px] text-white/23">0건</span>
-            </div>
-          </div>
+          ${sectionHeading("대화 요청 · 응답 감사 로그", "질문과 모델 응답을 관리자 전용 감사 기록으로 확인합니다.")}
           <div class="mt-3 overflow-x-auto rounded-xl border border-white/6">
             <table class="w-full min-w-[1120px] border-collapse text-left">
               <thead class="bg-black/15 text-[9px] uppercase tracking-wider text-white/28">
@@ -464,7 +497,7 @@ export function systemStatusMarkup(
         </article>
 
         <article class="panel rounded-2xl p-4">
-          ${sectionHeading("상태 이벤트", "이 브라우저에서 확인한 최근 기록")}
+          ${sectionHeading("관리 화면 상태 이벤트", "이 브라우저에서 확인한 최근 운영 기록")}
           <div class="mt-3 space-y-3" id="activity-list" aria-live="polite">${activityRow("시스템 상태 화면이 시작되었습니다", "통신 상태 확인을 준비합니다.", "방금")}</div>
         </article>
       </section>
@@ -588,6 +621,15 @@ function communicationLogRow(event: CommunicationEvent): string {
     : phaseLabels[event.phase] || event.phase;
   const client = [event.project_id, event.client_id].filter(Boolean).join(" · ") || "--";
   const provider = [event.provider, event.model].filter(Boolean).join(" · ") || "--";
+  const snapshotDetails = event.channel === "snapshot-control"
+    ? [
+      typeof event.details.comparison === "string" ? event.details.comparison.toUpperCase() : null,
+      event.details.update_warning === true ? "갱신 경고" : null,
+      typeof event.details.baseline_snapshot_id === "string"
+        ? `기준 ${event.details.baseline_snapshot_id}`
+        : null,
+    ].filter(Boolean).join(" · ")
+    : "";
   const metrics = [
     event.duration_ms !== null ? formatDuration(event.duration_ms) : null,
     event.source_count !== null ? `sources ${event.source_count}` : null,
@@ -605,124 +647,17 @@ function communicationLogRow(event: CommunicationEvent): string {
       ${error}
     </td>
     <td class="max-w-[220px] px-3 py-2.5"><p class="truncate text-[10px] text-white/48" title="${escapeHtml(client)}">${escapeHtml(client)}</p></td>
-    <td class="max-w-[220px] px-3 py-2.5"><p class="truncate text-[10px] text-white/48" title="${escapeHtml(provider)}">${escapeHtml(provider)}</p></td>
+    <td class="max-w-[220px] px-3 py-2.5"><p class="truncate text-[10px] text-white/48" title="${escapeHtml(provider)}">${escapeHtml(provider)}</p>${snapshotDetails ? `<p class="mt-1 truncate font-mono text-[9px] text-amber-300/65" title="${escapeHtml(snapshotDetails)}">${escapeHtml(snapshotDetails)}</p>` : ""}</td>
     <td class="max-w-[220px] px-3 py-2.5"><p class="truncate font-mono text-[9px] text-white/30" title="${escapeHtml(event.request_id)}">${escapeHtml(event.request_id)}</p></td>
   </tr>`;
-}
-
-function normalizeFilterQuery(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-function matchesFilter(values: unknown[], query: string): boolean {
-  const terms = normalizeFilterQuery(query).split(/\s+/).filter(Boolean);
-  if (terms.length === 0) return true;
-  const haystack = values
-    .filter((value) => value !== null && value !== undefined)
-    .map((value) => typeof value === "string" ? value : String(value))
-    .join(" ")
-    .toLowerCase();
-  return terms.every((term) => haystack.includes(term));
-}
-
-function detailsSearchText(details: Record<string, unknown>): string {
-  try {
-    return JSON.stringify(details);
-  } catch {
-    return "";
-  }
-}
-
-function sortByOccurredAt<T>(
-  values: T[],
-  getTimestamp: (value: T) => string | null,
-  order: LogSortOrder,
-): T[] {
-  const factor = order === "newest" ? -1 : 1;
-  return [...values].sort((left, right) => {
-    const leftTime = Date.parse(getTimestamp(left) || "");
-    const rightTime = Date.parse(getTimestamp(right) || "");
-    const normalizedLeft = Number.isNaN(leftTime) ? 0 : leftTime;
-    const normalizedRight = Number.isNaN(rightTime) ? 0 : rightTime;
-    return (normalizedLeft - normalizedRight) * factor;
-  });
-}
-
-function filterCommunicationEvents(events: CommunicationEvent[], query: string): CommunicationEvent[] {
-  return events.filter((event) => {
-    return matchesFilter([
-      channelLabels[event.channel] || event.channel,
-      phaseLabels[event.phase] || event.phase,
-      event.status,
-      event.method,
-      event.path,
-      event.project_id,
-      event.client_id,
-      event.provider,
-      event.model,
-      event.error,
-      event.request_id,
-      event.status_code,
-      event.duration_ms,
-      event.source_count,
-      event.direction,
-      detailsSearchText(event.details),
-    ], query);
-  });
-}
-
-function filterChatAuditLogs(logs: ChatAuditLog[], query: string): ChatAuditLog[] {
-  return logs.filter((log) => {
-    return matchesFilter([
-      log.status,
-      log.status_code,
-      log.project_id,
-      log.session_id,
-      log.client_id,
-      log.message,
-      log.answer,
-      log.error,
-      log.provider,
-      log.requested_model_id,
-      log.used_model_id,
-      log.source_count,
-      log.duration_ms,
-      log.context_chars,
-      log.history_count,
-      log.request_id,
-    ], query);
-  });
-}
-
-function filterFrontendRegistrationEvents(events: FrontendRegistrationEvent[], query: string): FrontendRegistrationEvent[] {
-  return events.filter((event) => {
-    return matchesFilter([
-      registrationEventLabels[event.event_type] || event.event_type,
-      event.status,
-      event.client_name,
-      event.declared_user,
-      event.client_id,
-      event.instance_id,
-      event.source_ip,
-      event.client_version,
-      event.reason,
-      event.registration_type,
-      event.identification_method,
-      event.is_first_connection ? "first first_connection 최초 연결 신규 id" : "existing 기존 등록",
-      event.request_id,
-    ], query);
-  });
 }
 
 function renderCommunicationLogs(events: CommunicationEvent[]): void {
   const list = document.getElementById("communication-log-list");
   if (!list) return;
-  const filtered = filterCommunicationEvents(events, communicationFilterQuery);
-  const sorted = sortByOccurredAt(filtered, (event) => event.occurred_at, communicationLogSortOrder);
-  list.innerHTML = sorted.length > 0
-    ? sorted.map(communicationLogRow).join("")
-    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">조건에 맞는 로그가 없습니다.</td></tr>';
-  setText("communication-log-filter-count", `${filtered.length}/${events.length}건`);
+  list.innerHTML = events.length > 0
+    ? events.map(communicationLogRow).join("")
+    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">아직 기록된 통신 로그가 없습니다.</td></tr>';
 }
 
 function chatAuditContent(
@@ -792,15 +727,11 @@ function renderChatAuditLogs(logs: ChatAuditLog[], error?: string): void {
   if (!list) return;
   if (error) {
     list.innerHTML = `<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-danger-300">Chat 감사 로그 조회 실패 · ${escapeHtml(error)}</td></tr>`;
-    setText("chat-audit-log-filter-count", "0건");
     return;
   }
-  const filtered = filterChatAuditLogs(logs, chatAuditFilterQuery);
-  const sorted = sortByOccurredAt(filtered, (log) => log.received_at, chatAuditLogSortOrder);
-  list.innerHTML = sorted.length > 0
-    ? sorted.map(chatAuditLogRow).join("")
-    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">조건에 맞는 Chat 요청이 없습니다.</td></tr>';
-  setText("chat-audit-log-filter-count", `${filtered.length}/${logs.length}건`);
+  list.innerHTML = logs.length > 0
+    ? logs.map(chatAuditLogRow).join("")
+    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">아직 기록된 Chat 요청이 없습니다.</td></tr>';
 }
 
 const registrationEventLabels: Record<string, string> = {
@@ -857,15 +788,11 @@ function renderFrontendRegistrationLogs(
   if (!list) return;
   if (error) {
     list.innerHTML = `<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-danger-300">Frontend 등록 로그 조회 실패 · ${escapeHtml(error)}</td></tr>`;
-    setText("frontend-registration-log-filter-count", "0건");
     return;
   }
-  const filtered = filterFrontendRegistrationEvents(events, frontendRegistrationFilterQuery);
-  const sorted = sortByOccurredAt(filtered, (event) => event.occurred_at, frontendRegistrationLogSortOrder);
-  list.innerHTML = sorted.length > 0
-    ? sorted.map(frontendRegistrationLogRow).join("")
-    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">조건에 맞는 최초 연결 로그가 없습니다.</td></tr>';
-  setText("frontend-registration-log-filter-count", `${filtered.length}/${events.length}건`);
+  list.innerHTML = events.length > 0
+    ? events.map(frontendRegistrationLogRow).join("")
+    : '<tr><td colspan="6" class="px-3 py-8 text-center text-xs text-white/30">아직 기록된 최초 연결 시도가 없습니다.</td></tr>';
 }
 
 function latestEvent(
@@ -955,10 +882,10 @@ function applyFlowStatuses(
           ? "대화 응답 경고"
           : "대화 응답 실패"
       : ai.status === "online"
-        ? "BackendAI 모델 탐색 성공"
+        ? "기본 모델 카탈로그 확인"
         : ai.status === "degraded"
-          ? "BackendAI 모델 확인 필요"
-          : "BackendAI 연결 실패",
+          ? "기본 모델 확인 필요"
+          : "기본 모델 실행 대상 응답 없음",
     aiTone,
   );
   setText(
@@ -969,7 +896,7 @@ function applyFlowStatuses(
         : `${aiResponse.provider || "provider"} · ${aiResponse.model || ai.model} · ${formatDuration(aiResponse.duration_ms)}`
       : ai.model_available
         ? `${ai.model} · 모델 목록 응답 ${ai.latency_ms}ms · 실제 대화 Probe 대기`
-        : `${ai.error || "AI Server 응답 없음"} · ${ai.model}`,
+        : `${ai.error || "모델 실행 대상 응답 없음"} · ${ai.model}`,
   );
   setText("flow-ai-request-id", `request_id ${aiResponse?.request_id || "--"}`);
 }
@@ -1011,9 +938,8 @@ export async function loadSystemCommunicationLogs(
     }
     const connectivity = (await connectivityResult.value.json()) as ConnectivityResponse;
     const logs = (await logsResult.value.json()) as CommunicationEventListResponse;
-    allCommunicationEvents = logs.events;
-    renderCommunicationLogs(allCommunicationEvents);
-    applyFlowStatuses(connectivity, allCommunicationEvents);
+    renderCommunicationLogs(logs.events);
+    applyFlowStatuses(connectivity, logs.events);
 
     if (chatAuditResult.status === "rejected") {
       const auditError = chatAuditResult.reason instanceof Error
@@ -1024,8 +950,7 @@ export async function loadSystemCommunicationLogs(
       renderChatAuditLogs([], `HTTP ${chatAuditResult.value.status}`);
     } else {
       const chatAudit = (await chatAuditResult.value.json()) as ChatAuditLogListResponse;
-      allChatAuditLogs = chatAudit.logs;
-      renderChatAuditLogs(allChatAuditLogs);
+      renderChatAuditLogs(chatAudit.logs);
       setText(
         "chat-audit-log-policy",
         `질문·답변은 최근 ${chatAudit.retention_days}일, 항목별 최대 ${chatAudit.content_limit_chars.toLocaleString("ko-KR")}자로 보관합니다. Context와 History는 크기·개수만 기록합니다.`,
@@ -1043,8 +968,7 @@ export async function loadSystemCommunicationLogs(
       const registrationLogs = (
         await registrationResult.value.json()
       ) as FrontendRegistrationEventListResponse;
-      allFrontendRegistrationEvents = registrationLogs.events;
-      renderFrontendRegistrationLogs(allFrontendRegistrationEvents);
+      renderFrontendRegistrationLogs(registrationLogs.events);
     }
 
     setText(
@@ -1061,6 +985,101 @@ export async function loadSystemCommunicationLogs(
     setBadge("flow-ai-status", "조회 실패", "error");
     setText("system-log-updated", `로그 조회 실패 · ${message}`);
     addSystemStatusEvent("통신 로그 조회 실패", message);
+  }
+}
+
+function persistenceCapabilityTone(status: PersistenceCapability["status"]): string {
+  if (status === "ready") return "border-mint-300/15 bg-mint-400/5 text-mint-300";
+  if (status === "degraded") return "border-amber-300/15 bg-amber-300/5 text-amber-300";
+  return "border-danger-300/15 bg-danger-300/5 text-danger-300";
+}
+
+export async function loadSystemPersistenceStatus(adminApiBaseUrl: string): Promise<void> {
+  const target = document.getElementById("system-persistence-capabilities");
+  if (!target) return;
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/persistence-status`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = (await response.json()) as PersistenceStatusResponse;
+    const ready = value.status === "ready";
+    setBadge(
+      "system-persistence-badge",
+      ready
+        ? "기능 준비됨"
+        : value.status === "migration_required"
+          ? "Migration 필요"
+          : value.status === "revision_mismatch"
+            ? "Revision 확인"
+            : value.status === "degraded"
+              ? "구조 확인 필요"
+              : "연결 불가",
+      ready ? "ok" : value.status === "unavailable" ? "error" : "warning",
+    );
+    setText(
+      "system-persistence-revision",
+      `schema ${value.schema.revision || "unmanaged"} · expected ${value.schema.expected_revision}`,
+    );
+    setText(
+      "system-persistence-engine",
+      `implementation ${value.implementation.engine} · ${value.implementation.schema}`,
+    );
+    target.innerHTML = value.capabilities.map((capability) => {
+      const count = capability.records_estimate === null
+        ? "기록 수 확인 불가"
+        : `약 ${capability.records_estimate.toLocaleString("ko-KR")} records`;
+      const issueCount = (capability.missing_tables?.length || 0) + (capability.missing_columns?.length || 0);
+      return `<article class="rounded-xl border border-white/7 bg-black/10 p-3">
+        <div class="flex items-start justify-between gap-2">
+          <h3 class="text-[11px] font-semibold text-white/72">${escapeHtml(capability.role)}</h3>
+          <span class="rounded-full border px-2 py-0.5 text-[9px] ${persistenceCapabilityTone(capability.status)}">${capability.status === "ready" ? "준비됨" : capability.status === "degraded" ? `확인 ${issueCount}` : "사용 불가"}</span>
+        </div>
+        <p class="mt-1.5 text-[10px] leading-4 text-white/35">${escapeHtml(capability.description)}</p>
+        <p class="mt-2 font-mono text-[9px] text-white/25">${capability.table_count} storage units · ${count}</p>
+      </article>`;
+    }).join("");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    setBadge("system-persistence-badge", "조회 실패", "error");
+    setText("system-persistence-revision", "schema 조회 실패");
+    setText("system-persistence-engine", message);
+    target.innerHTML = `<p class="rounded-xl border border-danger-300/15 bg-danger-300/5 p-3 text-xs text-danger-300">영속 데이터 기능 상태 조회 실패 · ${escapeHtml(message)}</p>`;
+  }
+}
+
+export async function loadSystemWorkerCapacity(adminApiBaseUrl: string): Promise<void> {
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/runtime-metrics`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = (await response.json()) as RuntimeMetricsResponse;
+    setText("worker-total", String(value.worker_instances));
+    setText("worker-busy", String(value.worker_busy));
+    setText("worker-idle", String(value.worker_idle));
+    setText("worker-draining", String(value.worker_draining));
+    setText("worker-queue-depth", String(value.queue_depth));
+    setText("worker-processing", String(value.processing_tasks));
+    setText("worker-dead", String(value.dead_tasks));
+    setText(
+      "worker-capacity-updated",
+      `확인 ${formatDateTime(value.checked_at)} · API replicas ${value.api_instances}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    for (const id of [
+      "worker-total",
+      "worker-busy",
+      "worker-idle",
+      "worker-draining",
+      "worker-queue-depth",
+      "worker-processing",
+      "worker-dead",
+    ]) setText(id, "--");
+    setText("worker-capacity-updated", `작업 처리 용량 조회 실패 · ${message}`);
   }
 }
 
@@ -1098,17 +1117,17 @@ async function runAIProbe(adminApiBaseUrl: string): Promise<void> {
     );
     setText("flow-ai-request-id", `request_id ${probe.request_id}`);
     addSystemStatusEvent(
-      exact ? "AI 실제 대화 Probe 성공" : "AI 응답 형식 경고",
+      exact ? "모델 응답 실제 Probe 성공" : "AI 응답 형식 경고",
       `${probe.model} · ${formatDuration(probe.latency_ms)} · ${probe.request_id}`,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "알 수 없는 오류";
     setBadge("flow-ai-status", "대화 Probe 실패", "error");
     setText("system-ai-probe-result", message);
-    addSystemStatusEvent("AI 실제 대화 Probe 실패", message);
+    addSystemStatusEvent("모델 응답 실제 Probe 실패", message);
   } finally {
     button.disabled = false;
-    button.textContent = "AI 실제 대화 Probe";
+    button.textContent = "모델 응답 실제 Probe";
     await loadSystemCommunicationLogs(adminApiBaseUrl);
   }
 }
@@ -1126,58 +1145,8 @@ export function initializeSystemStatus(adminApiBaseUrl: string): void {
       void Promise.allSettled([
         loadSystemEndpointActivity(adminApiBaseUrl),
         loadSystemCommunicationLogs(adminApiBaseUrl),
+        loadSystemPersistenceStatus(adminApiBaseUrl),
       ]);
-    });
-  }
-
-  const communicationFilter = document.getElementById("communication-log-filter") as HTMLInputElement | null;
-  if (communicationFilter && communicationFilter.dataset.bound !== "true") {
-    communicationFilter.dataset.bound = "true";
-    communicationFilter.addEventListener("input", () => {
-      communicationFilterQuery = normalizeFilterQuery(communicationFilter.value);
-      renderCommunicationLogs(allCommunicationEvents);
-    });
-  }
-  const communicationSort = document.getElementById("communication-log-sort") as HTMLSelectElement | null;
-  if (communicationSort && communicationSort.dataset.bound !== "true") {
-    communicationSort.dataset.bound = "true";
-    communicationSort.addEventListener("change", () => {
-      communicationLogSortOrder = communicationSort.value === "oldest" ? "oldest" : "newest";
-      renderCommunicationLogs(allCommunicationEvents);
-    });
-  }
-
-  const registrationFilter = document.getElementById("frontend-registration-log-filter") as HTMLInputElement | null;
-  if (registrationFilter && registrationFilter.dataset.bound !== "true") {
-    registrationFilter.dataset.bound = "true";
-    registrationFilter.addEventListener("input", () => {
-      frontendRegistrationFilterQuery = normalizeFilterQuery(registrationFilter.value);
-      renderFrontendRegistrationLogs(allFrontendRegistrationEvents);
-    });
-  }
-  const registrationSort = document.getElementById("frontend-registration-log-sort") as HTMLSelectElement | null;
-  if (registrationSort && registrationSort.dataset.bound !== "true") {
-    registrationSort.dataset.bound = "true";
-    registrationSort.addEventListener("change", () => {
-      frontendRegistrationLogSortOrder = registrationSort.value === "oldest" ? "oldest" : "newest";
-      renderFrontendRegistrationLogs(allFrontendRegistrationEvents);
-    });
-  }
-
-  const chatFilter = document.getElementById("chat-audit-log-filter") as HTMLInputElement | null;
-  if (chatFilter && chatFilter.dataset.bound !== "true") {
-    chatFilter.dataset.bound = "true";
-    chatFilter.addEventListener("input", () => {
-      chatAuditFilterQuery = normalizeFilterQuery(chatFilter.value);
-      renderChatAuditLogs(allChatAuditLogs);
-    });
-  }
-  const chatSort = document.getElementById("chat-audit-log-sort") as HTMLSelectElement | null;
-  if (chatSort && chatSort.dataset.bound !== "true") {
-    chatSort.dataset.bound = "true";
-    chatSort.addEventListener("change", () => {
-      chatAuditLogSortOrder = chatSort.value === "oldest" ? "oldest" : "newest";
-      renderChatAuditLogs(allChatAuditLogs);
     });
   }
 }

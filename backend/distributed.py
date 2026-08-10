@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import time
@@ -8,7 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from redis import Redis
-from redis.exceptions import RedisError
+from redis.exceptions import LockError, RedisError
 
 from .config import Settings
 
@@ -31,10 +32,12 @@ class RedisCoordinator:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.stream = settings.task_queue_name
-        self.group = f"{self.stream}:workers"
+        self.group = settings.task_consumer_group or f"{self.stream}:workers"
         self.processing_key = f"{self.stream}:processing"
         self.dedupe_prefix = f"{self.stream}:dedupe:"
         self.metrics_prefix = "vision:metrics"
+        self.lock_prefix = "vision:locks"
+        self.worker_prefix = f"{self.metrics_prefix}:workers"
         self.client = Redis(
             host=settings.redis_host,
             port=settings.redis_port,
@@ -46,11 +49,169 @@ class RedisCoordinator:
             health_check_interval=30,
         )
 
+
+    @contextmanager
+    def lock(
+        self,
+        name: str,
+        *,
+        timeout_seconds: int = 900,
+        blocking_timeout_seconds: int = 30,
+    ):
+        """Cross-replica mutex used for shared filesystem state transitions.
+
+        Kubernetes/API replicas must never rely on process-local locks for shared
+        upload state.  The lock key is infrastructure-neutral and remains valid
+        whether workers run under Compose, Kubernetes, or another orchestrator.
+        """
+        normalized = name.strip().replace(" ", "_")
+        if not normalized:
+            raise ValueError("lock name must not be blank")
+        lock = self.client.lock(
+            f"{self.lock_prefix}:{normalized}",
+            timeout=max(5, int(timeout_seconds)),
+            blocking_timeout=max(0, int(blocking_timeout_seconds)),
+            thread_local=False,
+        )
+        try:
+            acquired = bool(lock.acquire(blocking=True))
+        except RedisError as exc:
+            raise DistributedStateError("Distributed lock acquisition failed") from exc
+        if not acquired:
+            raise DistributedStateError(f"Distributed lock timeout: {normalized}")
+        try:
+            yield
+        finally:
+            try:
+                lock.release()
+            except (RedisError, LockError):
+                # Expired locks must not mask the operation result.  State writes
+                # use atomic replace semantics and the next operation will re-read.
+                pass
+
+    def worker_heartbeat(
+        self,
+        consumer: str,
+        *,
+        status: str,
+        task: QueuedTask | None = None,
+        ttl_seconds: int = 45,
+    ) -> None:
+        payload = {
+            "consumer": consumer,
+            "status": status,
+            "task_id": task.message_id if task else None,
+            "task_kind": task.kind if task else None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self.client.set(
+                f"{self.worker_prefix}:{consumer}",
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                ex=max(10, int(ttl_seconds)),
+            )
+        except RedisError as exc:
+            raise DistributedStateError("Worker heartbeat update failed") from exc
+
+    def worker_forget(self, consumer: str) -> None:
+        try:
+            self.client.delete(f"{self.worker_prefix}:{consumer}")
+        except RedisError as exc:
+            raise DistributedStateError("Worker heartbeat cleanup failed") from exc
+
+    def worker_state(self, consumer: str) -> dict[str, Any] | None:
+        try:
+            raw = self.client.get(f"{self.worker_prefix}:{consumer}")
+        except RedisError as exc:
+            raise DistributedStateError("Worker heartbeat lookup failed") from exc
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
+
+    def workers_snapshot(self) -> dict[str, Any]:
+        workers: list[dict[str, Any]] = []
+        try:
+            for key in self.client.scan_iter(match=f"{self.worker_prefix}:*"):
+                raw = self.client.get(key)
+                if not raw:
+                    continue
+                try:
+                    value = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict):
+                    workers.append(value)
+        except RedisError as exc:
+            raise DistributedStateError("Worker heartbeat lookup failed") from exc
+        workers.sort(key=lambda row: str(row.get("consumer") or ""))
+        return {
+            "total": len(workers),
+            "idle": sum(1 for row in workers if row.get("status") == "idle"),
+            "busy": sum(1 for row in workers if row.get("status") == "busy"),
+            "draining": sum(1 for row in workers if row.get("status") == "draining"),
+            "workers": workers,
+        }
+
     def ping(self) -> bool:
         try:
             return bool(self.client.ping())
         except RedisError as exc:
             raise DistributedStateError("Redis is unavailable") from exc
+
+    def set_ephemeral_json(
+        self,
+        namespace: str,
+        key: str,
+        value: dict[str, Any],
+        *,
+        ttl_seconds: int,
+    ) -> None:
+        """Store short-lived cross-replica API state.
+
+        Chat Context and completed Chat results must be visible from every API
+        replica, but they are request-adjacent state rather than durable project
+        records. Redis TTLs make that lifecycle explicit.
+        """
+
+        normalized_namespace = namespace.strip().replace(" ", "_")
+        normalized_key = key.strip()
+        if not normalized_namespace or not normalized_key:
+            raise ValueError("ephemeral state namespace and key must not be blank")
+        redis_key = f"vision:ephemeral:{normalized_namespace}:{normalized_key}"
+        try:
+            self.client.set(
+                redis_key,
+                json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+                ex=max(1, int(ttl_seconds)),
+            )
+        except (RedisError, TypeError, ValueError) as exc:
+            raise DistributedStateError("Ephemeral JSON state write failed") from exc
+
+    def get_ephemeral_json(
+        self,
+        namespace: str,
+        key: str,
+    ) -> dict[str, Any] | None:
+        normalized_namespace = namespace.strip().replace(" ", "_")
+        normalized_key = key.strip()
+        if not normalized_namespace or not normalized_key:
+            raise ValueError("ephemeral state namespace and key must not be blank")
+        redis_key = f"vision:ephemeral:{normalized_namespace}:{normalized_key}"
+        try:
+            raw = self.client.get(redis_key)
+        except RedisError as exc:
+            raise DistributedStateError("Ephemeral JSON state read failed") from exc
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise DistributedStateError("Ephemeral JSON state is invalid") from exc
+        return value if isinstance(value, dict) else None
 
     def ensure_group(self) -> None:
         try:
@@ -333,6 +494,7 @@ class RedisCoordinator:
             dead = int(self.client.xlen(f"{self.stream}:dead"))
         except RedisError as exc:
             raise DistributedStateError("Runtime metric lookup failed") from exc
+        workers = self.workers_snapshot()
         return {
             "checked_at": datetime.now(timezone.utc).isoformat(),
             "active_requests": active,
@@ -342,6 +504,10 @@ class RedisCoordinator:
             "processing_tasks": processing,
             "dead_tasks": dead,
             "api_instances": instances,
+            "worker_instances": workers["total"],
+            "worker_idle": workers["idle"],
+            "worker_busy": workers["busy"],
+            "worker_draining": workers["draining"],
         }
 
 

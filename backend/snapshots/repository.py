@@ -30,7 +30,7 @@ class PostgresGithubSnapshotRepository:
 
 
     The schema is created only by the explicit migration. This class never runs
-    CREATE TABLE or ALTER TABLE at application startup.
+    schema-changing DDL at application startup.
     """
 
 

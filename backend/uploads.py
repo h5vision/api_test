@@ -4,12 +4,14 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 import re
 import shutil
+from contextlib import contextmanager
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, ContextManager, Iterator
 from uuid import uuid4
 
 from .config import Settings
@@ -30,16 +32,55 @@ class UploadError(RuntimeError):
 class UploadManager:
     _CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        lock_factory: Callable[[str], ContextManager[None]] | None = None,
+    ) -> None:
         self.settings = settings
         self.root = settings.upload_root
         self.root.mkdir(parents=True, exist_ok=True)
+        self._lock_factory = lock_factory
         self._locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
 
-    def _lock(self, upload_id: str) -> threading.RLock:
+    def _local_lock(self, upload_id: str) -> threading.RLock:
         with self._locks_guard:
             return self._locks.setdefault(upload_id, threading.RLock())
+
+    @contextmanager
+    def _guard(self, upload_id: str) -> Iterator[None]:
+        """Serialize upload state across threads and API/worker replicas.
+
+        The filesystem contains bulk bytes, while Redis owns cross-replica
+        coordination.  This lets the same upload workspace live on an RWX PVC
+        without assuming that one process or one Kubernetes node owns it.
+        """
+        with self._local_lock(upload_id):
+            if self._lock_factory is None:
+                yield
+                return
+            manager = self._lock_factory(f"upload:{upload_id}")
+            try:
+                manager.__enter__()
+            except Exception as exc:
+                raise UploadError(
+                    "공유 업로드 잠금을 획득할 수 없습니다.", 503
+                ) from exc
+            try:
+                yield
+            finally:
+                manager.__exit__(None, None, None)
+
+    def storage_status(self) -> dict[str, Any]:
+        return {
+            "backend": "shared-filesystem",
+            "root": str(self.root),
+            "exists": self.root.exists(),
+            "writable": self.root.exists() and self.root.is_dir() and os.access(self.root, os.W_OK),
+            "distributed_lock": self._lock_factory is not None,
+        }
 
     def _session_dir(self, upload_id: str) -> Path:
         if not re.fullmatch(r"upl_[a-f0-9]{32}", upload_id):
@@ -176,12 +217,14 @@ class UploadManager:
             "manifest_sha256": state.get("manifest_sha256"),
             "modified_at": state.get("modified_at"),
             "git": state.get("git"),
+            "document_count": int(state.get("document_count") or 0),
+            "total_bytes": int(state.get("total_bytes") or 0),
         }
 
     def add_manifest(
         self, upload_id: str, payload: UploadManifestPageRequest
     ) -> UploadProgressResponse:
-        with self._lock(upload_id):
+        with self._guard(upload_id):
             state = self._read_state(upload_id)
             if state["status"] not in {"created", "uploading"}:
                 raise UploadError("현재 상태에서는 manifest를 변경할 수 없습니다.", 409)
@@ -263,7 +306,7 @@ class UploadManager:
             raise UploadError(
                 "Digest 또는 X-Content-SHA256 header가 필요합니다.", 400
             )
-        with self._lock(upload_id):
+        with self._guard(upload_id):
             state = self._read_state(upload_id)
             manifest_path = self._manifest_path(self._session_dir(upload_id), file_id)
             try:
@@ -300,7 +343,7 @@ class UploadManager:
             temporary.unlink(missing_ok=True)
             raise UploadError("업로드 part checksum이 일치하지 않습니다.", 409)
         temporary.replace(part_path)
-        with self._lock(upload_id):
+        with self._guard(upload_id):
             state = self._read_state(upload_id)
             previous = None
             if record_path.exists():
@@ -332,7 +375,7 @@ class UploadManager:
         }
 
     def queue(self, upload_id: str) -> tuple[str, UploadProgressResponse]:
-        with self._lock(upload_id):
+        with self._guard(upload_id):
             state = self._read_state(upload_id)
             if not state.get("manifest_complete"):
                 raise UploadError("manifest 전송이 완료되지 않았습니다.", 409)
@@ -396,7 +439,7 @@ class UploadManager:
     def mark_queue_failed(self, upload_id: str, error: str) -> None:
         """Make a failed dispatch retryable by a later complete request."""
 
-        with self._lock(upload_id):
+        with self._guard(upload_id):
             state = self._read_state(upload_id)
             if state["status"] == "queued":
                 state["status"] = "failed"
@@ -424,7 +467,7 @@ class UploadManager:
         ingest_document: Callable[[str, DocumentInput], int],
     ) -> None:
         try:
-            with self._lock(upload_id):
+            with self._guard(upload_id):
                 state = self._read_state(upload_id)
                 state["status"] = "indexing"
                 self._write_state(upload_id, state)
@@ -491,14 +534,14 @@ class UploadManager:
                         )
                     except Exception:
                         failed = 1
-                with self._lock(upload_id):
+                with self._guard(upload_id):
                     current = self._read_state(upload_id)
                     current["files_received"] = received_files
                     current["documents_processed"] += 1
                     current["chunks_stored"] += chunks_stored
                     current["failed_documents"] += failed
                     self._write_state(upload_id, current)
-            with self._lock(upload_id):
+            with self._guard(upload_id):
                 current = self._read_state(upload_id)
                 current["status"] = (
                     "completed" if current["failed_documents"] == 0 else "failed"
@@ -508,7 +551,7 @@ class UploadManager:
                     current["error"] = "일부 문서 인덱싱에 실패했습니다."
                 self._write_state(upload_id, current)
         except Exception as exc:
-            with self._lock(upload_id):
+            with self._guard(upload_id):
                 try:
                     state = self._read_state(upload_id)
                     state["status"] = "failed"
@@ -519,9 +562,10 @@ class UploadManager:
                     pass
 
     def cancel(self, upload_id: str) -> None:
-        directory = self._session_dir(upload_id)
-        if not directory.exists():
-            raise UploadError("업로드 세션을 찾을 수 없습니다.", 404)
-        shutil.rmtree(directory)
+        with self._guard(upload_id):
+            directory = self._session_dir(upload_id)
+            if not directory.exists():
+                raise UploadError("업로드 세션을 찾을 수 없습니다.", 404)
+            shutil.rmtree(directory)
         with self._locks_guard:
             self._locks.pop(upload_id, None)
