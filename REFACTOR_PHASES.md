@@ -54,11 +54,11 @@ Each phase is validated, committed to `Backend`, pushed, and recorded here with 
 | 5 | complete | `a95a4f3e8fc8f32a184ba2eeb33bb627959f2762` | `9f8f9c575802ece0985f8734d7d72a79a99402e6` | Move GitHub Snapshot adapter implementations under `integrations/github/` and keep legacy import paths as compatibility shims. |
 | 6 | complete | `9f8f9c575802ece0985f8734d7d72a79a99402e6` | `fe6d2c731cafe1adc8705b90943231136dd59404` | Move VectorIndex registries/runtime into `domains/vector_indexes/`, Qdrant I/O into `integrations/vectordb/`, and preserve legacy imports through shims. |
 | 7 | complete | `fe6d2c731cafe1adc8705b90943231136dd59404` | `c0c48ffb2a51d52cbceeb47d627b71fd845fe60a` | Move repository source/indexing/upload implementations into `domains/repositories/`, extract 12 public routes into `api/v1/repositories.py`, and preserve legacy module paths through alias shims. |
-| 8 | stabilizing | `c0c48ffb2a51d52cbceeb47d627b71fd845fe60a` | `9cd356251a97534cf2b0110e412673ac3328deb5` | Split generation into catalog/routing/context/contracts, move provider HTTP transport into `integrations/ai_server/`, and preserve the legacy `backend.generation` module through an alias. |
+| 8 | complete | `c0c48ffb2a51d52cbceeb47d627b71fd845fe60a` | `9cd356251a97534cf2b0110e412673ac3328deb5` | Split generation into catalog/routing/context/contracts, move provider HTTP transport into `integrations/ai_server/`, and preserve the legacy `backend.generation` module through an alias. |
 
 
 ## Stabilization checkpoints
 
 | Phase | Implementation commit | Stabilization commit | Validation |
 | --- | --- | --- | --- |
-| 8 | `9cd356251a97534cf2b0110e412673ac3328deb5` | pending | Python compile PASS; Generation/AI Server focused tests 15 passed; full suite 216 passed, 21 known/deferred structural failures, 2 skipped. Exact deferred nodeids are frozen in `PHASE8_STABILIZATION.md`. |
+| 8 | `9cd356251a97534cf2b0110e412673ac3328deb5` | `53a3060db103b6979da07df46307066bc8995930` | Python compile PASS; Generation/AI Server focused tests 15 passed; full suite 216 passed, 21 known/deferred structural failures, 2 skipped. Exact deferred nodeids are frozen in `PHASE8_STABILIZATION.md`. |
