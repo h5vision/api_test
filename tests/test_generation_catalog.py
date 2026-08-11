@@ -55,7 +55,7 @@ class GenerationCatalogTests(unittest.TestCase):
 
         self.assertEqual(selected, "a/model")
 
-    @patch("backend.generation.urllib.request.urlopen")
+    @patch("backend.integrations.ai_server.openai_compatible.urllib.request.urlopen")
     def test_openai_catalog_discovers_and_sorts_models(
         self,
         urlopen: object,
@@ -81,7 +81,7 @@ class GenerationCatalogTests(unittest.TestCase):
         self.assertTrue(status["model_available"])
         self.assertEqual(status["models"], ["a/model", "z/model"])
 
-    @patch("backend.generation.urllib.request.urlopen")
+    @patch("backend.integrations.ai_server.openai_compatible.urllib.request.urlopen")
     def test_openai_catalog_reports_invalid_key(
         self,
         urlopen: object,

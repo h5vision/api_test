@@ -43,7 +43,7 @@ class BackendAIStreamingTests(unittest.TestCase):
             ]
         )
 
-        with patch("backend.generation.urllib.request.urlopen", return_value=response):
+        with patch("backend.integrations.ai_server.ollama.urllib.request.urlopen", return_value=response):
             stream = router.stream_backendai(
                 "backendai-default",
                 [{"role": "user", "content": "question"}],
@@ -75,7 +75,7 @@ class BackendAIStreamingTests(unittest.TestCase):
         )
         observed: list[str] = []
 
-        with patch("backend.generation.urllib.request.urlopen", return_value=response):
+        with patch("backend.integrations.ai_server.ollama.urllib.request.urlopen", return_value=response):
             result = router.generate(
                 "backendai-default",
                 "question",
