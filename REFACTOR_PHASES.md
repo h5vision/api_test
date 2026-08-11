@@ -31,6 +31,13 @@ This branch tracks the structural refactor of the Vision backend while preservin
 16. Test structure alignment
 17. Archive / cache / duplicate cleanup
 
+## Migration strategy
+
+The frozen monolithic application is retained temporarily as `backend/legacy_app.py`.
+`backend/app.py` acts as a compatibility facade that replaces legacy routes one
+domain at a time while preserving the historical `backend.app` module surface.
+The legacy module is removed only after all route and service ownership has moved.
+
 ## Completion rule
 
 Each phase is validated, committed to `Backend`, pushed, and recorded here with its resulting commit SHA before the next phase starts.
@@ -39,4 +46,5 @@ Each phase is validated, committed to `Backend`, pushed, and recorded here with 
 
 | Phase | Status | Base | Commit | Summary |
 | --- | --- | --- | --- | --- |
-| 0 | complete | `858fc1b9881b9dbe67ae5a31c29176cba0c36bbf` | recorded by this commit | Establish refactor baseline and phase tracking. |
+| 0 | complete | `858fc1b9881b9dbe67ae5a31c29176cba0c36bbf` | `ecb32231725aeacddf74d5a5fdd9b43f2f2faf8c` | Establish refactor baseline and phase tracking. |
+| 1 | complete | `ecb32231725aeacddf74d5a5fdd9b43f2f2faf8c` | this commit | Move `/v1/models` route ownership to `api/v1/models.py` and establish the Models contract path without changing Pydantic identity. |
