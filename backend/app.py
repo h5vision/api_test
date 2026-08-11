@@ -7,6 +7,7 @@ from fastapi.routing import APIRoute
 from . import legacy_app as _legacy_app
 from .api.v1.models import create_models_router
 from .api.v1.system import create_system_router
+from .api.v1.projects import create_projects_router
 
 
 def _remove_legacy_routes(routes: set[tuple[str, str]]) -> None:
@@ -30,6 +31,13 @@ _remove_legacy_routes(
         ("GET", "/v1/health"),
         ("GET", "/v1/languages"),
         ("POST", "/v1/languages/detect"),
+        ("GET", "/v1/IngestResponse"),
+        ("GET", "/v1/projects/{project_id:path}/briefing"),
+        ("GET", "/v1/briefing"),
+        ("GET", "/v1/projects/{project_id:path}/tree"),
+        ("GET", "/v1/projects/{project_id:path}/file"),
+        ("GET", "/v1/projects/{project_id}/metadata"),
+        ("POST", "/v1/projects/{project_id}/version/check"),
     }
 )
 
@@ -43,6 +51,19 @@ _legacy_app.app.include_router(
         project_store=_legacy_app.project_store,
         vector_store_error=_legacy_app.VectorStoreError,
         language_registry_factory=_legacy_app.language_registry,
+    )
+)
+
+_legacy_app.app.include_router(
+    create_projects_router(
+        error_responses=_legacy_app.ERROR_RESPONSES,
+        list_indexed_projects_handler=_legacy_app.list_indexed_projects,
+        project_briefing_handler=_legacy_app.get_project_briefing,
+        project_briefing_compatibility_handler=_legacy_app.get_project_briefing_compatibility,
+        project_tree_handler=_legacy_app.get_project_tree,
+        project_file_handler=_legacy_app.get_project_file,
+        project_metadata_handler=_legacy_app.list_project_metadata,
+        project_version_handler=_legacy_app.check_project_version,
     )
 )
 
