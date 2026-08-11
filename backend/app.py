@@ -8,6 +8,7 @@ from . import legacy_app as _legacy_app
 from .api.v1.models import create_models_router
 from .api.v1.system import create_system_router
 from .api.v1.projects import create_projects_router
+from .api.v1.snapshots import create_snapshots_router
 
 
 def _remove_legacy_routes(routes: set[tuple[str, str]]) -> None:
@@ -38,6 +39,7 @@ _remove_legacy_routes(
         ("GET", "/v1/projects/{project_id:path}/file"),
         ("GET", "/v1/projects/{project_id}/metadata"),
         ("POST", "/v1/projects/{project_id}/version/check"),
+        ("POST", "/v1/snapshots/compare"),
     }
 )
 
@@ -64,6 +66,13 @@ _legacy_app.app.include_router(
         project_file_handler=_legacy_app.get_project_file,
         project_metadata_handler=_legacy_app.list_project_metadata,
         project_version_handler=_legacy_app.check_project_version,
+    )
+)
+
+_legacy_app.app.include_router(
+    create_snapshots_router(
+        error_responses=_legacy_app.ERROR_RESPONSES,
+        compare_snapshot_handler=_legacy_app.compare_snapshot,
     )
 )
 

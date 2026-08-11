@@ -49,4 +49,5 @@ Each phase is validated, committed to `Backend`, pushed, and recorded here with 
 | 0 | complete | `858fc1b9881b9dbe67ae5a31c29176cba0c36bbf` | `ecb32231725aeacddf74d5a5fdd9b43f2f2faf8c` | Establish refactor baseline and phase tracking. |
 | 1 | complete | `ecb32231725aeacddf74d5a5fdd9b43f2f2faf8c` | `1ac2030157031be736d282cb93ad771bbbcb4cef` | Move `/v1/models` route ownership to `api/v1/models.py` and establish the Models contract path without changing Pydantic identity. |
 | 2 | complete | `1ac2030157031be736d282cb93ad771bbbcb4cef` | `3bee97f4e0965efef2e3e550f1c194e6d9bee8e3` | Move public health and VS Code language registry routes into `api/v1/system.py`. |
-| 3 | complete | `3bee97f4e0965efef2e3e550f1c194e6d9bee8e3` | this commit | Move public project discovery, briefing, tree, file, metadata, and version-check route ownership into `api/v1/projects.py`. |
+| 3 | complete | `3bee97f4e0965efef2e3e550f1c194e6d9bee8e3` | `ef9759bb50c8f65212cbfb01183e29d1822c40bb` | Move public project discovery, briefing, tree, file, metadata, and version-check route ownership into `api/v1/projects.py`. |
+| 4 | complete | `ef9759bb50c8f65212cbfb01183e29d1822c40bb` | this commit | Move public Snapshot comparison route ownership into `api/v1/snapshots.py` while retaining existing Snapshot services and feature-flagged control plane. |
