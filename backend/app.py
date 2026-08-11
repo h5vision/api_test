@@ -9,6 +9,7 @@ from .api.v1.models import create_models_router
 from .api.v1.system import create_system_router
 from .api.v1.projects import create_projects_router
 from .api.v1.snapshots import create_snapshots_router
+from .api.v1.repositories import create_repositories_router
 
 
 def _remove_legacy_routes(routes: set[tuple[str, str]]) -> None:
@@ -40,6 +41,18 @@ _remove_legacy_routes(
         ("GET", "/v1/projects/{project_id}/metadata"),
         ("POST", "/v1/projects/{project_id}/version/check"),
         ("POST", "/v1/snapshots/compare"),
+        ("GET", "/v1/repositories"),
+        ("GET", "/v1/repositories/{source_id}/tree"),
+        ("POST", "/v1/documents/ingest"),
+        ("POST", "/v1/documents/ingest-with-metadata"),
+        ("POST", "/v1/uploads"),
+        ("POST", "/v1/uploads/{upload_id}/manifest"),
+        ("PUT", "/v1/uploads/{upload_id}/files/{file_id}/parts/{part_number}"),
+        ("GET", "/v1/uploads/{upload_id}"),
+        ("POST", "/v1/uploads/{upload_id}/complete"),
+        ("GET", "/v1/indexing-jobs"),
+        ("GET", "/v1/indexing-jobs/{job_id}"),
+        ("DELETE", "/v1/uploads/{upload_id}"),
     }
 )
 
@@ -73,6 +86,23 @@ _legacy_app.app.include_router(
     create_snapshots_router(
         error_responses=_legacy_app.ERROR_RESPONSES,
         compare_snapshot_handler=_legacy_app.compare_snapshot,
+    )
+)
+
+_legacy_app.app.include_router(
+    create_repositories_router(
+        list_repository_browser_items_handler=_legacy_app.list_repository_browser_items,
+        get_repository_source_tree_handler=_legacy_app.get_repository_source_tree,
+        ingest_documents_handler=_legacy_app.ingest_documents,
+        ingest_documents_with_project_metadata_handler=_legacy_app.ingest_documents_with_project_metadata,
+        create_upload_handler=_legacy_app.create_upload,
+        add_upload_manifest_handler=_legacy_app.add_upload_manifest,
+        upload_file_part_handler=_legacy_app.upload_file_part,
+        get_upload_handler=_legacy_app.get_upload,
+        complete_upload_handler=_legacy_app.complete_upload,
+        list_indexing_jobs_handler=_legacy_app.list_indexing_jobs,
+        get_indexing_job_handler=_legacy_app.get_indexing_job,
+        cancel_upload_handler=_legacy_app.cancel_upload,
     )
 )
 
