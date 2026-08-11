@@ -10,6 +10,7 @@ from .api.v1.system import create_system_router
 from .api.v1.projects import create_projects_router
 from .api.v1.snapshots import create_snapshots_router
 from .api.v1.repositories import create_repositories_router
+from .api.v1.chat import create_chat_router
 
 
 def _remove_legacy_routes(routes: set[tuple[str, str]]) -> None:
@@ -53,6 +54,12 @@ _remove_legacy_routes(
         ("GET", "/v1/indexing-jobs"),
         ("GET", "/v1/indexing-jobs/{job_id}"),
         ("DELETE", "/v1/uploads/{upload_id}"),
+        ("GET", "/v1/contracts/canonical-context"),
+        ("POST", "/v1/chat/contexts"),
+        ("GET", "/v1/chat/contexts/{context_id}"),
+        ("GET", "/v1/contracts/chat-stream"),
+        ("GET", "/v1/citations/{request_id}/{citation_id}"),
+        ("POST", "/v1/chat"),
     }
 )
 
@@ -86,6 +93,18 @@ _legacy_app.app.include_router(
     create_snapshots_router(
         error_responses=_legacy_app.ERROR_RESPONSES,
         compare_snapshot_handler=_legacy_app.compare_snapshot,
+    )
+)
+
+_legacy_app.app.include_router(
+    create_chat_router(
+        error_responses=_legacy_app.ERROR_RESPONSES,
+        canonical_context_contract_handler=_legacy_app.canonical_context_contract,
+        register_chat_context_handler=_legacy_app.register_chat_context,
+        get_chat_context_handler=_legacy_app.get_chat_context,
+        chat_stream_contract_handler=_legacy_app.chat_stream_contract,
+        get_chat_citation_handler=_legacy_app.get_chat_citation,
+        chat_handler=_legacy_app.chat,
     )
 )
 
