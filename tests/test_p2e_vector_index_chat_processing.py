@@ -42,7 +42,9 @@ def test_provider_managed_chat_bypasses_project_resolution_and_rag():
 
 
 def test_general_chat_can_skip_project_resolution():
-    routing = (ROOT / "backend" / "chat_routing.py").read_text(encoding="utf-8")
+    routing = (
+        ROOT / "backend" / "domains" / "chat" / "routing.py"
+    ).read_text(encoding="utf-8")
     assert 'route="project_grounded" if project_required else "general"' in routing
     assert "deterministic" in routing
 
@@ -51,4 +53,3 @@ def test_p2e_does_not_preempt_p2f_generation_fk():
     migration = (ROOT / "migrations" / "versions" / "p2e_0004_vector_indexes_chat_processing.py").read_text(encoding="utf-8")
     assert "ADD COLUMN IF NOT EXISTS vector_index_id" not in migration
     assert "index_generations.vector_index_id" not in migration
-
