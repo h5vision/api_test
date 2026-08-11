@@ -84,12 +84,12 @@ def test_runtime_has_one_route_authority_and_no_active_generation_fallback():
 
 
 def test_persistent_selector_is_authoritative_for_managed_and_external_routes():
-    gateway = (ROOT / "backend" / "vector_gateway.py").read_text(encoding="utf-8")
+    gateway = (ROOT / "backend" / "domains" / "vector_indexes" / "vector_gateway.py").read_text(encoding="utf-8")
     block = gateway.split("def build_vector_store_for_index", 1)[1]
     assert "selector=index.selector" in block
     assert "query_selector_authoritative=True" in block
 
-    vector_store = (ROOT / "backend" / "vector_store.py").read_text(encoding="utf-8")
+    vector_store = (ROOT / "backend" / "integrations" / "vectordb" / "vector_store.py").read_text(encoding="utf-8")
     search = vector_store.split("def search(", 2)[2].split("def count_generation", 1)[0]
     assert "if self.query_selector_authoritative" in search
     assert "operation_selector = VectorSelector()" in search
@@ -225,7 +225,7 @@ def test_candidate_with_internally_consistent_but_unconfigured_tenant_is_rejecte
 
 
 def test_route_mutations_lock_candidate_rows_and_external_verification_tenant():
-    text = (ROOT / "backend" / "project_vector_routes.py").read_text(encoding="utf-8")
+    text = (ROOT / "backend" / "domains" / "vector_indexes" / "project_vector_routes.py").read_text(encoding="utf-8")
     assert 'lock_clause = " FOR SHARE OF svb, ps, vi, vt, ep" if lock else ""' in text
     assert "self._candidate_context(connection, binding_id, lock=True)" in text
     assert "AND ev.tenant_id = svb.tenant_id" in text

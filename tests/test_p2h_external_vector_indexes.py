@@ -27,14 +27,14 @@ def test_schema_guard_requires_p2h_and_keeps_new_table_out_of_historical_baselin
 
 
 def test_vector_adapter_supports_discovery_without_registration():
-    text = (ROOT / "backend" / "vector_store.py").read_text(encoding="utf-8")
+    text = (ROOT / "backend" / "integrations" / "vectordb" / "vector_store.py").read_text(encoding="utf-8")
     assert "def discover_indexes(self) -> list[VectorIndexState]" in text
     assert 'self._request("GET", "/collections")' in text
     assert "self.describe_index(VectorIndexRef(collection=name))" in text
 
 
 def test_external_attach_does_not_silently_change_embedding_space():
-    text = (ROOT / "backend" / "vector_indexes.py").read_text(encoding="utf-8")
+    text = (ROOT / "backend" / "domains" / "vector_indexes" / "vector_indexes.py").read_text(encoding="utf-8")
     block = text.split("def register_external", 1)[1].split("def register_generation", 1)[0]
     assert "different EmbeddingProfile" in block
     assert "cannot be reattached as external" in block
@@ -53,7 +53,7 @@ def test_admin_workflow_separates_discover_attach_verify_and_snapshot_binding():
 
 
 def test_external_binding_has_no_generation_and_persists_verification_evidence():
-    text = (ROOT / "backend" / "snapshot_vector_bindings.py").read_text(encoding="utf-8")
+    text = (ROOT / "backend" / "domains" / "vector_indexes" / "snapshot_vector_bindings.py").read_text(encoding="utf-8")
     block = text.split("def register_external_verification", 1)[1].split("def get(", 1)[0]
     assert "generation_id" in block
     assert "NULL,'external_verification','verified'" in block
@@ -100,7 +100,7 @@ def _load_external_module():
         distance_metric: str | None
         vector_type: str | None
         points_count: int | None
-        status: str
+        status: string
 
     @dataclass(frozen=True)
     class VectorPointSample:
@@ -181,7 +181,7 @@ def test_reattach_preserves_existing_verification_and_external_binding_checks_te
     assert "external_vector_index_verification_store.get(index.vector_index_id)" in attach
     assert "if verification is None:" in attach
 
-    bindings = (ROOT / "backend" / "snapshot_vector_bindings.py").read_text(encoding="utf-8")
+    bindings = (ROOT / "backend" / "domains" / "vector_indexes" / "snapshot_vector_bindings.py").read_text(encoding="utf-8")
     block = bindings.split("def register_external_verification", 1)[1].split("def get(", 1)[0]
     assert "vi.tenant_id AS vector_tenant_id" in block
     assert "Snapshot and external VectorIndex tenant boundaries do not match" in block

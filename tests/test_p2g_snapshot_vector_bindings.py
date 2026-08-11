@@ -26,7 +26,7 @@ def test_schema_guard_requires_p2g_binding_shape():
 
 
 def test_managed_binding_registration_requires_generation_snapshot_index_agreement():
-    text = (ROOT / "backend" / "snapshot_vector_bindings.py").read_text(encoding="utf-8")
+    text = (ROOT / "backend" / "domains" / "vector_indexes" / "snapshot_vector_bindings.py").read_text(encoding="utf-8")
     assert "JOIN project_snapshots AS ps ON ps.snapshot_id = ig.snapshot_id" in text
     assert "JOIN vector_indexes AS vi ON vi.vector_index_id = ig.vector_index_id" in text
     assert "Managed Snapshot/Generation/VectorIndex provenance does not agree" in text
@@ -86,7 +86,7 @@ def test_search_and_chat_expose_binding_provenance_for_p3():
 
 
 def test_p2g_managed_contract_remains_distinct_under_p2h_external_extension():
-    text = (ROOT / "backend" / "snapshot_vector_bindings.py").read_text(encoding="utf-8")
+    text = (ROOT / "backend" / "domains" / "vector_indexes" / "snapshot_vector_bindings.py").read_text(encoding="utf-8")
     assert "register_managed_generation" in text
     assert "register_external_verification" in text
     assert "binding_source='external_verification'" in text
