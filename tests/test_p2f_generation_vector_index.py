@@ -64,7 +64,7 @@ def test_agentic_rag_reuses_one_resolved_vector_route():
     assert "retrieval_profile.embedding_profile_id" in project_chat
 
 
-def _load_catalog_module():
+def _load_catalog_module(monkeypatch):
     # Load the pure catalog helper without importing backend package __init__ side effects.
     schemas = types.ModuleType("backend.schemas")
 
@@ -73,16 +73,16 @@ def _load_catalog_module():
             self.__dict__.update(kwargs)
 
     schemas.ModelInfo = ModelInfo
-    sys.modules["backend.schemas"] = schemas
+    monkeypatch.setitem(sys.modules, "backend.schemas", schemas)
     package = types.ModuleType("backend")
     package.__path__ = [str(ROOT / "backend")]
-    sys.modules["backend"] = package
+    monkeypatch.setitem(sys.modules, "backend", package)
     import importlib
     return importlib.import_module("backend.model_catalog"), ModelInfo
 
 
-def test_catalog_revision_is_content_derived_and_ignores_availability_flaps():
-    module, ModelInfo = _load_catalog_module()
+def test_catalog_revision_is_content_derived_and_ignores_availability_flaps(monkeypatch):
+    module, ModelInfo = _load_catalog_module(monkeypatch)
     base = dict(
         model_id="provider:a:m1",
         model_name="m1",
