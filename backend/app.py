@@ -11,6 +11,42 @@ from .api.v1.projects import create_projects_router
 from .api.v1.snapshots import create_snapshots_router
 from .api.v1.repositories import create_repositories_router
 from .api.v1.chat import create_chat_router
+from .api.v1.admin import admin_route_keys, create_admin_router
+
+
+def _route_method_path_keys(route: object) -> set[tuple[str, str]]:
+    """Collect method/path keys from one direct or included-router route node."""
+    if isinstance(route, APIRoute):
+        return {(method, route.path) for method in (route.methods or set())}
+
+    original_router = getattr(route, "original_router", None)
+    nested_routes = getattr(original_router, "routes", None)
+    if nested_routes is None:
+        return set()
+
+    keys: set[tuple[str, str]] = set()
+    for nested_route in nested_routes:
+        keys.update(_route_method_path_keys(nested_route))
+    return keys
+
+
+def _legacy_route_is_owned(route: object, routes: set[tuple[str, str]]) -> bool:
+    """Return whether one legacy route node can be removed as a whole."""
+    keys = _route_method_path_keys(route)
+    overlap = keys & routes
+    if not overlap:
+        return False
+
+    if isinstance(route, APIRoute):
+        # Preserve the historical behavior: one matching method/path transfers the
+        # concrete APIRoute out of legacy ownership.
+        return True
+
+    if overlap != keys:
+        raise RuntimeError(
+            "Cannot partially remove a nested legacy router; ownership is mixed"
+        )
+    return True
 
 
 def _remove_legacy_routes(routes: set[tuple[str, str]]) -> None:
@@ -18,15 +54,11 @@ def _remove_legacy_routes(routes: set[tuple[str, str]]) -> None:
     _legacy_app.app.router.routes[:] = [
         route
         for route in _legacy_app.app.router.routes
-        if not (
-            isinstance(route, APIRoute)
-            and any(
-                route.path == path and method in (route.methods or set())
-                for method, path in routes
-            )
-        )
+        if not _legacy_route_is_owned(route, routes)
     ]
 
+
+_admin_router = create_admin_router(_legacy_app.app.router.routes)
 
 _remove_legacy_routes(
     {
@@ -61,6 +93,7 @@ _remove_legacy_routes(
         ("GET", "/v1/citations/{request_id}/{citation_id}"),
         ("POST", "/v1/chat"),
     }
+    | admin_route_keys(_admin_router)
 )
 
 _legacy_app.app.include_router(create_models_router(_legacy_app.generation_router))
@@ -124,6 +157,8 @@ _legacy_app.app.include_router(
         cancel_upload_handler=_legacy_app.cancel_upload,
     )
 )
+
+_legacy_app.app.router.routes.extend(_admin_router.routes)
 
 # Keep historical import and monkeypatch targets stable while the monolith is
 # carved into domain-owned routers.
