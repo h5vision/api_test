@@ -32,6 +32,10 @@ def test_managed_binding_registration_requires_generation_snapshot_index_agreeme
     assert "Managed Snapshot/Generation/VectorIndex provenance does not agree" in text
     assert "ownership_mode" in text
     assert 'selector.get("generation_id") != generation_id' in text
+    assert 'provenance.get("tenant_id") or self._settings.snapshot_tenant_id' in text
+    assert "tenant_id = snapshot_tenant_id" not in text.split(
+        "def register_managed_generation", 1
+    )[1].split("def register_external_verification", 1)[0]
     assert "verification_state = CASE" in text
 
 

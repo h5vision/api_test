@@ -152,7 +152,9 @@ class PostgresSnapshotVectorBindingStore:
                     raise SnapshotVectorBindingStoreError(
                         "Managed VectorIndex selector does not match its generation"
                     )
-                tenant_id = snapshot_tenant_id
+                tenant_id = str(
+                    provenance.get("tenant_id") or self._settings.snapshot_tenant_id
+                )
                 fingerprint = str(provenance.get("fingerprint") or provenance.get("manifest_sha256") or "").strip()
                 identity_key = str(provenance.get("identity_key") or "").strip()
                 if not fingerprint or not identity_key:
