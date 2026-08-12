@@ -11,9 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_snapshot_frontend_is_a_real_route_module():
     main = (ROOT / "admin" / "src" / "main.ts").read_text(encoding="utf-8")
     snapshots = (ROOT / "admin" / "src" / "snapshots.ts").read_text(encoding="utf-8")
+    snapshot_page = (
+        ROOT / "admin" / "src" / "pages" / "snapshots" / "index.ts"
+    ).read_text(encoding="utf-8")
 
 
-    assert 'from "./snapshots"' in main
+    assert 'from "./pages/snapshots"' in main
+    assert 'from "../../snapshots"' in snapshot_page
     assert "SNAPSHOT_ROUTE" in main
     assert "initializeSnapshotAdmin(adminApiBaseUrl)" in main
     assert "snapshotAdminMarkup()" in main

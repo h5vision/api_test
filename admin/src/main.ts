@@ -1,12 +1,16 @@
 import "./styles.css";
 import { startOrbBackground } from "./orbBackground";
-import { playgroundMarkup, startPlayground } from "./playground";
+import {
+  PLAYGROUND_ROUTE,
+  playgroundMarkup,
+  startPlayground,
+} from "./pages/playground";
 import {
   SNAPSHOT_ROUTE,
   initializeSnapshotAdmin,
   snapshotAdminMarkup,
   snapshotNavIcon,
-} from "./snapshots";
+} from "./pages/snapshots";
 import {
   SYSTEM_STATUS_ROUTE,
   addSystemStatusEvent as addActivity,
@@ -17,7 +21,40 @@ import {
   setProviderDetails,
   setTopologyStatus as setServiceStatus,
   systemStatusMarkup,
-} from "./systemStatus";
+} from "./pages/system-status";
+import { apiBaseUrl, adminApiBaseUrl } from "./shared/api";
+import { svgIcon } from "./shared/components";
+import { escapeHtml, setText } from "./shared/utils";
+import type {
+  ConnectivityResponse,
+  ConnectionState,
+  HealthResponse,
+  PersistenceCapability,
+  PersistenceStatusResponse,
+} from "./shared/types";
+import type {
+  ChatIntakeSettingsResponse,
+  FrontendClientListResponse,
+  FrontendClientRecord,
+  NetworkSettingsResponse,
+} from "./features/frontend-clients";
+import type {
+  AIProviderListResponse,
+  AIProviderRecord,
+  ModelInfo,
+  ModelListResponse,
+  OllamaScanResponse,
+  RuntimeServiceSettingsResponse,
+} from "./features/model-catalog";
+import type {
+  IndexingJobListResponse,
+  IndexingJobSummary,
+  OfflineEmbeddingArtifact,
+  OfflineEmbeddingArtifactListResponse,
+  RepositorySourceListResponse,
+  VectorRouteCandidatesResponse,
+  VectorRouteRecord,
+} from "./features/vector-targets";
 
 type ThemePreference = "dark" | "light" | "system";
 
@@ -68,373 +105,21 @@ systemColorPreference.addEventListener("change", () => {
   if (themePreference === "system") syncThemePresentation();
 });
 
-type ProviderStatus = {
-  ai_provider: string;
-  ai_model: string;
-  ai_configured: boolean;
-  embedding_provider: string;
-  embedding_model: string;
-  embedding_configured: boolean;
-  vector_db_provider: string;
-  default_model_id: string;
-};
-
-type HealthResponse = {
-  status: string;
-  service: string;
-  version: string;
-  configuration: ProviderStatus;
-  vector_store: {
-    provider?: string;
-    status?: "ok" | "unavailable" | string;
-    projects: number;
-    chunks: number;
-    error?: string;
-  };
-};
-
-type VectorRouteCandidate = {
-  binding_id: string;
-  snapshot_id: string;
-  generation_id: string | null;
-  generation_status: string | null;
-  vector_index_id: string;
-  ownership_mode: "vision_managed" | "external_attached";
-  binding_source: "managed_generation" | "external_verification";
-  verification_method: "managed_build" | "external_probe" | "manual";
-  vector_target_id: string;
-  embedding_profile_id: string;
-  vector_index_status: string;
-  vector_target_status: string;
-  embedding_profile_status: string;
-  external_verification_state: string | null;
-  payload_keys: string[];
-  eligible: boolean;
-  routable: boolean;
-  active: boolean;
-  reason: string | null;
-};
-
-type VectorRouteCandidatesResponse = {
-  project_id: string;
-  active_binding_id: string | null;
-  routing_mode: "managed_auto" | "pinned";
-  revision: number;
-  candidates: VectorRouteCandidate[];
-};
-
-type VectorRouteRecord = {
-  project_id: string;
-  tenant_id: string;
-  active_binding_id: string | null;
-  routing_mode: "managed_auto" | "pinned";
-  revision: number;
-  selected_by: string | null;
-  selected_at: string | null;
-  reason: string | null;
-  active: VectorRouteCandidate | null;
-  created_at: string;
-  updated_at: string;
-};
-
-type PersistenceCapability = {
-  id: string;
-  role: string;
-  description: string;
-  status: "ready" | "degraded" | "unavailable";
-  table_count: number;
-  records_estimate: number | null;
-  missing_tables?: string[];
-  missing_columns?: string[];
-};
-
-type PersistenceStatusResponse = {
-  checked_at: string;
-  status: "ready" | "degraded" | "migration_required" | "revision_mismatch" | "unavailable";
-  implementation: { engine: string; schema: string };
-  schema: {
-    managed: boolean;
-    revision: string | null;
-    expected_revision: string;
-    baseline_compatible: boolean;
-    missing_tables: string[];
-    missing_columns: string[];
-  };
-  capabilities: PersistenceCapability[];
-  error: string | null;
-};
-
-type ConnectionState = "online" | "stale" | "degraded" | "offline" | "unknown";
-
-type ConnectivityResponse = {
-  checked_at: string;
-  frontend: {
-    status: "online" | "stale" | "offline" | "unknown";
-    connected: boolean;
-    client_id: string | null;
-    project_id: string | null;
-    client_version: string | null;
-    last_event: string | null;
-    last_seen_at: string | null;
-    age_seconds: number | null;
-  };
-  backendai: {
-    status: "online" | "degraded" | "offline";
-    connected: boolean;
-    model_id: string;
-    model: string;
-    model_available: boolean;
-    latency_ms: number;
-    error: string | null;
-  };
-};
-
-type NetworkEndpointSettings = {
-  ip: string;
-  port: number;
-};
-
-type NetworkSettingsResponse = {
-  configured: boolean;
-  setup_required: boolean;
-  frontend: NetworkEndpointSettings;
-  backendai: NetworkEndpointSettings;
-  updated_at: string | null;
-  frontend_reachable: boolean;
-  frontend_latency_ms: number;
-  frontend_error: string | null;
-};
-
-type FrontendClientRecord = {
-  client_id: string;
-  instance_id: string | null;
-  name: string;
-  ip: string;
-  port: number;
-  enabled: boolean;
-  chat_deep_normalization_mode: "inherit" | "auto" | "off";
-  registration_type: "admin" | "auto";
-  last_seen_ip: string | null;
-  last_seen_at: string | null;
-  reachable: boolean;
-  latency_ms: number;
-  error: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-type ChatIntakeSettingsResponse = {
-  deep_normalization_enabled: boolean;
-  fallback_mode: "raw_message";
-  basic_normalization_enabled: true;
-  updated_at: string;
-};
-
-type FrontendClientListResponse = {
-  clients: FrontendClientRecord[];
-  total: number;
-  enabled: number;
-  reachable: number;
-};
-
-type ModelInfo = {
-  model_id: string;
-  model_name: string;
-  display_name: string;
-  provider: string;
-  location: "internal" | "cloud" | "local";
-  deployment_type?: "cloud" | "local" | "remote_server";
-  endpoint?: string | null;
-  enabled: boolean;
-  available: boolean;
-  is_default: boolean;
-};
-
-type ModelListResponse = {
-  default_model_id: string;
-  checked_at: string;
-  models: ModelInfo[];
-};
-
-type AIProviderRecord = {
-  provider_id: string;
-  name: string;
-  protocol: "ollama" | "openai";
-  base_url: string;
-  auth_type: "none" | "bearer" | "x-api-key";
-  api_key_configured: boolean;
-  api_key_hint: string | null;
-  enabled: boolean;
-  deployment_type: "cloud" | "local" | "remote_server";
-  chat_processing_mode: "vision_managed" | "provider_managed";
-  status: "unknown" | "online" | "degraded" | "offline" | "disabled";
-  error: string | null;
-  latency_ms: number;
-  model_count: number;
-  models: string[];
-  last_checked_at: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-type AIProviderListResponse = {
-  providers: AIProviderRecord[];
-  total: number;
-};
-
-type OllamaScanResponse = {
-  checked_at: string;
-  targets: {
-    source: string;
-    base_url: string;
-    status: "online" | "degraded" | "offline";
-    models: string[];
-    skipped_non_chat_models: string[];
-    latency_ms: number;
-    error: string | null;
-    registered: boolean;
-    provider_id: string | null;
-  }[];
-  discovered_servers: number;
-  registered_providers: number;
-  chat_models: number;
-};
-
-type RuntimeServiceSettingsResponse = {
-  configured: boolean;
-  setup_required: boolean;
-  missing: string[];
-  groq: {
-    enabled: boolean;
-    base_url: string;
-    model: string;
-    public_model_id: string;
-    api_key_configured: boolean;
-  };
-  default_model_id: string;
-  vector: {
-    provider: string;
-    vector_target_id: string;
-    embedding_profile_id: string;
-    host: string;
-    port: number;
-    collection: string;
-    embedding_deployment: string;
-    embedding_provider: string;
-    embedding_base_url: string;
-    embedding_model: string;
-    embedding_model_id: string;
-    embedding_dimension: number;
-    embedding_batch_size: number;
-    index_version: string;
-    active_host: string;
-    active_port: number;
-    active_collection: string;
-    active_embedding_deployment: "api" | "local";
-    active_embedding_provider: string;
-    active_embedding_base_url: string;
-    active_embedding_model: string;
-    active_embedding_model_id: string;
-    active_embedding_dimension: number;
-    active_embedding_batch_size: number;
-    active_index_version: string;
-    restart_required: boolean;
-    reindex_required: boolean;
-  };
-  updated_at: string | null;
-};
-
-type RepositorySource = {
-  source_id: string;
-  project_id: string;
-  enabled: boolean;
-};
-
-type RepositorySourceListResponse = {
-  sources: RepositorySource[];
-  total: number;
-};
-
-type IndexingJobSummary = {
-  job_id: string;
-  job_kind: "repository" | "upload";
-  project_id: string;
-  source_id: string | null;
-  state: string;
-  stage: string;
-  active: boolean;
-  stalled: boolean;
-  progress_percent: number;
-  processed: number;
-  total: number;
-  files_processed: number;
-  files_total: number;
-  chunks_stored: number;
-  updated_at: string;
-  error: string | null;
-};
-
-type IndexingJobListResponse = {
-  checked_at: string;
-  jobs: IndexingJobSummary[];
-  total: number;
-  active: number;
-};
-
-type OfflineEmbeddingArtifact = {
-  artifact_id: string;
-  project_id: string;
-  snapshot_id: string;
-  generation_id: string;
-  model_id: string;
-  model_name: string;
-  embedding_dimension: number;
-  index_version: string;
-  chunk_count: number;
-  shard_count: number;
-  relative_path: string;
-  compatible: boolean;
-  contract_errors: string[];
-  imported: boolean;
-  completed_at: string | null;
-  error: string | null;
-};
-
-type OfflineEmbeddingArtifactListResponse = {
-  checked_at: string;
-  root_available: boolean;
-  artifacts: OfflineEmbeddingArtifact[];
-  total: number;
-  ready: number;
-  imported: number;
-};
-
-const apiBaseUrl = (
-  import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:8000`
-).replace(/\/$/, "");
-const adminApiBaseUrl = (
-  import.meta.env.VITE_ADMIN_API_BASE_URL || "/admin-api"
-).replace(/\/$/, "");
-const isPlayground = window.location.pathname.startsWith("/playground");
+const isPlayground = window.location.pathname.startsWith(PLAYGROUND_ROUTE);
 const isSystemStatus = window.location.pathname.startsWith(SYSTEM_STATUS_ROUTE);
 const isSnapshots = window.location.pathname.startsWith(SNAPSHOT_ROUTE);
 const isOverview = !isPlayground && !isSystemStatus && !isSnapshots;
 
-const icon = (path: string, className = "size-5") => `
-  <svg class="${className}" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-    <path d="${path}" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
-  </svg>`;
-
 const icons = {
-  grid: icon("M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"),
-  pulse: icon("M3 12h4l2.2-6 4.1 12 2.2-6H21"),
-  cube: icon("m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5M12 12v9"),
-  database: icon("M5 6c0-1.7 3.1-3 7-3s7 1.3 7 3-3.1 3-7 3-7-1.3-7-3Zm0 0v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"),
-  cloud: icon("M7 18h10a4 4 0 0 0 .5-8A6 6 0 0 0 6 8.7 4.5 4.5 0 0 0 7 18Z"),
-  shield: icon("M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6l-7-3Zm-3 9 2 2 4-4"),
-  refresh: icon("M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"),
-  arrow: icon("M5 12h14m-5-5 5 5-5 5", "size-4"),
-  external: icon("M14 4h6v6M20 4l-9 9M18 13v6H5V6h6", "size-4"),
+  grid: svgIcon("M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"),
+  pulse: svgIcon("M3 12h4l2.2-6 4.1 12 2.2-6H21"),
+  cube: svgIcon("m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5M12 12v9"),
+  database: svgIcon("M5 6c0-1.7 3.1-3 7-3s7 1.3 7 3-3.1 3-7 3-7-1.3-7-3Zm0 0v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"),
+  cloud: svgIcon("M7 18h10a4 4 0 0 0 .5-8A6 6 0 0 0 6 8.7 4.5 4.5 0 0 0 7 18Z"),
+  shield: svgIcon("M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6l-7-3Zm-3 9 2 2 4-4"),
+  refresh: svgIcon("M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"),
+  arrow: svgIcon("M5 12h14m-5-5 5 5-5 5", "size-4"),
+  external: svgIcon("M14 4h6v6M20 4l-9 9M18 13v6H5V6h6", "size-4"),
   sidebarLeft: `
     <svg class="size-5" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
       <path d="M14.5 1h-13l-.5.5v13l.5.5h13l.5-.5v-13l-.5-.5ZM2 2h3v12H2V2Zm12 12H6V2h8v12Z" />
@@ -807,11 +492,6 @@ syncSidebarPresentation();
 const orbCanvas = document.querySelector<HTMLCanvasElement>("#ambient-orb-canvas");
 if (orbCanvas) startOrbBackground(orbCanvas);
 
-const setText = (id: string, value: string) => {
-  const element = document.getElementById(id);
-  if (element) element.textContent = value;
-};
-
 function setConnectionStatus(id: string, state: ConnectionState, message: string): void {
   const element = document.getElementById(id);
   if (!element) return;
@@ -1020,15 +700,6 @@ const setInputValue = (id: string, value: string | number): void => {
   const input = document.getElementById(id) as HTMLInputElement | null;
   if (input) input.value = String(value);
 };
-
-const escapeHtml = (value: string): string =>
-  value.replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#039;",
-  })[character] ?? character);
 
 const formatClientDateTime = (value: string | null): string => {
   if (!value) return "--";
