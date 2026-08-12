@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-
 from fastapi.routing import APIRoute
 
 from . import legacy_app as _legacy_app
@@ -160,6 +158,19 @@ _legacy_app.app.include_router(
 
 _legacy_app.app.router.routes.extend(_admin_router.routes)
 
-# Keep historical import and monkeypatch targets stable while the monolith is
-# carved into domain-owned routers.
-sys.modules[__name__] = _legacy_app
+# The public ASGI owner is now this composition module. The legacy module still
+# owns handler implementations during the compatibility window, but it no longer
+# replaces backend.app in sys.modules.
+app = _legacy_app.app
+
+
+def __getattr__(name: str) -> object:
+    """Keep historical imports working while canonical owners are adopted."""
+    try:
+        return getattr(_legacy_app, name)
+    except AttributeError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(dir(_legacy_app)))
