@@ -163,11 +163,14 @@ def test_snapshot_commit_mismatch_is_rejected_in_context_endpoint_only() -> None
 
 
 def test_public_chat_source_contains_sse_and_context_contracts() -> None:
-    source = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    routes = (
+        ROOT / "backend" / "api" / "v1" / "chat.py"
+    ).read_text(encoding="utf-8")
+    source = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
 
-    assert '"/v1/chat/contexts"' in source
-    assert '"/v1/contracts/chat-stream"' in source
-    assert '"/v1/citations/{request_id}/{citation_id}"' in source
+    assert '"/v1/chat/contexts"' in routes
+    assert '"/v1/contracts/chat-stream"' in routes
+    assert '"/v1/citations/{request_id}/{citation_id}"' in routes
     assert 'media_type="text/event-stream"' in source
     assert '"Content-Type": "text/event-stream"' in source
     assert '"X-Vision-Chat-Transport": "sse"' in source

@@ -43,7 +43,7 @@ def test_external_attach_does_not_silently_change_embedding_space():
 
 
 def test_admin_workflow_separates_discover_attach_verify_and_snapshot_binding():
-    app = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     assert '"/v1/admin/vector-targets/{vector_target_id}/indexes/discover"' in app
     assert '"/v1/admin/vector-indexes/attach"' in app
     assert '"/v1/admin/vector-indexes/{vector_index_id}/verify"' in app
@@ -176,7 +176,7 @@ def test_snapshot_probe_accepts_exact_snapshot_selector_and_rejects_mixed_payloa
 
 
 def test_reattach_preserves_existing_verification_and_external_binding_checks_tenant():
-    app = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     attach = app.split("def attach_external_vector_index", 1)[1].split("def get_external_vector_index_verification", 1)[0]
     assert "external_vector_index_verification_store.get(index.vector_index_id)" in attach
     assert "if verification is None:" in attach

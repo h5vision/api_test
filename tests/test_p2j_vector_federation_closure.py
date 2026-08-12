@@ -22,7 +22,9 @@ def test_p2j_readiness_verifier_checks_route_chain_tenant_and_audit_continuity()
 
 
 def test_p2j_runtime_rechecks_configured_tenant_and_locks_mutation_candidates():
-    text = (ROOT / "backend" / "project_vector_routes.py").read_text(
+    text = (
+        ROOT / "backend" / "domains" / "vector_indexes" / "project_vector_routes.py"
+    ).read_text(
         encoding="utf-8"
     )
     assert "candidate is outside the configured tenant" in text
@@ -31,10 +33,12 @@ def test_p2j_runtime_rechecks_configured_tenant_and_locks_mutation_candidates():
 
 
 def test_legacy_active_generation_is_not_a_runtime_authority():
-    route_store = (ROOT / "backend" / "project_vector_routes.py").read_text(
+    route_store = (
+        ROOT / "backend" / "domains" / "vector_indexes" / "project_vector_routes.py"
+    ).read_text(
         encoding="utf-8"
     )
-    app = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     runtime = app.split("def _resolve_project_vector_runtime", 1)[1].split(
         "def _search_documents_with_runtime", 1
     )[0]

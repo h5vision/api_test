@@ -24,7 +24,9 @@ def test_schema_guard_requires_p2f_but_p2a_shape_stays_historical():
 
 
 def test_generation_binding_is_immutable_and_completion_requires_provenance():
-    text = (ROOT / "backend" / "repository_store.py").read_text(encoding="utf-8")
+    text = (
+        ROOT / "backend" / "domains" / "repositories" / "repository_store.py"
+    ).read_text(encoding="utf-8")
     assert "def bind_generation_vector_index" in text
     assert "vector_index_id IS NULL OR vector_index_id = %s" in text
     assert "already bound to a different VectorIndex" in text
@@ -33,14 +35,18 @@ def test_generation_binding_is_immutable_and_completion_requires_provenance():
 
 
 def test_git_and_offline_indexing_bind_the_registered_vector_index():
-    git = (ROOT / "backend" / "repository_indexer.py").read_text(encoding="utf-8")
-    offline = (ROOT / "backend" / "offline_embeddings.py").read_text(encoding="utf-8")
+    git = (
+        ROOT / "backend" / "domains" / "repositories" / "repository_indexer.py"
+    ).read_text(encoding="utf-8")
+    offline = (
+        ROOT / "backend" / "domains" / "repositories" / "offline_embeddings.py"
+    ).read_text(encoding="utf-8")
     assert "self.store.bind_generation_vector_index" in git
     assert "self.store.bind_generation_vector_index" in offline
 
 
 def test_retrieval_uses_project_vector_route_binding_not_runtime_collection():
-    app = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     block = app.split("def _resolve_project_vector_runtime", 1)[1].split("def _search_documents_with_runtime", 1)[0]
     assert "project_vector_route_store.get(project_id)" in block
     assert "route.active_binding_id" in block
@@ -56,7 +62,7 @@ def test_retrieval_uses_project_vector_route_binding_not_runtime_collection():
 
 
 def test_agentic_rag_reuses_one_resolved_vector_route():
-    app = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     project_chat = app.split("effective_project_id = project_resolution.resolved_project_id", 1)[1]
     assert "retrieval_runtime = _resolve_project_vector_runtime(effective_project_id)" in project_chat
     assert "_search_documents_with_runtime(" in project_chat
@@ -106,7 +112,9 @@ def test_catalog_revision_is_content_derived_and_ignores_availability_flaps(monk
 
 
 def test_model_list_contract_exposes_catalog_revision():
-    schemas = (ROOT / "backend" / "schemas.py").read_text(encoding="utf-8")
-    app = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    schemas = (
+        ROOT / "backend" / "contracts" / "models.py"
+    ).read_text(encoding="utf-8")
+    app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     assert "catalog_revision: str" in schemas
     assert "catalog_revision=model_catalog_revision" in app

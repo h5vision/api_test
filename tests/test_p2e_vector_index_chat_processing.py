@@ -14,7 +14,9 @@ def test_p2e_migration_adds_vector_index_and_provider_chat_policy():
 
 
 def test_vector_index_registry_uses_concrete_generation_selector():
-    text = (ROOT / "backend" / "vector_indexes.py").read_text(encoding="utf-8")
+    text = (
+        ROOT / "backend" / "domains" / "vector_indexes" / "vector_indexes.py"
+    ).read_text(encoding="utf-8")
     assert '{"project_id": project_id, "generation_id": generation_id}' in text
     assert "$project_id" not in text
     assert "$generation_id" not in text
@@ -23,8 +25,12 @@ def test_vector_index_registry_uses_concrete_generation_selector():
 
 
 def test_both_managed_index_paths_register_vector_index():
-    indexer = (ROOT / "backend" / "repository_indexer.py").read_text(encoding="utf-8")
-    offline = (ROOT / "backend" / "offline_embeddings.py").read_text(encoding="utf-8")
+    indexer = (
+        ROOT / "backend" / "domains" / "repositories" / "repository_indexer.py"
+    ).read_text(encoding="utf-8")
+    offline = (
+        ROOT / "backend" / "domains" / "repositories" / "offline_embeddings.py"
+    ).read_text(encoding="utf-8")
     assert "_register_generation_vector_index" in indexer
     assert "PostgresVectorIndexStore" in indexer
     assert "_register_vector_index" in offline
@@ -32,7 +38,7 @@ def test_both_managed_index_paths_register_vector_index():
 
 
 def test_provider_managed_chat_bypasses_project_resolution_and_rag():
-    app = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     mode = app.index("processing_mode = generation_router.chat_processing_mode")
     direct = app.index("if direct_generation:", mode)
     resolution = app.index("project_resolution = resolve_project_id", direct)

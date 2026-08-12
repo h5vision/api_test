@@ -46,15 +46,21 @@ def test_schema_guard_requires_p2i_route_shape_without_rewriting_historical_base
 
 
 def test_build_readiness_and_route_promotion_are_separate():
-    store = (ROOT / "backend" / "repository_store.py").read_text(encoding="utf-8")
+    store = (
+        ROOT / "backend" / "domains" / "repositories" / "repository_store.py"
+    ).read_text(encoding="utf-8")
     completion = store.split("def complete_generation", 1)[1].split("def fail_generation", 1)[0]
     assert "SET status = 'ready'" in completion
     assert "verification_state = 'verified'" in completion
     assert "active_generation_id =" not in completion
     assert "SET status = 'retired'" not in completion
 
-    indexer = (ROOT / "backend" / "repository_indexer.py").read_text(encoding="utf-8")
-    offline = (ROOT / "backend" / "offline_embeddings.py").read_text(encoding="utf-8")
+    indexer = (
+        ROOT / "backend" / "domains" / "repositories" / "repository_indexer.py"
+    ).read_text(encoding="utf-8")
+    offline = (
+        ROOT / "backend" / "domains" / "repositories" / "offline_embeddings.py"
+    ).read_text(encoding="utf-8")
     assert "completed_binding_id = self.store.complete_generation" in indexer
     assert "promote_managed_binding" in indexer
     assert indexer.index("complete_generation") < indexer.index("promote_managed_binding")
@@ -64,7 +70,7 @@ def test_build_readiness_and_route_promotion_are_separate():
 
 
 def test_runtime_has_one_route_authority_and_no_active_generation_fallback():
-    app = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     block = app.split("def _resolve_project_vector_runtime", 1)[1].split(
         "def _search_documents_with_runtime", 1
     )[0]
@@ -74,7 +80,9 @@ def test_runtime_has_one_route_authority_and_no_active_generation_fallback():
     assert "snapshot_vector_binding_store.get(route.active_binding_id)" in block
     assert "active_generation_id" not in block
 
-    repository = (ROOT / "backend" / "repository_store.py").read_text(encoding="utf-8")
+    repository = (
+        ROOT / "backend" / "domains" / "repositories" / "repository_store.py"
+    ).read_text(encoding="utf-8")
     projection = repository.split("def get_active_generation", 1)[1].split(
         "def get_current_snapshot_context", 1
     )[0]
@@ -97,8 +105,10 @@ def test_persistent_selector_is_authoritative_for_managed_and_external_routes():
 
 
 def test_admin_route_contract_uses_binding_id_and_optimistic_revision():
-    schemas = (ROOT / "backend" / "schemas.py").read_text(encoding="utf-8")
-    app = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    schemas = (
+        ROOT / "backend" / "contracts" / "vector.py"
+    ).read_text(encoding="utf-8")
+    app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     assert "class ProjectVectorRouteWriteRequest" in schemas
     assert "binding_id: str" in schemas
     assert 'routing_mode: Literal["managed_auto", "pinned"]' in schemas

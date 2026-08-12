@@ -36,8 +36,12 @@ def test_managed_binding_registration_requires_generation_snapshot_index_agreeme
 
 
 def test_both_managed_index_paths_register_snapshot_vector_binding():
-    indexer = (ROOT / "backend" / "repository_indexer.py").read_text(encoding="utf-8")
-    offline = (ROOT / "backend" / "offline_embeddings.py").read_text(encoding="utf-8")
+    indexer = (
+        ROOT / "backend" / "domains" / "repositories" / "repository_indexer.py"
+    ).read_text(encoding="utf-8")
+    offline = (
+        ROOT / "backend" / "domains" / "repositories" / "offline_embeddings.py"
+    ).read_text(encoding="utf-8")
     assert "PostgresSnapshotVectorBindingStore" in indexer
     assert "register_managed_generation" in indexer
     assert "snapshot_id=snapshot_id" in indexer
@@ -47,7 +51,9 @@ def test_both_managed_index_paths_register_snapshot_vector_binding():
 
 
 def test_build_completion_requires_binding_and_verifies_it_atomically_without_routing():
-    text = (ROOT / "backend" / "repository_store.py").read_text(encoding="utf-8")
+    text = (
+        ROOT / "backend" / "domains" / "repositories" / "repository_store.py"
+    ).read_text(encoding="utf-8")
     completion = text.split("def complete_generation", 1)[1].split("def fail_generation", 1)[0]
     assert "FROM snapshot_vector_bindings" in completion
     assert "P2-G requires SnapshotVectorBinding before build completion" in completion
@@ -59,7 +65,9 @@ def test_build_completion_requires_binding_and_verifies_it_atomically_without_ro
 
 
 def test_generation_failure_marks_unverified_binding_failed():
-    text = (ROOT / "backend" / "repository_store.py").read_text(encoding="utf-8")
+    text = (
+        ROOT / "backend" / "domains" / "repositories" / "repository_store.py"
+    ).read_text(encoding="utf-8")
     failure = text.split("def fail_generation", 1)[1]
     assert "UPDATE snapshot_vector_bindings" in failure
     assert "verification_state = 'failed'" in failure
@@ -67,7 +75,7 @@ def test_generation_failure_marks_unverified_binding_failed():
 
 
 def test_retrieval_requires_verified_active_route_binding_before_vector_target_resolution():
-    text = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    text = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     runtime = text.split("def _resolve_project_vector_runtime", 1)[1].split("def _search_documents_with_runtime", 1)[0]
     assert "snapshot_vector_binding_store.get(route.active_binding_id)" in runtime
     assert "SNAPSHOT_VECTOR_BINDING_REQUIRED" in runtime
@@ -76,8 +84,10 @@ def test_retrieval_requires_verified_active_route_binding_before_vector_target_r
 
 
 def test_search_and_chat_expose_binding_provenance_for_p3():
-    schemas = (ROOT / "backend" / "schemas.py").read_text(encoding="utf-8")
-    app = (ROOT / "backend" / "app.py").read_text(encoding="utf-8")
+    schemas = (
+        ROOT / "backend" / "contracts" / "common.py"
+    ).read_text(encoding="utf-8")
+    app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     assert "snapshot_vector_binding_id: str | None = None" in schemas
     assert 'snapshot_vector_binding_id=binding.binding_id' in app
     assert '"snapshot_vector_binding_id": retrieval_binding.binding_id' in app
