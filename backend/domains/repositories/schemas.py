@@ -1,1 +1,3 @@
-from ...schemas import *  # noqa: F401,F403
+"""Repository domain imports from the canonical repository contracts."""
+from ...contracts.repositories import *
+from ...contracts.repositories import __all__

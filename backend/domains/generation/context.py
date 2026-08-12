@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ...schemas import ChatContextItem, HistoryMessage
+from ..chat.schemas import ChatContextItem, HistoryMessage
 
 def passthrough_messages(
     question: str,

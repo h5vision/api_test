@@ -1,2 +1,4 @@
-"""Internal compatibility bridge to public backend schemas."""
-from ...schemas import *  # noqa: F401,F403
+"""VectorDB integration imports from the canonical shared contract."""
+from ...contracts.common import Source
+
+__all__ = ["Source"]

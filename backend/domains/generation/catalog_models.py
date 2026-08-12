@@ -3,7 +3,7 @@ from __future__ import annotations
 import urllib.parse
 
 from ...ai_providers import AIProviderStoreError
-from ...schemas import ModelInfo
+from ...contracts.models import ModelInfo
 
 
 class GenerationCatalogModelsMixin:

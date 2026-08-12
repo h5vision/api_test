@@ -8,7 +8,8 @@ from uuid import uuid4
 from ...ai_providers import AIProviderRegistry
 from ...config import Settings
 from ...runtime_services import RuntimeGroqSettings
-from ...schemas import ChatContextItem, HistoryMessage, Source
+from ...contracts.common import Source
+from ..chat.schemas import ChatContextItem, HistoryMessage
 from ...services import ServiceError
 from .catalog import GenerationCatalogMixin
 from .context import passthrough_messages

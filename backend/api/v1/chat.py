@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, status
 
-from ...schemas import ChatContextResponse, ChatResponse
+from ...domains.chat.schemas import ChatContextResponse, ChatResponse
 
 
 def create_chat_router(

@@ -7,7 +7,7 @@ from typing import Any, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .schemas import Source
+from ...contracts.common import Source
 
 
 CANONICAL_CONTEXT_SCHEMA_VERSION = "1.0"

@@ -1,2 +1,5 @@
-"""Compatibility bridge to the legacy public schema module until Phase 13."""
-from ...schemas import *  # noqa: F401,F403
+"""RAG-local imports from canonical schema owners."""
+from ...contracts.common import SearchResponse, Source
+from ..chat.schemas import ChatContextItem, HistoryMessage
+
+__all__ = ["ChatContextItem", "HistoryMessage", "SearchResponse", "Source"]
