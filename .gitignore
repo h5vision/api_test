@@ -19,3 +19,5 @@ docs
 .gitignore
 *.txt
 snapshot-fetch_token.txt
+.snapshot-admin-backup/
+scripts/*.before-*
