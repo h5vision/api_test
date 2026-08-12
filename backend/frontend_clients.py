@@ -278,7 +278,11 @@ class PostgresFrontendClientStore:
                         (normalized_instance_id,),
                     ).fetchone()
                     reason = "instance_id"
-                if row is None:
+                # A stable Extension instance ID identifies one VS Code client
+                # even when several clients share the same NAT/proxy IP.  Keep
+                # source-IP matching only for legacy clients that cannot send
+                # an instance ID.
+                if row is None and not normalized_instance_id:
                     row = connection.execute(
                         """
                         SELECT * FROM frontend_clients
