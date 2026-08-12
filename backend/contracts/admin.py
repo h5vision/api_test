@@ -174,7 +174,7 @@ class FrontendClientWriteRequest(BaseModel):
     @field_validator("ip")
     @classmethod
     def validate_ip(cls, value: str) -> str:
-        from .runtime_config import validate_runtime_ip
+        from ..runtime_config import validate_runtime_ip
 
         try:
             return validate_runtime_ip(value)
@@ -220,7 +220,7 @@ class NetworkEndpointSettings(BaseModel):
     @field_validator("ip")
     @classmethod
     def validate_ip(cls, value: str) -> str:
-        from .runtime_config import validate_runtime_ip
+        from ..runtime_config import validate_runtime_ip
 
         try:
             return validate_runtime_ip(value)

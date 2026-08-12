@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+from backend.contracts.admin import FrontendClientWriteRequest, NetworkEndpointSettings
 from backend.contracts.models import ModelListResponse
 from backend.contracts.projects import ProjectVersionCheckRequest
 from backend.contracts.repositories import UploadCreateRequest
@@ -64,3 +65,15 @@ def test_canonical_modules_are_importable_without_legacy_facade_imports() -> Non
         "backend.domains.chat.schemas",
     ):
         assert importlib.import_module(module_name) is not None
+
+
+def test_admin_ip_contracts_use_the_runtime_validator_after_schema_split() -> None:
+    client = FrontendClientWriteRequest(
+        name="VS Code",
+        ip="192.168.0.18",
+        port=8888,
+    )
+    endpoint = NetworkEndpointSettings(ip="192.168.0.12", port=11500)
+
+    assert client.ip == "192.168.0.18"
+    assert endpoint.ip == "192.168.0.12"
