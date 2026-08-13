@@ -635,8 +635,8 @@ class PostgresRepositoryStore:
             with self._connect() as connection:
                 return connection.execute(
                     f"""
-                    SELECT snapshot_id, project_id, revision, manifest_sha256,
-                           status, created_at, completed_at
+                    SELECT snapshot_id, project_id, source_id, revision,
+                           manifest_sha256, status, created_at, completed_at
                     FROM project_snapshots
                     WHERE {where}
                     ORDER BY created_at DESC
@@ -982,7 +982,7 @@ class PostgresRepositoryStore:
                 return connection.execute(
                     """
                     SELECT p.project_id, p.current_snapshot_id AS snapshot_id,
-                           s.revision, s.manifest_sha256,
+                           s.source_id, s.revision, s.manifest_sha256,
                            (
                                SELECT ig.generation_id
                                FROM index_generations AS ig

@@ -68,3 +68,25 @@ def test_ollama_probe_preserves_preferred_model_fallback_semantics(monkeypatch):
     )
     assert result["selected_model"] is None
     assert result["model_available"] is True
+
+def test_ollama_probe_reports_missing_base_url_without_building_invalid_request(monkeypatch):
+    mod=_load("backend.integrations.ai_server.ollama","ollama.py")
+    monkeypatch.setattr(
+        mod.urllib.request,
+        "urlopen",
+        lambda *args,**kwargs: (_ for _ in ()).throw(
+            AssertionError("urlopen must not be called")
+        ),
+    )
+    result=mod.probe_model_catalog(
+        "  ", "", timeout_seconds=2,
+        selected_model=None, preferred_model=None,
+    )
+    assert result=={
+        "status":"offline",
+        "connected":False,
+        "model_available":False,
+        "models":[],
+        "latency_ms":0,
+        "error":"missing_base_url",
+    }

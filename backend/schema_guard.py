@@ -5,7 +5,7 @@ from typing import Any, Mapping, Sequence
 
 
 BASELINE_REVISION = "p2a_0001_baseline"
-CURRENT_REVISION = "p3_0009_chat_intake_normalization"
+CURRENT_REVISION = "p3_0010_external_project_registry"
 
 # P2-A adopts the complete PostgreSQL schema currently owned by Vision.  The
 # list is intentionally broader than Snapshot/Vector state: once Alembic owns
@@ -160,6 +160,20 @@ BASELINE_TABLE_COLUMNS: Mapping[str, tuple[str, ...]] = {
     "chat_intake_settings": (
         "singleton", "deep_normalization_enabled", "fallback_mode", "updated_at",
     ),
+    "rag_targets": (
+        "target_id", "name", "base_url", "enabled", "availability",
+        "last_seen_at", "error", "created_at", "updated_at",
+    ),
+    "external_project_catalog": (
+        "target_id", "external_project_id", "name", "state", "revision", "dirty",
+        "chunk_count", "actual_chunks", "indexed_at", "fingerprint", "availability",
+        "last_seen_at", "raw_metadata", "created_at", "updated_at",
+    ),
+    "project_external_bindings": (
+        "project_id", "target_id", "external_project_id", "binding_method",
+        "binding_strength", "verification_state", "last_verified_at", "error",
+        "created_at", "updated_at",
+    ),
     "frontend_metadata": (
         "metadata_id", "project_id", "session_id", "scope", "entity_id",
         "source", "payload", "created_at", "updated_at",
@@ -184,6 +198,9 @@ P2A_BASELINE_TABLE_COLUMNS.pop("external_vector_index_verifications", None)
 P2A_BASELINE_TABLE_COLUMNS.pop("project_vector_routes", None)
 P2A_BASELINE_TABLE_COLUMNS.pop("project_vector_route_events", None)
 P2A_BASELINE_TABLE_COLUMNS.pop("chat_intake_settings", None)
+P2A_BASELINE_TABLE_COLUMNS.pop("rag_targets", None)
+P2A_BASELINE_TABLE_COLUMNS.pop("external_project_catalog", None)
+P2A_BASELINE_TABLE_COLUMNS.pop("project_external_bindings", None)
 P2A_BASELINE_TABLE_COLUMNS["frontend_clients"] = tuple(
     column
     for column in P2A_BASELINE_TABLE_COLUMNS["frontend_clients"]

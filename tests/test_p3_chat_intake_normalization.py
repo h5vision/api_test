@@ -162,4 +162,4 @@ def test_p3_migration_owns_global_and_per_client_policy() -> None:
     assert 'down_revision = "p2i_0008_project_vector_routes"' in migration
     assert "CREATE TABLE IF NOT EXISTS chat_intake_settings" in migration
     assert "chat_deep_normalization_mode IN ('inherit', 'auto', 'off')" in migration
-    assert 'CURRENT_REVISION = "p3_0009_chat_intake_normalization"' in guard
+    assert 'CURRENT_REVISION = "p3_0010_external_project_registry"' in guard

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import urllib.parse
 from collections.abc import Callable
+from typing import Any
 
 from ...services import ServiceError
 from ...integrations.ai_server.ollama import chat as ollama_chat
@@ -17,6 +18,7 @@ def try_generate_backendai(
     messages: list[dict[str, str]],
     frontend_context,
     routing_metadata: dict[str, str | None] | None,
+    vision_context: dict[str, Any] | None,
     delta_callback: Callable[[str], None] | None,
 ) -> GenerationResult | None:
     backendai_model: str | None = None
@@ -50,6 +52,8 @@ def try_generate_backendai(
                 requested,
                 backendai_messages,
                 request_id=resolved_request_id,
+                routing_metadata=routing_metadata,
+                vision_context=vision_context,
             )
             fragments: list[str] = []
             for fragment in streaming.deltas:
@@ -81,18 +85,21 @@ def try_generate_backendai(
                 f"{backendai_model}",
                 status_code=503,
             )
+        ai_payload: dict[str, Any] = {
+            "model": backendai_model,
+            "messages": backendai_messages,
+            "stream": False,
+            "options": {
+                "temperature": router.settings.ai_temperature,
+                "num_predict": router.settings.ai_max_tokens,
+                "num_ctx": router.settings.ai_context_window_tokens,
+            },
+        }
+        if vision_context:
+            ai_payload["vision_context"] = vision_context
         data = ollama_chat(
             router._backendai_base_url(),
-            {
-                "model": backendai_model,
-                "messages": backendai_messages,
-                "stream": False,
-                "options": {
-                    "temperature": router.settings.ai_temperature,
-                    "num_predict": router.settings.ai_max_tokens,
-                    "num_ctx": router.settings.ai_context_window_tokens,
-                },
-            },
+            ai_payload,
             router.settings.backendai_api_key,
             router.settings.request_timeout_seconds,
             extra_headers={

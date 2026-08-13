@@ -1,8 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 
 from ..contracts import TreeEntry
@@ -45,6 +45,15 @@ class GithubSourceAdapter(Protocol):
 
 
     def resolve_commit(self, repository_full_name: str, ref: str) -> GithubCommitInfo:
+        ...
+
+
+    def compare_commits(
+        self,
+        repository_full_name: str,
+        base_sha: str,
+        target_sha: str,
+    ) -> dict[str, Any]:
         ...
 
 

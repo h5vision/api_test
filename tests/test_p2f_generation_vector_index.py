@@ -18,7 +18,7 @@ def test_p2f_migration_adds_generation_vector_index_fk_without_legacy_guessing()
 
 def test_schema_guard_requires_p2f_but_p2a_shape_stays_historical():
     text = (ROOT / "backend" / "schema_guard.py").read_text(encoding="utf-8")
-    assert 'CURRENT_REVISION = "p3_0009_chat_intake_normalization"' in text
+    assert 'CURRENT_REVISION = "p3_0010_external_project_registry"' in text
     assert '"vector_index_id"' in text
     assert 'if column not in {"vector_index_id", "ready_at"}' in text
 

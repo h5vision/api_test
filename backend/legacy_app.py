@@ -97,6 +97,11 @@ from .snapshot_compare import (
     SnapshotComparisonError,
     SnapshotComparisonService,
 )
+from .domains.snapshots.revision_context import (
+    RevisionContextService,
+    RevisionObservationError,
+    RevisionObservationStore,
+)
 from .schemas import (
     ChatRequest,
     ChatResponse,
@@ -869,9 +874,14 @@ repository_store = PostgresRepositoryStore(settings)
 snapshot_repository = PostgresSnapshotRepository(settings)
 snapshot_service = SnapshotService(settings, repository=snapshot_repository)
 github_snapshot_service = GithubSnapshotService(bootstrap_settings)
+revision_context_service = RevisionContextService(
+    github_snapshot_service,
+    repository_store,
+)
 snapshot_comparison_service = SnapshotComparisonService(
     github_snapshot_service,
     repository_store,
+    revision_context_service=revision_context_service,
 )
 offline_embedding_importer = OfflineEmbeddingImporter(
     settings,
@@ -883,6 +893,7 @@ offline_embedding_importer = OfflineEmbeddingImporter(
 )
 local_project_registry = LocalProjectRegistry(bootstrap_settings.project_db_local_root)
 redis_coordinator = RedisCoordinator(bootstrap_settings)
+revision_observation_store = RevisionObservationStore(redis_coordinator)
 chat_context_service = ChatContextService(redis_coordinator, repository_store)
 upload_manager = UploadManager(
     bootstrap_settings,
@@ -1439,12 +1450,18 @@ def _apply_registered_chat_context(
             status_code=status.HTTP_409_CONFLICT,
             detail="Chat Body snapshot_id와 X-Vision-Context-ID의 Snapshot이 다릅니다.",
         )
+    if payload.commit_id and record.commit_id and payload.commit_id != record.commit_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Chat Body commit_id와 X-Vision-Context-ID의 Commit이 다릅니다.",
+        )
     request.state.vision_chat_context = record
     if not record.grounding_available:
         return payload
     return payload.model_copy(
         update={
             "project_id": record.project_id or payload.project_id,
+            "commit_id": record.commit_id or payload.commit_id,
             "snapshot_id": record.snapshot_id or payload.snapshot_id,
         }
     )
@@ -5251,6 +5268,22 @@ def compare_snapshot(
             detail=str(exc),
         ) from exc
 
+    if (
+        client_id
+        and result.revision_context is not None
+        and result.revision_diff is not None
+    ):
+        try:
+            revision_observation_store.record(
+                owner_client_id=client_id,
+                context=result.revision_context,
+                diff=result.revision_diff,
+            )
+        except RevisionObservationError:
+            # Revision observation only enriches the following Chat request.
+            # Snapshot comparison must remain usable when Redis is unavailable.
+            pass
+
     duration_ms = round((perf_counter() - started_at) * 1000)
     _safe_record_communication_event(
         request_id=request_id,
@@ -5732,6 +5765,46 @@ def _external_prompt_chat(
             ),
         )
     telemetry_client_id = _frontend_client_id(request, effective_project_id)
+    observed_revision = None
+    if telemetry_client_id and payload.commit_id:
+        try:
+            observed_revision = revision_observation_store.get(
+                owner_client_id=telemetry_client_id,
+                project_id=effective_project_id,
+                local_head_sha=payload.commit_id,
+            )
+        except RevisionObservationError:
+            observed_revision = None
+
+    cached_context = observed_revision.context if observed_revision is not None else None
+    cached_diff_is_compatible = bool(
+        cached_context is not None
+        and cached_context.snapshot_id == snapshot_id
+        and cached_context.snapshot.sha == (revision or None)
+        and payload.commit_id is not None
+        and payload.commit_id == cached_context.local.sha
+    )
+
+    # Chat only proves the commit_id it carries. A cached compare observation may
+    # contain a stale branch or dirty workspace from another VS Code window, so
+    # rebuild the semantic context and reuse only the immutable commit diff.
+    revision_context = revision_context_service.resolve(
+        project_id=effective_project_id,
+        local_head_sha=payload.commit_id,
+        branch=None,
+        snapshot_id=snapshot_id,
+        workspace_state="unknown",
+    )
+    if cached_diff_is_compatible and observed_revision is not None:
+        revision_diff = observed_revision.diff
+    else:
+        revision_diff = revision_context_service.diff(revision_context)
+
+    vision_revision_context = revision_context_service.ai_payload(
+        revision_context,
+        revision_diff,
+    )
+
     _safe_record_chat_audit_request(
         request_id=request_id,
         client_id=telemetry_client_id,
@@ -5862,11 +5935,17 @@ def _external_prompt_chat(
                 prompt_mode="external_vector_prompt",
                 messages_override=prompt_result.messages,
                 delta_callback=delta_callback,
+                vision_context=vision_revision_context,
                 routing_metadata={
                     "request_id": request_id,
                     "client_id": getattr(request.state, "frontend_client_id", None),
                     "project_id": effective_project_id,
                     "snapshot_id": snapshot_id,
+                    "base_revision": revision_context.snapshot.sha,
+                    "target_revision": revision_context.local.sha,
+                    "remote_revision": revision_context.remote.sha,
+                    "remote_ref": revision_context.remote.ref,
+                    "diff_status": revision_diff.status,
                     "session_id": payload.session_id,
                     "context_id": canonical_context.context_id,
                 },

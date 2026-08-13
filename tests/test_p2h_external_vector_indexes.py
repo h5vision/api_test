@@ -20,7 +20,7 @@ def test_p2h_migration_adds_external_verification_without_mutating_generation_co
 
 def test_schema_guard_requires_p2h_and_keeps_new_table_out_of_historical_baseline():
     text = (ROOT / "backend" / "schema_guard.py").read_text(encoding="utf-8")
-    assert 'CURRENT_REVISION = "p3_0009_chat_intake_normalization"' in text
+    assert 'CURRENT_REVISION = "p3_0010_external_project_registry"' in text
     assert '"external_vector_index_verifications"' in text
     assert '"verification_evidence"' in text
     assert 'P2A_BASELINE_TABLE_COLUMNS.pop("external_vector_index_verifications", None)' in text

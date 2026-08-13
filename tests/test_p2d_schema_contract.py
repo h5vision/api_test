@@ -26,7 +26,7 @@ def test_runtime_store_reads_selected_profile_id_not_legacy_embedding_fields():
 
 def test_p2d_shape_remains_required_under_p2f_current_guard():
     guard = (ROOT / "backend" / "schema_guard.py").read_text(encoding="utf-8")
-    assert 'CURRENT_REVISION = "p3_0009_chat_intake_normalization"' in guard
+    assert 'CURRENT_REVISION = "p3_0010_external_project_registry"' in guard
     assert '"embedding_profiles"' in guard
     assert 'P2A_BASELINE_TABLE_COLUMNS.pop("embedding_profiles", None)' in guard
     assert '"embedding_profile_id"' in guard

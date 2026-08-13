@@ -37,7 +37,7 @@ def test_p2i_migration_creates_route_authority_and_removes_generation_active_sem
 
 def test_schema_guard_requires_p2i_route_shape_without_rewriting_historical_baseline():
     text = (ROOT / "backend" / "schema_guard.py").read_text(encoding="utf-8")
-    assert 'CURRENT_REVISION = "p3_0009_chat_intake_normalization"' in text
+    assert 'CURRENT_REVISION = "p3_0010_external_project_registry"' in text
     assert '"project_vector_routes"' in text
     assert '"project_vector_route_events"' in text
     assert '"ready_at"' in text

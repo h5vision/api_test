@@ -5,9 +5,54 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .domains.snapshots.revision_context import (
+    NormalizedRevisionContext,
+    RevisionContextError,
+    RevisionContextService,
+    RevisionDiff,
+)
+
 
 SnapshotComparison = Literal["same", "different", "unknown"]
 SnapshotBaselineSource = Literal["github_commit", "project_registry", "none"]
+WorkspaceState = Literal["clean", "modified", "conflicted", "unknown"]
+
+
+class SnapshotGitState(BaseModel):
+    """Observed Git working-tree state supplied by the IDE.
+
+    This state never changes revision equality. It only answers whether the current
+    workspace contents still match an otherwise-equal immutable Snapshot.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    branch: str | None = Field(default=None, max_length=255)
+    dirty: bool | None = None
+    working_tree_count: int = Field(default=0, ge=0, le=1_000_000)
+    staged_count: int = Field(default=0, ge=0, le=1_000_000)
+    merge_count: int = Field(default=0, ge=0, le=1_000_000)
+    ahead: int = Field(default=0, ge=0, le=1_000_000)
+    behind: int = Field(default=0, ge=0, le=1_000_000)
+
+    @field_validator("branch", mode="before")
+    @classmethod
+    def normalize_branch(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
+    def workspace_state(self) -> WorkspaceState:
+        if self.merge_count > 0:
+            return "conflicted"
+        if self.dirty is True or self.working_tree_count > 0 or self.staged_count > 0:
+            return "modified"
+        if self.dirty is False:
+            return "clean"
+        return "unknown"
 
 
 class SnapshotCompareRequest(BaseModel):
@@ -21,6 +66,15 @@ class SnapshotCompareRequest(BaseModel):
                     "project_id": "h5vision/fest-api",
                     "commit_id": "afe41126f624af30038cc8e17b2aaf60ebd4b838",
                     "snapshot_id": None,
+                    "git_state": {
+                        "branch": "main",
+                        "dirty": False,
+                        "working_tree_count": 0,
+                        "staged_count": 0,
+                        "merge_count": 0,
+                        "ahead": 0,
+                        "behind": 0,
+                    },
                 }
             ]
         },
@@ -32,6 +86,7 @@ class SnapshotCompareRequest(BaseModel):
         pattern=r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$",
     )
     snapshot_id: str | None = Field(default=None, min_length=1, max_length=255)
+    git_state: SnapshotGitState | None = None
 
     @field_validator("project_id")
     @classmethod
@@ -68,6 +123,8 @@ class SnapshotCompareResponse(BaseModel):
     project_id: str
     comparison: SnapshotComparison
     same_version: bool | None
+    workspace_state: WorkspaceState = "unknown"
+    workspace_matches_snapshot: bool | None = None
     update_warning: bool
     registration_required: bool
     baseline_source: SnapshotBaselineSource
@@ -78,6 +135,8 @@ class SnapshotCompareResponse(BaseModel):
     matched_snapshot_id: str | None = None
     reason_code: str
     message: str
+    revision_context: NormalizedRevisionContext | None = None
+    revision_diff: RevisionDiff | None = None
 
 
 class GithubSnapshotServiceLike(Protocol):
@@ -86,6 +145,15 @@ class GithubSnapshotServiceLike(Protocol):
     def list_snapshots(self, repository_id: str, *, limit: int = 100) -> Any: ...
 
     def get_snapshot(self, snapshot_id: str) -> Any: ...
+
+    def resolve_revision(self, repository_id: str, ref: str | None = None) -> dict[str, str]: ...
+
+    def compare_revisions(
+        self,
+        repository_id: str,
+        base_sha: str,
+        target_sha: str,
+    ) -> dict[str, Any]: ...
 
 
 class ProjectSnapshotStoreLike(Protocol):
@@ -113,9 +181,15 @@ class SnapshotComparisonService:
         self,
         github_snapshots: GithubSnapshotServiceLike,
         project_snapshots: ProjectSnapshotStoreLike,
+        *,
+        revision_context_service: RevisionContextService | None = None,
     ) -> None:
         self._github = github_snapshots
         self._projects = project_snapshots
+        self._revisions = revision_context_service or RevisionContextService(
+            github_snapshots,
+            project_snapshots,
+        )
 
     @staticmethod
     def _value(item: Any, key: str) -> Any:
@@ -201,8 +275,30 @@ class SnapshotComparisonService:
             normalized_baseline = None
         return normalized_baseline, normalized
 
-    @staticmethod
+    def revision_context(
+        self,
+        payload: SnapshotCompareRequest,
+    ) -> NormalizedRevisionContext:
+        git_state = payload.git_state
+        workspace_state: WorkspaceState = (
+            git_state.workspace_state() if git_state is not None else "unknown"
+        )
+        return self._revisions.resolve(
+            project_id=payload.project_id,
+            local_head_sha=payload.commit_id,
+            branch=git_state.branch if git_state is not None else None,
+            snapshot_id=payload.snapshot_id,
+            workspace_state=workspace_state,
+            dirty=git_state.dirty if git_state is not None else None,
+            working_tree_count=git_state.working_tree_count if git_state is not None else 0,
+            staged_count=git_state.staged_count if git_state is not None else 0,
+            merge_count=git_state.merge_count if git_state is not None else 0,
+            ahead=git_state.ahead if git_state is not None else 0,
+            behind=git_state.behind if git_state is not None else 0,
+        )
+
     def _response(
+        self,
         *,
         request_id: str,
         payload: SnapshotCompareRequest,
@@ -214,6 +310,62 @@ class SnapshotComparisonService:
         message: str,
         registration_required: bool = False,
     ) -> SnapshotCompareResponse:
+        workspace_state: WorkspaceState = (
+            payload.git_state.workspace_state() if payload.git_state is not None else "unknown"
+        )
+        if comparison == "different":
+            workspace_matches_snapshot: bool | None = False
+        elif comparison == "unknown":
+            workspace_matches_snapshot = None
+        elif workspace_state == "clean":
+            workspace_matches_snapshot = True
+        elif workspace_state in {"modified", "conflicted"}:
+            workspace_matches_snapshot = False
+        else:
+            workspace_matches_snapshot = None
+
+        effective_reason = reason_code
+        effective_message = message
+        if comparison == "same" and workspace_state == "modified":
+            effective_reason = "working_tree_modified"
+            effective_message = (
+                "Git revision은 Backend 기준 Snapshot과 같지만 working tree 또는 staged "
+                "파일이 수정되어 현재 Workspace 내용은 Snapshot과 다릅니다."
+            )
+        elif comparison == "same" and workspace_state == "conflicted":
+            effective_reason = "working_tree_conflicted"
+            effective_message = (
+                "Git revision은 Backend 기준 Snapshot과 같지만 merge conflict가 있어 "
+                "현재 Workspace 내용은 Snapshot과 다릅니다."
+            )
+
+        try:
+            revision_context = self.revision_context(payload)
+            revision_diff = self._revisions.diff(revision_context)
+        except RevisionContextError:
+            revision_context = None
+            revision_diff = None
+        except Exception:
+            # Live GitHub resolution is diagnostic/enrichment and must not break
+            # the frozen Snapshot comparison contract.
+            revision_context = None
+            revision_diff = None
+
+        remote_update_available = bool(
+            revision_context is not None
+            and revision_context.local_vs_remote == "different"
+        )
+        if (
+            comparison == "same"
+            and remote_update_available
+            and workspace_state not in {"modified", "conflicted"}
+        ):
+            effective_reason = "remote_revision_different"
+            effective_message = (
+                "Frontend HEAD는 Backend 기준 Snapshot과 같지만 현재 Git branch의 "
+                "원격 revision과 다릅니다. 갱신 여부를 확인하세요."
+            )
+
         return SnapshotCompareResponse(
             request_id=request_id,
             checked_at=datetime.now(timezone.utc),
@@ -222,7 +374,13 @@ class SnapshotComparisonService:
             same_version=(
                 True if comparison == "same" else False if comparison == "different" else None
             ),
-            update_warning=comparison == "different",
+            workspace_state=workspace_state,
+            workspace_matches_snapshot=workspace_matches_snapshot,
+            update_warning=(
+                comparison == "different"
+                or workspace_matches_snapshot is False
+                or remote_update_available
+            ),
             registration_required=registration_required,
             baseline_source=baseline_source,
             baseline_snapshot_id=(baseline or {}).get("snapshot_id") or None,
@@ -230,8 +388,10 @@ class SnapshotComparisonService:
             requested_snapshot_id=payload.snapshot_id,
             requested_commit_id=payload.commit_id,
             matched_snapshot_id=matched_snapshot_id,
-            reason_code=reason_code,
-            message=message,
+            reason_code=effective_reason,
+            message=effective_message,
+            revision_context=revision_context,
+            revision_diff=revision_diff,
         )
 
     def compare(

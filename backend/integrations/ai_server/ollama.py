@@ -18,11 +18,21 @@ def probe_model_catalog(
     selected_model: str | None,
     preferred_model: str | None,
 ) -> dict[str, Any]:
+    normalized_base_url = base_url.strip().rstrip("/")
+    if not normalized_base_url:
+        return {
+            "status": "offline",
+            "connected": False,
+            "model_available": False,
+            "models": [],
+            "latency_ms": 0,
+            "error": "missing_base_url",
+        }
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
-        f"{base_url}/api/tags",
+        f"{normalized_base_url}/api/tags",
         headers=headers,
         method="GET",
     )
@@ -105,6 +115,8 @@ def stream_chat(
     payload: dict[str, Any],
     api_key: str,
     timeout_seconds: int,
+    *,
+    extra_headers: dict[str, str] | None = None,
 ) -> Iterator[str]:
     headers = {
         "Content-Type": "application/json",
@@ -113,6 +125,8 @@ def stream_chat(
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    if extra_headers:
+        headers.update(extra_headers)
     upstream_request = urllib.request.Request(
         f"{base_url}/api/chat",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),

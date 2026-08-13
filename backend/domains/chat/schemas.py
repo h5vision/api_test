@@ -156,6 +156,15 @@ class ChatRequest(BaseModel):
             "resolve the sole indexed non-default project; ambiguous projects return 409."
         ),
     )
+    commit_id: str | None = Field(
+        default=None,
+        pattern=r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$",
+        validation_alias=AliasChoices("commit_id", "commitId"),
+        description=(
+            "Optional frontend-observed local HEAD SHA. The Backend resolves the "
+            "authoritative remote revision independently."
+        ),
+    )
     message: str = Field(
         default="",
         max_length=MAX_CHAT_REQUEST_BYTES,
@@ -328,6 +337,31 @@ class ChatRequest(BaseModel):
         )
         raw["project_id"] = project_id
 
+        workspace_git = (
+            dict(workspace.get("git"))
+            if isinstance(workspace, dict) and isinstance(workspace.get("git"), dict)
+            else {}
+        )
+        commit_id = next(
+            (
+                str(candidate).strip()
+                for candidate in (
+                    raw.get("commit_id"),
+                    raw.get("commitId"),
+                    request_envelope.get("commit_id"),
+                    request_envelope.get("commitId"),
+                    workspace_git.get("commit_id"),
+                    workspace_git.get("commitId"),
+                    workspace_git.get("commit_sha"),
+                    workspace_git.get("head_sha"),
+                )
+                if candidate is not None and str(candidate).strip()
+            ),
+            None,
+        )
+        if commit_id:
+            raw["commit_id"] = commit_id
+
         snapshot_value = next(
             (
                 candidate
@@ -430,6 +464,8 @@ class ChatRequest(BaseModel):
         canonical_keys = {
             "project_id",
             "projectId",
+            "commit_id",
+            "commitId",
             "snapshot_id",
             "snapshotId",
             "snapshot",
@@ -492,6 +528,23 @@ class ChatRequest(BaseModel):
         raw.pop("request", None)
         raw.pop("chat_context", None)
         return raw
+
+    @field_validator("commit_id", mode="before")
+    @classmethod
+    def normalize_optional_chat_commit(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized.casefold() in {"", "none", "null", "undefined"}:
+                return None
+            return normalized
+        return value
+
+    @field_validator("commit_id")
+    @classmethod
+    def normalize_chat_commit_case(cls, value: str | None) -> str | None:
+        return value.lower() if value else None
 
     @field_validator("client_request_id", "model_id", mode="before")
     @classmethod

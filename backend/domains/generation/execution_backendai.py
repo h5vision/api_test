@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import urllib.parse
+from typing import Any
 from uuid import uuid4
 
 from ...services import ServiceError
@@ -14,6 +16,8 @@ class GenerationBackendAIExecutionMixin:
         messages: list[dict[str, str]],
         *,
         request_id: str | None = None,
+        routing_metadata: dict[str, str | None] | None = None,
+        vision_context: dict[str, Any] | None = None,
     ) -> StreamingGeneration:
         """Open the BackendAI Ollama NDJSON stream without buffering tokens."""
         resolved_request_id = request_id or f"req_{uuid4().hex}"
@@ -52,7 +56,7 @@ class GenerationBackendAIExecutionMixin:
             )
 
         base_url = self._backendai_base_url()
-        payload = {
+        payload: dict[str, Any] = {
             "model": backendai_model,
             "messages": messages,
             "stream": True,
@@ -62,6 +66,15 @@ class GenerationBackendAIExecutionMixin:
                 "num_predict": self.settings.ai_max_tokens,
                 "num_ctx": self.settings.ai_context_window_tokens,
             },
+        }
+        if vision_context:
+            payload["vision_context"] = vision_context
+        extra_headers = {
+            f"X-Vision-{key.replace('_', '-').title()}": urllib.parse.quote(
+                str(value), safe="._:/-"
+            )
+            for key, value in (routing_metadata or {}).items()
+            if value is not None and str(value)
         }
         return StreamingGeneration(
             request_id=resolved_request_id,
@@ -76,5 +89,6 @@ class GenerationBackendAIExecutionMixin:
                 payload,
                 self.settings.backendai_api_key,
                 self.settings.request_timeout_seconds,
+                extra_headers=extra_headers,
             ),
         )

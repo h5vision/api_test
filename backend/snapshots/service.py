@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from ..config import Settings
 from .adapters.base import GithubSourceAdapter
-from .adapters.github import PublicGithubAdapter
+from .adapters.github import GithubAdapterError, PublicGithubAdapter
 from .contracts import (
     AccessPlan,
     LocatorRecord,
@@ -289,6 +289,134 @@ class GithubSnapshotService:
                 status_code=503,
             ) from exc
 
+
+    def resolve_revision(
+        self,
+        repository_id: str,
+        ref: str | None = None,
+    ) -> dict[str, str]:
+        """Resolve a repository ref without registering a Snapshot."""
+        repository = self.get_repository(repository_id)
+        resolved_ref = (ref or "").strip() or repository.default_branch
+        try:
+            commit = self._github.resolve_commit(
+                repository.repository_full_name,
+                resolved_ref,
+            )
+        except GithubAdapterError as exc:
+            raise GithubSnapshotServiceError(
+                str(exc),
+                status_code=exc.status_code,
+            ) from exc
+        return {
+            "repository_id": repository.repository_id,
+            "repository_full_name": repository.repository_full_name,
+            "ref": resolved_ref,
+            "commit_sha": commit.commit_sha,
+            "tree_sha": commit.tree_sha,
+        }
+
+    def compare_revisions(
+        self,
+        repository_id: str,
+        base_sha: str,
+        target_sha: str,
+    ) -> dict:
+        """Compare two GitHub-known revisions without mutating Snapshot storage."""
+        repository = self.get_repository(repository_id)
+        if base_sha.strip().lower() == target_sha.strip().lower():
+            return {
+                "status": "not_needed",
+                "base_sha": base_sha.strip().lower(),
+                "target_sha": target_sha.strip().lower(),
+                "merge_base_sha": base_sha.strip().lower(),
+                "ahead_by": 0,
+                "behind_by": 0,
+                "total_commits": 0,
+                "files": [],
+                "file_count": 0,
+                "truncated": False,
+                "reason": None,
+            }
+        try:
+            result = self._github.compare_commits(
+                repository.repository_full_name,
+                base_sha,
+                target_sha,
+            )
+            return {
+                **result,
+                "status": "available",
+                "github_relation": result.get("status"),
+                "reason": result.get("reason"),
+            }
+        except GithubAdapterError as exc:
+            if exc.status_code != 404:
+                return {
+                    "status": "failed",
+                    "base_sha": base_sha.strip().lower(),
+                    "target_sha": target_sha.strip().lower(),
+                    "files": [],
+                    "file_count": 0,
+                    "truncated": False,
+                    "reason": str(exc),
+                }
+
+            # A compare 404 is ambiguous. Resolve both objects separately so an
+            # unpushed local target is distinguishable from a missing baseline.
+            try:
+                self._github.resolve_commit(repository.repository_full_name, base_sha)
+            except GithubAdapterError as base_exc:
+                if base_exc.status_code == 404:
+                    return {
+                        "status": "base_object_unavailable",
+                        "base_sha": base_sha.strip().lower(),
+                        "target_sha": target_sha.strip().lower(),
+                        "files": [],
+                        "file_count": 0,
+                        "truncated": False,
+                        "reason": str(base_exc),
+                    }
+                return {
+                    "status": "failed",
+                    "base_sha": base_sha.strip().lower(),
+                    "target_sha": target_sha.strip().lower(),
+                    "files": [],
+                    "file_count": 0,
+                    "truncated": False,
+                    "reason": str(base_exc),
+                }
+            try:
+                self._github.resolve_commit(repository.repository_full_name, target_sha)
+            except GithubAdapterError as target_exc:
+                if target_exc.status_code == 404:
+                    return {
+                        "status": "target_object_unavailable",
+                        "base_sha": base_sha.strip().lower(),
+                        "target_sha": target_sha.strip().lower(),
+                        "files": [],
+                        "file_count": 0,
+                        "truncated": False,
+                        "reason": str(target_exc),
+                    }
+                return {
+                    "status": "failed",
+                    "base_sha": base_sha.strip().lower(),
+                    "target_sha": target_sha.strip().lower(),
+                    "files": [],
+                    "file_count": 0,
+                    "truncated": False,
+                    "reason": str(target_exc),
+                }
+            return {
+                "status": "failed",
+                "base_sha": base_sha.strip().lower(),
+                "target_sha": target_sha.strip().lower(),
+                "files": [],
+                "file_count": 0,
+                "truncated": False,
+                "reason": str(exc),
+            }
 
     def create_snapshot(
         self,

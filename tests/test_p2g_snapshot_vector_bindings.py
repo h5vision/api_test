@@ -18,7 +18,7 @@ def test_p2g_migration_adds_binding_registry_and_backfills_only_p2f_bound_manage
 
 def test_schema_guard_requires_p2g_binding_shape():
     text = (ROOT / "backend" / "schema_guard.py").read_text(encoding="utf-8")
-    assert 'CURRENT_REVISION = "p3_0009_chat_intake_normalization"' in text
+    assert 'CURRENT_REVISION = "p3_0010_external_project_registry"' in text
     assert '"snapshot_vector_bindings"' in text
     assert '"snapshot_fingerprint"' in text
     assert '"vector_index_identity_key"' in text

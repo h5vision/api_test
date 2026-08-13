@@ -57,6 +57,7 @@ class GenerationRouter(GenerationExecutionMixin, GenerationCatalogMixin):
         request_id: str | None = None,
         prompt_mode: str = "passthrough",
         routing_metadata: dict[str, str | None] | None = None,
+        vision_context: dict[str, Any] | None = None,
         messages_override: list[dict[str, str]] | None = None,
         delta_callback: Callable[[str], None] | None = None,
     ) -> GenerationResult:
@@ -83,6 +84,7 @@ class GenerationRouter(GenerationExecutionMixin, GenerationCatalogMixin):
             messages=messages,
             frontend_context=frontend_context,
             routing_metadata=routing_metadata,
+            vision_context=vision_context,
             delta_callback=delta_callback,
         )
         if backendai_result is not None:
