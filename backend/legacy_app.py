@@ -56,7 +56,7 @@ from .canonical_context import (
     build_canonical_context,
 )
 from .generation import GenerationRouter
-from .chat_routing import classify_chat_request
+from .chat_routing import classify_chat_request, allows_unresolved_project_fallback
 from .metadata_store import MetadataStoreError, PostgresMetadataStore
 from .model_catalog import model_catalog_revision
 from .model_access import (
@@ -6014,6 +6014,33 @@ def _chat_json(
         if processing_mode == "vision_managed"
         else None
     )
+    project_resolution = None
+    project_registry_error: str | None = None
+    if route_decision is not None and route_decision.project_required:
+        try:
+            project_resolution = resolve_project_id(
+                payload.project_id,
+                project_store.list_projects(),
+                configured_aliases=settings.project_id_aliases,
+            )
+        except ProjectStoreError as exc:
+            # Snapshot-grounded requests must remain fail-closed. A plain
+            # workspace/project hint must not make ordinary Chat unavailable.
+            if payload.snapshot_id:
+                raise _project_store_error() from exc
+            project_registry_error = type(exc).__name__
+    unresolved_project_fallback = bool(
+        route_decision is not None
+        and allows_unresolved_project_fallback(
+            route_decision,
+            resolved_project_id=(
+                project_resolution.resolved_project_id
+                if project_resolution is not None
+                else None
+            ),
+            snapshot_id=payload.snapshot_id,
+        )
+    )
     context_chars = (
         len(payload.context)
         if isinstance(payload.context, str)
@@ -6029,14 +6056,43 @@ def _chat_json(
     direct_generation = (
         processing_mode == "provider_managed"
         or (route_decision is not None and not route_decision.project_required)
+        or unresolved_project_fallback
     )
 
     if direct_generation:
         effective_project_id = (
             payload.project_id
-            if payload.project_id not in {"__auto__", "auto", "default"}
+            if (
+                not unresolved_project_fallback
+                and payload.project_id not in {"__auto__", "auto", "default"}
+            )
             else "__unscoped__"
         )
+        if unresolved_project_fallback:
+            project_resolution_metadata = (
+                project_resolution.metadata()
+                if project_resolution is not None
+                else {
+                    "requested_project_id": payload.project_id,
+                    "resolved_project_id": None,
+                    "strategy": "project_registry_unavailable",
+                    "confidence": 0.0,
+                    "candidates": [],
+                    "error": project_registry_error,
+                }
+            )
+        else:
+            project_resolution_metadata = {
+                "requested_project_id": payload.project_id,
+                "resolved_project_id": (
+                    None
+                    if effective_project_id == "__unscoped__"
+                    else effective_project_id
+                ),
+                "strategy": "not_required",
+                "confidence": 1.0,
+                "candidates": [],
+            }
         telemetry_client_id = _frontend_client_id(request, effective_project_id)
         _safe_record_chat_audit_request(
             request_id=request_id,
@@ -6123,23 +6179,33 @@ def _chat_json(
                 "project_id": None if effective_project_id == "__unscoped__" else effective_project_id,
                 "requested_project_id": payload.project_id,
                 "resolved_project_id": None if effective_project_id == "__unscoped__" else effective_project_id,
-                "project_resolution": {
-                    "strategy": "not_required",
-                    "candidates": [],
-                },
+                "project_resolution": project_resolution_metadata,
                 "session_id": payload.session_id,
                 "requested_model_id": generation.requested_model_id,
                 "used_model_id": generation.used_model_id,
                 "provider": generation.provider,
                 "chat_processing_mode": processing_mode,
                 "chat_route": route_name,
-                "chat_route_reasons": list(route_decision.reasons) if route_decision else [],
+                "chat_route_reasons": [
+                    *(list(route_decision.reasons) if route_decision else []),
+                    *(
+                        ["unresolved_project_hint_fallback"]
+                        if unresolved_project_fallback
+                        else []
+                    ),
+                ],
                 "fallback_used": generation.requested_model_id != generation.used_model_id,
                 "finish_reason": "stop",
                 "timing": {"retrieval_ms": 0, "generation_ms": generation_ms, "total_ms": total_ms},
                 "retrieval": {
                     "skipped": True,
-                    "reason": "provider_managed" if processing_mode == "provider_managed" else "general_chat",
+                    "reason": (
+                        "provider_managed"
+                        if processing_mode == "provider_managed"
+                        else "unresolved_project_hint"
+                        if unresolved_project_fallback
+                        else "general_chat"
+                    ),
                 },
                 "request_normalization": {
                     "auto_project_requested": payload.project_id == "__auto__",
@@ -6154,14 +6220,10 @@ def _chat_json(
             },
         )
 
-    try:
-        project_resolution = resolve_project_id(
-            payload.project_id,
-            project_store.list_projects(),
-            configured_aliases=settings.project_id_aliases,
-        )
-    except ProjectStoreError as exc:
-        raise _project_store_error() from exc
+    # Strict project-grounded requests reach this point only with a resolved
+    # project, or with an explicit Snapshot that must fail closed below.
+    if project_resolution is None:
+        raise _project_store_error()
     if project_resolution.resolved_project_id is None:
         candidate_text = (
             ", ".join(project_resolution.candidates)
@@ -6714,13 +6776,21 @@ async def _chat_sse_body(
             sequence += 1
         response = await task
     except HTTPException as exc:
+        error_message = (
+            exc.detail
+            if isinstance(exc.detail, str)
+            else json.dumps(exc.detail, ensure_ascii=False, default=str)
+        )
         yield _sse_event(
             "error",
             request_id,
             sequence,
             {
                 "code": _error_code(exc.status_code),
-                "message": exc.detail,
+                "message": error_message,
+                # Keep the canonical message field and expose the legacy error
+                # alias so older VS Code clients can render the real cause.
+                "error": error_message,
                 "status_code": exc.status_code,
                 "retryable": exc.status_code in {429, 502, 503, 504},
             },
@@ -6728,13 +6798,15 @@ async def _chat_sse_body(
         return
     except Exception as exc:  # pragma: no cover - final stream safety boundary
         logger.exception("Unhandled Chat SSE failure request_id=%s", request_id)
+        error_message = str(exc) or "Chat Streaming 처리에 실패했습니다."
         yield _sse_event(
             "error",
             request_id,
             sequence,
             {
                 "code": "INTERNAL_ERROR",
-                "message": str(exc) or "Chat Streaming 처리에 실패했습니다.",
+                "message": error_message,
+                "error": error_message,
                 "status_code": 500,
                 "retryable": False,
             },

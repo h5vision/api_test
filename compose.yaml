@@ -112,7 +112,7 @@ services:
       UPLOAD_SESSION_TTL_HOURS: 72
       MAX_INDEXABLE_FILE_BYTES: 16777216
       BACKENDAI_BASE_URL: "${BACKENDAI_BASE_URL:-http://192.168.0.12:11434}"
-      BACKENDAI_MODEL: "${BACKENDAI_MODEL:-gemma3:4b}"
+      BACKENDAI_MODEL: "${BACKENDAI_MODEL:-qwen2.5-coder:7b}"
       GROQ_BASE_URL: "${GROQ_BASE_URL:-https://api.groq.com/openai/v1}"
       GROQ_MODEL: "${GROQ_MODEL:-llama-3.3-70b-versatile}"
       GROQ_PUBLIC_MODEL_ID: "${GROQ_PUBLIC_MODEL_ID:-groq-default}"

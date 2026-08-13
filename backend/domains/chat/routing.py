@@ -94,3 +94,23 @@ def classify_chat_request(payload: ChatRequest) -> ChatRouteDecision:
         project_required=project_required,
         reasons=tuple(dict.fromkeys(reasons)),
     )
+
+
+def allows_unresolved_project_fallback(
+    decision: ChatRouteDecision,
+    *,
+    resolved_project_id: str | None,
+    snapshot_id: str | None,
+) -> bool:
+    """Keep Chat available when a Frontend workspace hint is not indexed.
+
+    A workspace-derived ``project_id`` is advisory until Vision resolves it to
+    one indexed project.  An explicit Snapshot remains strict because silently
+    discarding immutable grounding would answer against the wrong revision.
+    """
+
+    return bool(
+        decision.project_required
+        and not resolved_project_id
+        and not (snapshot_id or "").strip()
+    )

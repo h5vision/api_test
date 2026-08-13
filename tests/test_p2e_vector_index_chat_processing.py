@@ -40,9 +40,18 @@ def test_both_managed_index_paths_register_vector_index():
 def test_provider_managed_chat_bypasses_project_resolution_and_rag():
     app = (ROOT / "backend" / "legacy_app.py").read_text(encoding="utf-8")
     mode = app.index("processing_mode = generation_router.chat_processing_mode")
+    guarded_resolution = app.index(
+        "if route_decision is not None and route_decision.project_required:",
+        mode,
+    )
+    resolution = app.index("project_resolution = resolve_project_id", guarded_resolution)
     direct = app.index("if direct_generation:", mode)
-    resolution = app.index("project_resolution = resolve_project_id", direct)
-    assert mode < direct < resolution
+    retrieval = app.index(
+        "retrieval_runtime = _resolve_project_vector_runtime",
+        direct,
+    )
+    assert 'if processing_mode == "vision_managed"' in app[mode:guarded_resolution]
+    assert mode < guarded_resolution < resolution < direct < retrieval
     assert '"provider_managed" if processing_mode == "provider_managed" else "direct"' in app
     assert '"retrieval_ms": 0' in app
 

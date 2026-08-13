@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from backend.chat_contexts import ChatContextError, ChatContextService
-from backend.chat_routing import classify_chat_request
+from backend.chat_routing import (
+    allows_unresolved_project_fallback,
+    classify_chat_request,
+)
+from backend.project_resolution import resolve_project_id
 from backend.chat_streaming import wants_chat_sse
 from backend.schemas import ChatContextRegistrationRequest, ChatRequest
 
@@ -81,6 +85,40 @@ def test_project_words_without_separate_identity_remain_general_chat() -> None:
 
     assert decision.project_required is False
     assert "project_language_without_identity" in decision.reasons
+
+
+def test_unresolved_workspace_project_hint_falls_back_to_general_chat() -> None:
+    payload = ChatRequest.model_validate(
+        {"role": "user", "project_id": "cli", "content": "일반 질문"}
+    )
+    decision = classify_chat_request(payload)
+    resolution = resolve_project_id(payload.project_id, [])
+
+    assert decision.project_required is True
+    assert resolution.strategy == "no_indexed_projects"
+    assert allows_unresolved_project_fallback(
+        decision,
+        resolved_project_id=resolution.resolved_project_id,
+        snapshot_id=payload.snapshot_id,
+    ) is True
+
+
+def test_unresolved_project_with_snapshot_remains_fail_closed() -> None:
+    payload = ChatRequest.model_validate(
+        {
+            "role": "user",
+            "project_id": "cli",
+            "snapshot_id": "snap_missing",
+            "content": "Snapshot 질문",
+        }
+    )
+    decision = classify_chat_request(payload)
+
+    assert allows_unresolved_project_fallback(
+        decision,
+        resolved_project_id=None,
+        snapshot_id=payload.snapshot_id,
+    ) is False
 
 
 def test_separate_context_fields_are_all_optional() -> None:

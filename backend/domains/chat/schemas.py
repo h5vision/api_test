@@ -129,7 +129,7 @@ class ChatRequest(BaseModel):
             "examples": [
                 {
                     "role": "user",
-                    "model_id": "backendai:gemma3:4b",
+                    "model_id": "backendai:qwen2.5-coder:7b",
                     "content": "이 프로젝트의 실행 구조를 설명해줘",
                     "stream": True,
                 }

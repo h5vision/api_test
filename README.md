@@ -299,7 +299,7 @@ GET /v1/admin/connectivity
 
 frontend는 마지막 신호가 75초 이내면 `online`, 180초 이내면 `stale`, 그
 이후는 `offline`입니다. 아직 신호가 한 번도 없으면 `unknown`입니다.
-BackendAI는 내부 Ollama `/api/tags`에 실제 요청을 보내고 `gemma3:4b` 모델까지
+BackendAI는 내부 Ollama `/api/tags`에 실제 요청을 보내고 `qwen2.5-coder:7b` 모델까지
 확인하여 `online`, `degraded`, `offline`으로 표시합니다. 내부 IP가 포함되는
 관리자 상태 응답은 공개하지 않으며 API key는 어떤 상태 응답에도 포함하지
 않습니다.
