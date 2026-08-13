@@ -690,18 +690,38 @@ Postgres    Qdrant       Redis Stream
        Docker 내부망 전용
 ```
 
-로컬의 `traefik:latest`와 `mecodia/python-base-granian:v1` 이미지를 재사용합니다. API 소스는 이미지에 복사하지 않고 `PROJECT_PATH`를 `/workspace`에, Repository 원본 루트는 `PROJECT_DB_LOCAL_ROOT`를 `/project-db`에 각각 읽기 전용 bind mount합니다. `api-deps` 초기화 컨테이너가 Python 의존성을 `api_python_deps` 볼륨에 설치하므로 Windows용 `.venv`를 Linux 컨테이너에서 재사용하지 않습니다. PostgreSQL, Qdrant, Redis는 호스트 포트를 공개하지 않습니다.
+필요한 이미지는 로컬에 없으면 registry에서 자동으로 받습니다. API 소스는 이미지에 복사하지 않고 clone한 현재 디렉터리를 `/workspace`에 읽기 전용 bind mount합니다. `api-deps` 초기화 컨테이너가 Python 의존성을 `api_python_deps` 볼륨에 설치하므로 호스트의 `.venv`를 Linux 컨테이너에서 재사용하지 않습니다. PostgreSQL, Qdrant, Redis는 호스트 포트를 공개하지 않습니다.
 
-먼저 Compose 환경 파일을 만들고 예제 비밀값을 실제 값으로 바꿉니다.
+### Clone 후 가장 짧은 실행
+
+Docker Desktop 또는 Docker Engine의 Linux container 환경에서 Repository 루트에서 실행합니다.
+
+```powershell
+docker compose config --quiet
+docker compose up -d
+docker compose ps
+```
+
+기본 실행은 다음을 자동 처리합니다.
+
+- PostgreSQL, Redis, Qdrant 내부 credential 최초 생성 및 Docker volume 보존
+- Python dependency 설치
+- `alembic upgrade head`
+- 관리자 Vite build
+- FastAPI, worker, Traefik, 관리자 Nginx 기동
+
+호스트 IP, clone 경로, 외부 AI/RAG 주소를 고정하지 않아도 `/v1/health`, `/docs`, 관리자 페이지까지 기동됩니다. AI Server와 RAG Server가 없으면 해당 연결만 offline/setup-required로 표시되며 FastAPI 자체는 계속 응답합니다.
+
+다른 bind IP나 외부 서비스를 지정할 때만 Compose 환경 파일을 만듭니다.
 
 ```powershell
 Copy-Item .\compose.env.example .\compose.env
 notepad .\compose.env
 ```
 
-`PROJECT_PATH`와 `PROJECT_DB_LOCAL_ROOT`는 Docker Desktop이 접근 가능한 Windows 절대 경로를 `/` 구분자로 입력합니다. Compose의 `type: bind`는 `docker run --mount type=bind`와 같은 기능입니다. Docker의 `-m` 옵션은 마운트가 아니라 메모리 제한입니다.
+`PROJECT_PATH=.`이 기본값이므로 clone 위치를 바꿔도 수정할 필요가 없습니다. 다른 Repository 루트를 노출할 때만 `PROJECT_DB_LOCAL_ROOT`에 Docker가 접근 가능한 절대 경로를 입력합니다. Compose의 `type: bind`는 `docker run --mount type=bind`와 같은 기능입니다. Docker의 `-m` 옵션은 마운트가 아니라 메모리 제한입니다.
 
-`compose.env`의 Qdrant와 Redis 비밀값을 교체한 뒤 전체 스택을 시작합니다. PostgreSQL 비밀번호는 `runtime_secrets` Docker 볼륨에 최초 실행 시 안전한 난수로 자동 생성되며 Compose 환경 파일에 기록되지 않습니다.
+Qdrant, Redis, PostgreSQL 비밀번호는 값이 없으면 `runtime_secrets` Docker 볼륨에 최초 실행 시 안전한 난수로 자동 생성됩니다. 운영자가 값을 공급하려면 `compose.env`에 `QDRANT_API_KEY`와 `REDIS_PASSWORD`를 지정합니다.
 
 ```powershell
 docker compose --env-file .\compose.env up -d --scale api=2
@@ -709,14 +729,14 @@ docker compose --env-file .\compose.env up -d --scale api=2
 
 | 접속 주소 | Traefik 대상 |
 |---|---|
-| `http://192.168.0.7:8000` | 모든 FastAPI 경로 |
-| `http://192.168.0.7/v1/*`, `/docs`, `/openapi.json`, `/redoc` | FastAPI |
-| `http://192.168.0.7/` | 관리자 Nginx |
+| `http://<SERVER_IP>:8000` | 모든 FastAPI 경로 |
+| `http://<SERVER_IP>/v1/*`, `/docs`, `/openapi.json`, `/redoc` | FastAPI |
+| `http://<SERVER_IP>/` | 관리자 Nginx |
 
-Tailwind CSS 관리자 화면은 `http://192.168.0.7`에 연결됩니다. 서버 PC에서는 `http://127.0.0.1:4173`으로도 확인할 수 있으며 포트는 `ADMIN_PREVIEW_PORT`로 변경할 수 있습니다.
+Tailwind CSS 관리자 화면은 `http://<SERVER_IP>`에 연결됩니다. 서버 PC에서는 `http://127.0.0.1:4180`으로도 확인할 수 있으며 포트는 `ADMIN_PREVIEW_PORT`로 변경할 수 있습니다.
 
 개발자용 sLLM Playground는
-`http://192.168.0.7/playground`에서 사용합니다. 모델 dropdown은
+`http://<SERVER_IP>/playground`에서 사용합니다. 모델 dropdown은
 `GET /v1/models`의 공개 `model_id`를 사용하며 BackendAI, NVIDIA와 Groq를 선택할 수
 있습니다. 실행 요청은 실제 frontend와 동일한 `POST /v1/chat`을 사용하고,
 답변의 provider, 실제 사용 모델, request ID, 소요시간과 RAG `sources[]`를
@@ -772,9 +792,9 @@ docker compose --env-file .\compose.env up -d
 docker compose --env-file .\compose.env ps
 ```
 
-확인 주소는 `http://192.168.0.7:8000/v1/health`입니다. Traefik은 `api` 컨테이너의 Docker label을 자동 감지하고 같은 서비스의 여러 replica에 요청을 분산합니다. `X-Backend-Instance` 응답 헤더로 실제 응답한 replica를 확인할 수 있습니다.
+확인 주소는 `http://127.0.0.1:8000/v1/health` 또는 `http://<SERVER_IP>:8000/v1/health`입니다. Traefik은 `api` 컨테이너의 Docker label을 자동 감지하고 같은 서비스의 여러 replica에 요청을 분산합니다. `X-Backend-Instance` 응답 헤더로 실제 응답한 replica를 확인할 수 있습니다.
 
-내부망 클라이언트는 `http://192.168.0.7:8000`으로도 같은 API를 호출할 수 있습니다. 호스트 8000 포트는 Python 프로세스에 직접 연결하지 않고 Traefik의 `direct-api` entrypoint가 받아 `vision-api` 서비스로 프록시합니다. `/v1/health`, `/v1/documents/ingest`, `/v1/documents/ingest-with-metadata`, `/v1/metadata`, `/v1/projects/{project_id}/metadata`, `/v1/search`, `/v1/chat` 요청·응답 형식은 도메인 경로와 동일합니다.
+내부망 클라이언트는 `http://<SERVER_IP>:8000`으로도 같은 API를 호출할 수 있습니다. 호스트 8000 포트는 Python 프로세스에 직접 연결하지 않고 Traefik의 `direct-api` entrypoint가 받아 `vision-api` 서비스로 프록시합니다. `/v1/health`, `/v1/documents/ingest`, `/v1/documents/ingest-with-metadata`, `/v1/metadata`, `/v1/projects/{project_id}/metadata`, `/v1/search`, `/v1/chat` 요청·응답 형식은 도메인 경로와 동일합니다.
 
 업로드 원본은 `api_data` 볼륨, 문서 원문·버전·metadata는 PostgreSQL, BGE-M3 벡터는 Qdrant에 영구 저장됩니다. PostgreSQL, Qdrant, Redis는 Docker 내부 `data` 네트워크에서만 접근할 수 있습니다.
 

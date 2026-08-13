@@ -3,11 +3,11 @@ name: vision
 services:
   traefik:
     image: traefik:latest
-    pull_policy: never
+    pull_policy: missing
     restart: unless-stopped
     ports:
-      - "${TRAEFIK_BIND_IP:-192.168.0.7}:80:80"
-      - "${TRAEFIK_BIND_IP:-192.168.0.7}:8000:8000"
+      - "${TRAEFIK_BIND_IP:-0.0.0.0}:80:80"
+      - "${TRAEFIK_BIND_IP:-0.0.0.0}:8000:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./deploy/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
@@ -25,7 +25,7 @@ services:
 
   api-deps:
     image: mecodia/python-base-granian:v1
-    pull_policy: never
+    pull_policy: missing
     restart: "no"
     entrypoint:
       - /bin/sh
@@ -37,7 +37,7 @@ services:
         && chown -R 100:101 /opt/vision-deps /data
     volumes:
       - type: bind
-        source: "${PROJECT_PATH:-C:/Users/PC2412/Documents/HancomAI5/Vision}"
+        source: "${PROJECT_PATH:-.}"
         target: /workspace
         read_only: true
         bind:
@@ -51,8 +51,12 @@ services:
 
   runtime-secrets-init:
     image: mecodia/python-base-granian:v1
-    pull_policy: never
+    pull_policy: missing
     restart: "no"
+    environment:
+      QDRANT_API_KEY: "${QDRANT_API_KEY:-}"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
+      SNAPSHOT_HYDRATION_TOKEN: "${SNAPSHOT_HYDRATION_TOKEN:-}"
     entrypoint:
       - python
       - -c
@@ -70,7 +74,28 @@ services:
         provider_target.write_text(
         provider_existing or base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(),
         encoding='utf-8');
-        os.chmod(provider_target, 0o444)
+        os.chmod(provider_target, 0o444);
+        qdrant_target = root / 'qdrant_api_key';
+        qdrant_existing = qdrant_target.read_text(encoding='utf-8').strip()
+        if qdrant_target.exists() else '';
+        qdrant_target.write_text(
+        os.getenv('QDRANT_API_KEY', '').strip() or qdrant_existing or secrets.token_urlsafe(48),
+        encoding='utf-8');
+        os.chmod(qdrant_target, 0o444);
+        redis_target = root / 'redis_password';
+        redis_existing = redis_target.read_text(encoding='utf-8').strip()
+        if redis_target.exists() else '';
+        redis_target.write_text(
+        os.getenv('REDIS_PASSWORD', '').strip() or redis_existing or secrets.token_urlsafe(48),
+        encoding='utf-8');
+        os.chmod(redis_target, 0o444);
+        hydration_target = root / 'snapshot_hydration_token';
+        hydration_existing = hydration_target.read_text(encoding='utf-8').strip()
+        if hydration_target.exists() else '';
+        hydration_target.write_text(
+        os.getenv('SNAPSHOT_HYDRATION_TOKEN', '').strip()
+        or hydration_existing or secrets.token_urlsafe(48), encoding='utf-8');
+        os.chmod(hydration_target, 0o444)
     volumes:
       - runtime_secrets:/run/vision-secrets
     networks:
@@ -78,9 +103,50 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  migrate:
+    image: mecodia/python-base-granian:v1
+    pull_policy: missing
+    restart: "no"
+    working_dir: /workspace
+    user: "100:101"
+    entrypoint:
+      - python
+    command:
+      - -m
+      - alembic
+      - upgrade
+      - head
+    environment:
+      PYTHONPATH: /opt/vision-deps:/workspace
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: "${POSTGRES_DB:-vision}"
+      POSTGRES_USER: "${POSTGRES_USER:-vision}"
+      POSTGRES_PASSWORD_FILE: /run/vision-secrets/postgres_password
+    volumes:
+      - type: bind
+        source: "${PROJECT_PATH:-.}"
+        target: /workspace
+        read_only: true
+        bind:
+          create_host_path: false
+      - api_python_deps:/opt/vision-deps:ro
+      - runtime_secrets:/run/vision-secrets:ro
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      api-deps:
+        condition: service_completed_successfully
+      runtime-secrets-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
   api:
     image: mecodia/python-base-granian:v1
-    pull_policy: never
+    pull_policy: missing
     restart: unless-stopped
     working_dir: /workspace
     user: "100:101"
@@ -90,7 +156,7 @@ services:
     environment:
       BACKEND_HOST: 0.0.0.0
       BACKEND_PORT: 8000
-      RAG_LAB_BASE_URL: "${RAG_LAB_BASE_URL:-http://192.168.0.12:8200}"
+      RAG_LAB_BASE_URL: "${RAG_LAB_BASE_URL:-}"
       RAG_LAB_TOKEN: "${RAG_LAB_TOKEN:-}"
       RAG_LAB_TIMEOUT_SECONDS: "${RAG_LAB_TIMEOUT_SECONDS:-60}"
       EMBEDDING_PROVIDER: ollama
@@ -111,32 +177,31 @@ services:
       UPLOAD_PART_SIZE_BYTES: 16777216
       UPLOAD_SESSION_TTL_HOURS: 72
       MAX_INDEXABLE_FILE_BYTES: 16777216
-      BACKENDAI_BASE_URL: "${BACKENDAI_BASE_URL:-http://192.168.0.12:11434}"
+      BACKENDAI_BASE_URL: "${BACKENDAI_BASE_URL:-}"
       BACKENDAI_MODEL: "${BACKENDAI_MODEL:-qwen2.5-coder:7b}"
       GROQ_BASE_URL: "${GROQ_BASE_URL:-https://api.groq.com/openai/v1}"
       GROQ_MODEL: "${GROQ_MODEL:-llama-3.3-70b-versatile}"
       GROQ_PUBLIC_MODEL_ID: "${GROQ_PUBLIC_MODEL_ID:-groq-default}"
-      FRONTEND_HOST: "${FRONTEND_HOST:-192.168.0.7}"
+      FRONTEND_HOST: "${FRONTEND_HOST:-127.0.0.1}"
       FRONTEND_PORT: "${FRONTEND_PORT:-8888}"
-      ADMIN_PROXY_IP: "${ADMIN_PROXY_IP:-172.30.0.10}"
       BACKENDAI_PUBLIC_MODEL_ID: backendai-default
       AI_PROVIDER_MASTER_KEY_FILE: /run/vision-secrets/ai_provider_master_key
       NVIDIA_PUBLIC_MODEL_ID: nvidia-default
       DEFAULT_MODEL_ID: backendai-default
       ALLOW_CLOUD_FALLBACK: "false"
       PYTHONPATH: /opt/vision-deps:/workspace
-      CORS_ORIGINS: "vscode-webview://*,http://127.0.0.1:*,http://localhost:*,http://192.168.0.7,http://192.168.0.7:8000"
-      TRUSTED_PROXY_HOSTS: "${EDGE_SUBNET:-172.30.0.0/24}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-vscode-webview://*,http://127.0.0.1:*,http://localhost:*}"
+      TRUSTED_PROXY_HOSTS: "${TRUSTED_PROXY_HOSTS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: "${POSTGRES_DB:-vision}"
       POSTGRES_USER: "${POSTGRES_USER:-vision}"
       POSTGRES_PASSWORD_FILE: /run/vision-secrets/postgres_password
       QDRANT_URL: http://qdrant:6333
-      QDRANT_API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY must be set}"
+      QDRANT_API_KEY_FILE: /run/vision-secrets/qdrant_api_key
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
+      REDIS_PASSWORD_FILE: /run/vision-secrets/redis_password
       REDIS_DB: 0
       TASK_QUEUE_NAME: vision:tasks:indexing
       SNAPSHOT_CONTROL_PLANE_ENABLED: "${SNAPSHOT_CONTROL_PLANE_ENABLED:-false}"
@@ -145,6 +210,7 @@ services:
       SNAPSHOT_ALLOWED_REPOSITORIES: "${SNAPSHOT_ALLOWED_REPOSITORIES:-h5vision/api_test}"
       SNAPSHOT_GITHUB_TIMEOUT_SECONDS: "${SNAPSHOT_GITHUB_TIMEOUT_SECONDS:-20}"
       SNAPSHOT_MAX_FILE_BYTES: "${SNAPSHOT_MAX_FILE_BYTES:-2097152}"
+      SNAPSHOT_HYDRATION_TOKEN_FILE: /run/vision-secrets/snapshot_hydration_token
     command:
       - --interface
       - asgi
@@ -162,19 +228,19 @@ services:
       - "8000"
     volumes:
       - type: bind
-        source: "${PROJECT_PATH:-C:/Users/PC2412/Documents/HancomAI5/Vision}"
+        source: "${PROJECT_PATH:-.}"
         target: /workspace
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: "${PROJECT_DB_LOCAL_ROOT:-C:/Users/PC2412/Documents/HancomAI5}"
+        source: "${PROJECT_DB_LOCAL_ROOT:-.}"
         target: /project-db
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: "${VECTOR_DB_LOCAL_ROOT:-C:/Users/PC2412/Documents/HancomAI5/Vision/data/vector-databases}"
+        source: "${VECTOR_DB_LOCAL_ROOT:-./data/vector-databases}"
         target: /vector-db-local
         read_only: false
         bind:
@@ -183,8 +249,11 @@ services:
       - api_data:/data
       - runtime_secrets:/run/vision-secrets:ro
     networks:
-      - edge
-      - data
+      edge:
+      data:
+      admin-internal:
+        aliases:
+          - api-admin
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
@@ -194,8 +263,8 @@ services:
         condition: service_completed_successfully
       runtime-secrets-init:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       qdrant:
@@ -212,7 +281,7 @@ services:
       start_period: 20s
     labels:
       traefik.enable: "true"
-      traefik.docker.network: vision-edge
+      traefik.docker.network: "${COMPOSE_PROJECT_NAME:-vision}-edge"
       traefik.http.routers.vision-api-web.rule: "PathPrefix(`/v1`) || PathPrefix(`/docs`) || Path(`/openapi.json`) || PathPrefix(`/redoc`)"
       traefik.http.routers.vision-api-web.entrypoints: web
       traefik.http.routers.vision-api-web.priority: "100"
@@ -248,14 +317,14 @@ services:
     restart: "no"
     working_dir: /workspace
     environment:
-      VITE_API_BASE_URL: "http://${TRAEFIK_BIND_IP:-192.168.0.7}:8000"
+      VITE_API_BASE_URL: "${VITE_API_BASE_URL:-}"
     command:
       - /bin/sh
       - -c
       - npm ci && npm run build -- --outDir /dist --emptyOutDir
     volumes:
       - type: bind
-        source: "${PROJECT_PATH:-C:/Users/PC2412/Documents/HancomAI5/Vision}/admin"
+        source: "${PROJECT_PATH:-.}/admin"
         target: /workspace
         read_only: true
         bind:
@@ -280,8 +349,8 @@ services:
       - admin_dist:/usr/share/nginx/html:ro
       - ./deploy/nginx/admin.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
-      edge:
-        ipv4_address: "${ADMIN_PROXY_IP:-172.30.0.10}"
+      - edge
+      - admin-internal
     security_opt:
       - no-new-privileges:true
     depends_on:
@@ -295,7 +364,7 @@ services:
       start_period: 5s
     labels:
       traefik.enable: "true"
-      traefik.docker.network: vision-edge
+      traefik.docker.network: "${COMPOSE_PROJECT_NAME:-vision}-edge"
       traefik.http.routers.vision-admin-web.rule: "PathPrefix(`/`)"
       traefik.http.routers.vision-admin-web.entrypoints: web
       traefik.http.routers.vision-admin-web.priority: "1"
@@ -330,11 +399,17 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.18.2
     restart: unless-stopped
-    environment:
-      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY must be set}"
-      QDRANT__SERVICE__ENABLE_TLS: "false"
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - >-
+        export QDRANT__SERVICE__API_KEY="$$(cat /run/vision-secrets/qdrant_api_key)"
+        && export QDRANT__SERVICE__ENABLE_TLS=false
+        && exec ./entrypoint.sh
     volumes:
       - qdrant_data:/qdrant/storage
+      - runtime_secrets:/run/vision-secrets:ro
     expose:
       - "6333"
       - "6334"
@@ -342,41 +417,45 @@ services:
       - data
     security_opt:
       - no-new-privileges:true
+    depends_on:
+      runtime-secrets-init:
+        condition: service_completed_successfully
 
   redis:
     image: redis:7.4.9-alpine
     restart: unless-stopped
-    environment:
-      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
     command:
       - /bin/sh
       - -c
-      - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+      - >-
+        exec redis-server --appendonly yes
+        --requirepass "$$(cat /run/vision-secrets/redis_password)"
     volumes:
       - redis_data:/data
+      - runtime_secrets:/run/vision-secrets:ro
     networks:
       - data
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$(cat /run/vision-secrets/redis_password)\" ping | grep PONG"]
       interval: 10s
       timeout: 3s
       retries: 10
       start_period: 5s
+    depends_on:
+      runtime-secrets-init:
+        condition: service_completed_successfully
 
 networks:
   edge:
-    name: vision-edge
-    ipam:
-      config:
-        - subnet: "${EDGE_SUBNET:-172.30.0.0/24}"
+    name: "${COMPOSE_PROJECT_NAME:-vision}-edge"
   data:
-    name: vision-data
+    name: "${COMPOSE_PROJECT_NAME:-vision}-data"
     internal: true
-    ipam:
-      config:
-        - subnet: "${DATA_SUBNET:-172.31.0.0/24}"
+  admin-internal:
+    name: "${COMPOSE_PROJECT_NAME:-vision}-admin-internal"
+    internal: true
 
 volumes:
   admin_node_modules:

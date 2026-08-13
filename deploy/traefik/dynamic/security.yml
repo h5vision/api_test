@@ -3,9 +3,15 @@ http:
     public-api-chain:
       chain:
         middlewares:
+          - strip-admin-proxy-header
           - public-api-rate-limit
           - public-security-headers
           - response-compression
+
+    strip-admin-proxy-header:
+      headers:
+        customRequestHeaders:
+          X-Vision-Admin-Proxy: ""
 
     public-api-rate-limit:
       rateLimit:
@@ -35,7 +41,9 @@ http:
       ipAllowList:
         sourceRange:
           - "127.0.0.1/32"
-          - "192.168.0.0/24"
+          - "10.0.0.0/8"
+          - "172.16.0.0/12"
+          - "192.168.0.0/16"
           - "172.30.0.0/24"
 
     admin-noindex:

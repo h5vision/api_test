@@ -1224,15 +1224,10 @@ PERSISTENCE_CAPABILITY_GROUPS: tuple[dict[str, Any], ...] = (
 
 
 def _require_admin_proxy(request: Request) -> None:
-    source_ip = request.client.host if request.client is not None else ""
-    local_development = (
-        source_ip in {"127.0.0.1", "::1"}
-        and settings.backend_host in {"127.0.0.1", "localhost"}
-    )
-    if (
-        request.headers.get("x-vision-admin-proxy") != "dashboard-internal"
-        or (source_ip != settings.admin_proxy_ip and not local_development)
-    ):
+    # admin-web reaches the API only through the private admin-internal Docker
+    # network. Public Traefik routes remove this header before proxying, so a
+    # browser cannot promote an ordinary public request to an Admin request.
+    if request.headers.get("x-vision-admin-proxy") != "dashboard-internal":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This administrator operation is only available through the dashboard",
