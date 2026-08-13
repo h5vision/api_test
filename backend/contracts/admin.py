@@ -229,7 +229,10 @@ class NetworkEndpointSettings(BaseModel):
 class NetworkSettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    frontend: NetworkEndpointSettings
+    # Frontend clients connect inbound and auto-enrol on their first Chat.
+    # Keep this optional field only for older dashboard/API clients that still
+    # maintain an outbound reachability probe target.
+    frontend: NetworkEndpointSettings | None = None
     backendai: NetworkEndpointSettings
 class NetworkEndpointSettingsResponse(BaseModel):
     ip: str = ""
