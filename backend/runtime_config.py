@@ -122,8 +122,6 @@ class PostgresRuntimeNetworkSettingsStore:
         value = self.get(refresh=refresh)
         return bool(
             value is not None
-            and value.frontend.ip
-            and value.frontend.port > 0
             and value.backendai.ip
             and value.backendai.port > 0
         )

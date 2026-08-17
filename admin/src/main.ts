@@ -55,6 +55,7 @@ import type {
   VectorRouteCandidatesResponse,
   VectorRouteRecord,
 } from "./features/vector-targets";
+import { vectorManagementMarkup } from "./features/vector-targets/markup";
 
 type ThemePreference = "dark" | "light" | "system";
 
@@ -323,80 +324,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
             </details>
           </article>
 
-          <article class="panel rounded-2xl p-4">
-            <div class="flex flex-wrap items-center gap-2">
-              <h2 class="text-sm font-semibold text-white/90">Managed Build Defaults · 검색 인덱스 / 임베딩</h2>
-              <span id="vector-runtime-badge" class="rounded-md border border-mint-300/20 bg-mint-400/7 px-2 py-1 font-mono text-[9px] font-bold text-mint-300">VECTOR SEARCH</span>
-            </div>
-            <form id="vector-settings-form" class="mt-3" autocomplete="off">
-              <div class="grid gap-2 sm:grid-cols-[1fr_100px]">
-                <label><span class="mb-1 block text-[10px] text-white/42">Managed build VectorTarget Host</span><input id="vector-host" class="playground-control w-full" required /></label>
-                ${endpointInput("Port", "vector-port", "port")}
-              </div>
-              <div class="mt-2 grid gap-2 sm:grid-cols-2">
-                <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">새 managed build Collection</span><input id="vector-collection" class="playground-control w-full" required /></label>
-                <label><span class="mb-1 block text-[10px] text-white/42">Embedding 실행 위치</span><select id="embedding-deployment" class="playground-control w-full"><option value="api">외부/내부 API</option><option value="local">API Server Local</option></select></label>
-                <label><span class="mb-1 block text-[10px] text-white/42">Embedding Provider</span><select id="embedding-provider" class="playground-control w-full"><option value="ollama">Ollama-compatible API</option><option value="openai">OpenAI-compatible API</option><option value="nvidia">NVIDIA-compatible API (legacy)</option></select></label>
-                <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">Embedding Base URL</span><input id="embedding-base-url" class="playground-control w-full" type="url" required placeholder="https://embedding-runtime.example/v1" /></label>
-                <label><span class="mb-1 block text-[10px] text-white/42">Embedding model</span><input id="embedding-model" class="playground-control w-full" required placeholder="provider/model-name" /></label>
-                <label><span class="mb-1 block text-[10px] text-white/42">Embedding Model ID</span><input id="embedding-model-id" class="playground-control w-full" required placeholder="embedding-profile-id" /></label>
-                <label><span class="mb-1 block text-[10px] text-white/42">Vector Dimension</span><input id="embedding-dimension" class="playground-control w-full" type="number" min="1" max="65536" required /></label>
-                <label><span class="mb-1 block text-[10px] text-white/42">Embedding Batch</span><input id="embedding-batch-size" class="playground-control w-full" type="number" min="1" max="256" required /></label>
-                <label><span class="mb-1 block text-[10px] text-white/42">Index version</span><input id="index-version" class="playground-control w-full" required /></label>
-              </div>
-              <button id="vector-settings-save" type="submit" class="mt-2 w-full rounded-lg border border-white/10 px-3 py-2 text-[11px] font-semibold text-white/65 hover:bg-white/5">Managed build defaults 저장</button>
-              <p id="vector-settings-message" class="mt-2 text-[10px] text-white/35" role="status" aria-live="polite">설정 조회 중</p>
-            </form>
-            <div class="mt-3 border-t border-white/7 pt-3">
-              <div class="flex items-center justify-between gap-2">
-                <div>
-                  <h3 class="text-[11px] font-semibold text-white/65">Project Vector Route</h3>
-                  <p class="mt-0.5 text-[9px] text-white/30">active_binding_id가 유일한 검색 authority입니다.</p>
-                </div>
-                <span id="vector-route-revision" class="font-mono text-[9px] text-white/30">rev 0</span>
-              </div>
-              <div class="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
-                <input id="vector-route-project" class="playground-control w-full" placeholder="project_id" />
-                <button id="vector-route-load" type="button" class="rounded-lg border border-white/10 px-3 py-2 text-[10px] font-semibold text-white/60 hover:bg-white/5">Route 조회</button>
-              </div>
-              <div id="vector-route-active" class="mt-2 rounded-lg border border-white/7 bg-black/10 p-2 text-[9px] text-white/40">project_id를 입력해 현재 route를 조회하세요.</div>
-              <div class="mt-2 grid gap-2 sm:grid-cols-2">
-                <label class="sm:col-span-2"><span class="mb-1 block text-[10px] text-white/42">Verified candidate binding</span><select id="vector-route-binding" class="playground-control w-full"><option value="">후보를 먼저 조회하세요</option></select></label>
-                <label><span class="mb-1 block text-[10px] text-white/42">Routing mode</span><select id="vector-route-mode" class="playground-control w-full"><option value="pinned">Pinned</option><option value="managed_auto">Managed auto</option></select></label>
-                <label><span class="mb-1 block text-[10px] text-white/42">변경 사유</span><input id="vector-route-reason" class="playground-control w-full" maxlength="2000" placeholder="선택/rollback 이유" /></label>
-              </div>
-              <div class="mt-2 grid grid-cols-2 gap-2">
-                <button id="vector-route-apply" type="button" class="rounded-lg bg-mint-400 px-3 py-2 text-[10px] font-bold text-ink-950 hover:bg-mint-300">Route 적용</button>
-                <button id="vector-route-clear" type="button" class="rounded-lg border border-danger-300/20 px-3 py-2 text-[10px] font-semibold text-danger-300 hover:bg-danger-300/5">Route 해제</button>
-              </div>
-              <p id="vector-route-message" class="mt-2 text-[10px] text-white/35" role="status" aria-live="polite">compatible ≠ routable ≠ active</p>
-            </div>
-            <div class="mt-3 border-t border-white/7 pt-3">
-              <button id="reembed-button" type="button" class="w-full rounded-lg bg-amber-300 px-3 py-2 text-[11px] font-bold text-ink-950 hover:brightness-105 disabled:opacity-50">등록 소스 전체 재임베딩</button>
-              <p id="reembed-status" class="mt-2 min-h-4 text-[10px] text-white/35" role="status" aria-live="polite">실제 Repository Index Job을 생성합니다.</p>
-            </div>
-            <div class="mt-3 border-t border-white/7 pt-3">
-              <div class="flex items-center justify-between gap-2">
-                <div>
-                  <h3 class="text-[11px] font-semibold text-white/65">외부 임베딩 결과 반영</h3>
-                  <p class="mt-0.5 text-[9px] text-white/30">Embedding artifact → 영속 원장 + 검색 인덱스</p>
-                </div>
-                <button id="embedding-artifact-refresh" type="button" class="rounded-md border border-white/10 px-2 py-1 text-[9px] text-white/50 hover:bg-white/5">새로고침</button>
-              </div>
-              <div id="embedding-artifact-list" class="mt-2 max-h-48 space-y-2 overflow-y-auto" aria-live="polite">
-                <p class="text-[10px] text-white/30">동기화된 Package를 조회하고 있습니다.</p>
-              </div>
-            </div>
-            <div class="mt-3 border-t border-white/7 pt-3">
-              <div class="flex items-center justify-between gap-2">
-                <h3 class="text-[11px] font-semibold text-white/65">소스 벡터화 · 검색 인덱스 생성</h3>
-                <span id="indexing-job-count" class="font-mono text-[9px] text-white/30">조회 중</span>
-              </div>
-              <div id="indexing-job-list" class="mt-2 max-h-56 space-y-2 overflow-y-auto" aria-live="polite">
-                <p class="text-[10px] text-white/30">Indexing Job을 조회하고 있습니다.</p>
-              </div>
-            </div>
-          </article>
+          ${vectorManagementMarkup()}
 
           <article class="panel rounded-2xl p-4 md:col-span-2 xl:col-span-3">
             <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
@@ -2185,7 +2113,6 @@ async function saveNetworkSettings(event: SubmitEvent): Promise<void> {
   setNetworkSettingsMessage("주소를 검증하고 저장하는 중입니다.");
   try {
     const payload = {
-      frontend: loadedNetworkSettings.frontend,
       backendai: {
         ip: inputValue("backendai-ip"),
         port: Number(inputValue("backendai-port")),

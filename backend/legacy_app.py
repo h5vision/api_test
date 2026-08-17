@@ -225,6 +225,7 @@ from .embedding_profiles import (
 )
 from .runtime_authority import RuntimeSettingsProxy, RuntimeSettingsResolver
 from .runtime_config import (
+    NetworkEndpoint,
     PostgresRuntimeNetworkSettingsStore,
     RuntimeNetworkSettings,
     RuntimeNetworkSettingsError,
@@ -600,25 +601,21 @@ async def request_context(request: Request, call_next: Any) -> Any:
             response.background = background
         return response
 
-    guard_exempt = (
+    public_discovery_request = (
+        request.method == "GET"
+        and path.rstrip("/") in {"/v1/models", "/v1/languages"}
+    ) or (
+        request.method == "POST"
+        and path.rstrip("/") == "/v1/languages/detect"
+    )
+    client_guard_exempt = (
         request.method == "OPTIONS"
         or path in {"/", "/v1/health", "/v1/live", "/v1/ready", "/openapi.json", "/docs", "/redoc"}
         or path.startswith("/v1/admin/")
+        or public_discovery_request
     )
-    if not guard_exempt:
-        setup_state = runtime_settings_resolver.setup_state(refresh=False)
-        if not setup_state.configured:
-            return await finalize_response(
-                _error_response(
-                    request,
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    "Administrator runtime configuration is required: "
-                    + ", ".join(setup_state.missing),
-                    code="RUNTIME_CONFIGURATION_REQUIRED",
-                )
-            )
 
-    if managed_frontend_request and not guard_exempt:
+    if managed_frontend_request and not client_guard_exempt:
         if trace_initial_registration:
             await run_in_threadpool(
                 _safe_record_frontend_registration_event,
@@ -757,6 +754,35 @@ async def request_context(request: Request, call_next: Any) -> Any:
                     if decision.auto_registered
                     else "Existing Client matched before Chat processing"
                 ),
+            )
+
+    # Client identity is established before runtime capability checks so a
+    # fresh clone can issue X-Client-ID on the first Chat attempt. Chat and its
+    # discovery/context endpoints do not require Vision-managed VectorTarget
+    # or EmbeddingProfile; their handlers report model/provider availability.
+    runtime_guard_exempt = (
+        client_guard_exempt
+        or path.rstrip("/")
+        in {
+            "/v1/models",
+            "/v1/languages",
+            "/v1/languages/detect",
+            "/v1/chat",
+            "/v1/chat/contexts",
+            "/v1/snapshots/compare",
+        }
+    )
+    if not runtime_guard_exempt:
+        setup_state = runtime_settings_resolver.setup_state(refresh=False)
+        if not setup_state.configured:
+            return await finalize_response(
+                _error_response(
+                    request,
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "Administrator runtime configuration is required: "
+                    + ", ".join(setup_state.missing),
+                    code="RUNTIME_CONFIGURATION_REQUIRED",
+                )
             )
     response = await call_next(request)
     return await finalize_response(response)
@@ -2751,9 +2777,18 @@ def update_network_settings(
 ) -> NetworkSettingsResponse:
     _require_admin_proxy(request)
     try:
+        current = runtime_network_store.get(refresh=True)
+        frontend = payload.frontend or (
+            current.frontend
+            if current is not None
+            else NetworkEndpoint(
+                bootstrap_settings.frontend_host,
+                bootstrap_settings.frontend_port,
+            )
+        )
         value = runtime_network_store.update(
-            frontend_ip=payload.frontend.ip,
-            frontend_port=payload.frontend.port,
+            frontend_ip=frontend.ip,
+            frontend_port=frontend.port,
             backendai_ip=payload.backendai.ip,
             backendai_port=payload.backendai.port,
         )

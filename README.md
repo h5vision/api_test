@@ -2,7 +2,443 @@
 
 # VS Code AI Code Assistant Backend
 
-독립된 VS Code 확장 프로그램에서 저장소를 업로드하고 질문하면, 이 FastAPI가 원문 보관·청킹·BGE-M3 임베딩·Qdrant 검색·프롬프트 조립을 수행한 뒤 선택된 backendAI 또는 NVIDIA 모델로 근거 기반 답변을 생성합니다.
+Vision은 VS Code Code Assistant와 AI Server, RAG/VectorDB, Git Snapshot을
+연결하는 FastAPI 기반 Backend Control Plane입니다. Frontend 요청 정규화,
+Client 자동 등록, 모델·Vector 대상 선택, Snapshot 비교·Hydration, Chat 전달,
+Streaming/Citation 계약과 관리자 감사·운영 기능을 제공합니다.
+
+현재 구현·검증 상태와 다음 작업은
+[2026-08-17 현재 진행 사항](docs/2026-08-17_현재_진행_사항.md)에 정리되어 있습니다.
+
+## 빠른 시작과 관리자 접속
+
+```powershell
+docker compose config --quiet
+docker compose up -d
+docker compose ps
+```
+
+| 화면 | 주소 |
+|---|---|
+| 관리자 개요 | `http://<SERVER_IP>/` |
+| 시스템 상태 | `http://<SERVER_IP>/system-status` |
+| Source·Snapshot | `http://<SERVER_IP>/snapshots` |
+| AI·RAG Playground | `http://<SERVER_IP>/playground` |
+| Swagger/OpenAPI | `http://<SERVER_IP>:8000/docs` |
+| 서버 PC 전용 Preview | `http://127.0.0.1:4180/` |
+
+> 관리자 API는 공개 `:8000/v1/admin/*` 경로로 직접 호출하지 않습니다.
+> 브라우저의 `/admin-api/*` 요청이 관리자 Nginx와 전용 Docker 네트워크를
+> 통과해야 하며, 직접 호출은 `403 Forbidden`이 정상입니다.
+
+### 관리자 페이지의 역할
+
+관리자 페이지는 단순 모니터링 화면이 아니라 Vision Backend의 운영 설정을
+저장하고 적용하는 Control Plane입니다.
+
+| 화면 | 주요 기능 |
+|---|---|
+| 개요 | AI 모델, RAG/Vector 대상, Frontend Client, 인덱싱 작업과 프로젝트 상태 요약 |
+| 시스템 상태 | Endpoint 활동, Frontend·AI Server 통신, Chat 감사 로그, 응답시간과 장애 확인 |
+| 소스 · Snapshot | Repository Source, Git Snapshot, 프로젝트 버전과 Vector 연결 상태 관리 |
+| AI · RAG 검증 | 공개 모델 선택, 프로젝트 선택, Chat·Streaming·Citation 검증 |
+
+관리자가 저장한 AI Provider, Vector Target, Embedding Profile과 Network 설정은
+PostgreSQL runtime registry에 보존됩니다. API key 원문은 관리자 응답이나
+브라우저로 다시 반환하지 않습니다.
+
+## 관리자 페이지 사용 가이드
+
+### 1. 처음 실행한 뒤 5분 설정
+
+처음 clone한 PC에서는 아래 순서대로 진행합니다.
+
+1. `docker compose up -d` 실행 후 `docker compose ps -a`에서 `api`, `worker`,
+   `postgres`, `redis`, `qdrant`, `traefik`, `admin-web` 상태를 확인합니다.
+2. `http://127.0.0.1:4180/` 또는 `http://<SERVER_IP>/`로 관리자 개요를 엽니다.
+3. **모델 실행 · 라우팅**에서 기본 AI Server IP와 Port를 저장합니다.
+4. **모델 실행 연결 관리 · 자동 감지**에서 AI Provider를 등록하고 모델을
+   감지합니다.
+5. **관리자 기본 AI 모델**에서 실제 Chat에 사용할 모델을 선택해 저장합니다.
+6. **VectorDB · Embedding · Index 운영**에서 VectorDB와 Embedding 공간을
+   등록합니다.
+7. `/playground`에서 일반 질문을 보내 AI 응답을 확인합니다.
+8. VS Code Extension에서 첫 Chat을 보낸 뒤 **클라이언트 연결 정책**에서
+   자동 등록된 Client와 마지막 연결 상태를 확인합니다.
+
+> Docker 안에서 `127.0.0.1`은 Windows Host가 아니라 해당 Container 자신을
+> 뜻합니다. Windows Host에서 실행 중인 Ollama/API에 연결할 때는
+> `host.docker.internal`을 사용하고, 다른 PC의 서비스에는 그 PC의 내부망
+> IP를 입력합니다.
+
+### 2. 관리자 개요 화면
+
+#### 클라이언트 접근 제어
+
+VS Code Client는 첫 `POST /v1/chat`에서 자동 등록되므로 일반적으로 관리자가
+미리 Client를 추가할 필요가 없습니다. 자동 등록 후 아래 기능을 사용합니다.
+
+- **Client 이름/IP/Port**: 자동 수집된 연결 정보를 확인하거나 운영상 이름을
+  수정합니다. IP는 감사·보조 식별 정보이며 주 식별자는 Client ID와 Instance
+  ID입니다.
+- **API 접근 체크박스**: `true`면 요청을 허용하고 `false`면 이후 요청을
+  `403`으로 차단합니다.
+- **메시지 심층 해석**: 전역 설정 상속, 이 Client만 사용, 이 Client만 끄기 중
+  하나를 선택합니다.
+- **전역 메시지 심층 해석**: JSON envelope 등 복합 Chat 입력의 추가 해석을
+  전체 Client에 적용합니다. 기본 정규화와 유효성 검사는 항상 유지됩니다.
+- **수동 Client 추가**: 자동 등록이 불가능한 레거시 Client를 위한 기능입니다.
+  일반 VS Code Extension 운영에서는 사용하지 않아도 됩니다.
+
+Client 목록에서 같은 내부 IP가 여러 번 보여도 반드시 같은 사용자는 아닙니다.
+공유기/NAT 환경에서는 여러 Extension이 같은 IP를 사용할 수 있으므로 Client ID와
+Instance ID를 기준으로 관리합니다.
+
+#### 모델 실행 · 라우팅
+
+**기본 모델 실행 대상 IP/Port**에는 가장 먼저 사용할 사내 AI Server 또는
+Ollama-compatible Runtime을 입력합니다.
+
+| 실행 위치 | 입력 예시 |
+|---|---|
+| 다른 내부망 PC | `192.168.0.12` / `11500` |
+| Docker Host에서 실행 중 | `host.docker.internal` / `11434` |
+| Docker Compose 내부 서비스 | Compose service name / service port |
+
+저장 버튼은 Network 기본값만 저장합니다. 모델을 실제로 선택하려면 이어서
+Provider 등록과 모델 감지를 완료해야 합니다.
+
+**모델 실행 연결 관리 · 자동 감지**의 입력 기준은 다음과 같습니다.
+
+| 필드 | 사용 기준 |
+|---|---|
+| API 규격 | 확실하지 않으면 `자동 감지`, Ollama 또는 OpenAI-compatible이면 직접 선택 |
+| 배포 위치 | API Server Local, Remote Runtime, Cloud 중 실제 위치 선택 |
+| Chat 처리 책임 | Vision이 검색을 관리하면 `vision_managed`, 외부 AI/RAG Server가 관리하면 `provider_managed` |
+| 연결 입력 방식 | 내부 IP/Port면 Host 방식, Provider가 URL을 주면 Base URL 방식 |
+| 인증 | 없음, Bearer API Key, X-API-Key 중 Provider 규약과 일치시킴 |
+| API Key | 새 Key를 저장할 때만 입력합니다. 수정 화면에서 공란이면 기존 Key를 유지합니다. |
+| 사용 | 꺼두면 모델 감지와 Chat 라우팅 후보에서 제외됩니다. |
+
+`Provider 추가`를 누르면 모델 목록 자동 감지를 시도합니다. 목록의 **다시 감지**는
+Provider 설정은 유지하면서 모델 catalog만 갱신하고, **수정**은 주소·인증·처리
+책임을 변경하며, **삭제**는 해당 Provider를 라우팅 대상에서 제거합니다.
+
+감지된 모델이 **공개 모델 상태**에 표시되면 **관리자 기본 AI 모델**에서 하나를
+선택하고 `기본 모델 선택 저장`을 누릅니다. Provider가 연결돼도 기본 모델을
+선택하지 않으면 `MODEL_NOT_AVAILABLE`이 발생할 수 있습니다.
+
+#### VectorDB · Embedding · Index 운영
+
+이 화면은 하나의 설정처럼 보이지만 다음 세 계약을 함께 저장합니다.
+
+1. **VectorTarget**: 어느 VectorDB에 연결할지 결정합니다.
+2. **EmbeddingProfile**: 어떤 모델과 차원으로 Vector를 만들었는지 정의합니다.
+3. **Index identity**: Collection과 Index version을 구분합니다.
+
+입력 순서는 다음과 같습니다.
+
+1. **VectorDB 연결**
+   - Vision 기본 Qdrant를 사용하면 Host `qdrant`, Port `6333`을 사용합니다.
+   - 외부 DB면 Container에서 접근 가능한 내부 IP/Host와 Port를 입력합니다.
+   - `localhost`/`127.0.0.1`은 외부 PC나 Host Qdrant 주소로 사용하지 않습니다.
+2. **Embedding 공간**
+   - 실행 위치와 Provider 규격을 선택합니다.
+   - Base URL에는 Embedding API의 실제 호출 기준 URL을 입력합니다.
+   - 실제 모델명과 관리 ID를 입력합니다. 예: `bge-m3:latest`.
+   - Vector Dimension은 모델 출력 차원과 정확히 같아야 합니다.
+   - Batch size는 Runtime 메모리에 맞춰 지정합니다. 초기값은 `32`가 안전합니다.
+3. **Index 식별**
+   - Collection은 실제 VectorDB Collection 이름입니다.
+   - Index version은 Embedding 모델·Chunk 규칙 변경을 구분하는 운영 버전입니다.
+4. `VectorTarget · EmbeddingProfile 저장`을 누르고 하단 메시지를 확인합니다.
+
+Embedding 모델 또는 차원이 바뀌면 기존 Collection과 섞지 말고 새 Collection과
+Index version을 사용한 뒤 재인덱싱해야 합니다.
+
+**프로젝트 검색 Route**는 등록만 된 Index를 실제 검색에 연결하는 단계입니다.
+
+1. `project_id`를 입력하고 `후보 조회`를 누릅니다.
+2. Snapshot·Embedding·Index 호환 검증을 통과한 binding을 선택합니다.
+3. `Pinned`는 관리자가 선택한 binding을 고정하고, `Managed auto`는 검증된 최신
+   후보 선택을 Backend에 위임합니다.
+4. 변경 사유를 입력하고 `Route 적용`을 누릅니다.
+5. 문제가 있으면 `Route 해제`로 검색 연결만 제거합니다. 원본 Snapshot이나
+   Vector 데이터가 즉시 삭제되는 것은 아닙니다.
+
+`등록 소스 전체 재임베딩`은 활성 Repository Source를 기준으로 실제 Indexing
+Job을 생성합니다. **외부 Embedding Artifact**에는 외부 시스템에서 받은 결과가,
+**Indexing Job**에는 대기·실행·완료·실패 상태가 표시됩니다. 같은 버튼을 반복해서
+누르기 전에 기존 Job 상태를 먼저 확인합니다.
+
+#### 영속 데이터 기능
+
+이 영역은 PostgreSQL migration과 각 데이터 기능의 준비 상태를 보여주는
+읽기 전용 진단 화면입니다. `migration 미적용`, `table missing` 또는 `degraded`가
+표시되면 설정을 다시 저장하기 전에 `migrate`와 PostgreSQL 로그를 확인합니다.
+
+#### 클라이언트 연결 정책
+
+자동·수동 등록된 Client 목록을 한 번에 확인합니다. API 접근 스위치는 즉시
+적용됩니다. Client를 삭제하면 저장된 등록 레코드는 제거되지만, 해당 Extension이
+Client ID 없이 다시 Chat을 보내면 새 Client로 자동 등록될 수 있습니다. 영구
+차단이 필요하면 삭제 대신 `enabled=false`를 사용합니다.
+
+### 3. 시스템 상태 화면
+
+`/system-status`는 다음 순서로 장애 지점을 찾는 화면입니다.
+
+1. **요청 처리 경로**에서 Frontend → FastAPI → RAG/VectorDB → AI 모델 단계 확인
+2. **공개 기능 계약**에서 Endpoint별 최근 성공/실패 확인
+3. **요청·응답 통신 로그**에서 `request_id`, Client, Provider, Model, HTTP 상태 검색
+4. **클라이언트 등록·식별 로그**에서 최초 등록 시간과 발급된 Client ID 확인
+5. **대화 요청·응답 감사 로그**에서 실제 질문, 답변 상태와 실패 원인 확인
+
+같은 요청을 추적할 때는 화면에 표시된 `request_id`를 기준으로 필터링합니다.
+Frontend 오류 화면의 `request_id`와 통신 로그의 값이 같아야 동일 요청입니다.
+
+### 4. 소스 · Snapshot 화면
+
+`/snapshots`는 현재 Public GitHub Commit Snapshot MVP 관리 화면입니다.
+
+1. 공개 GitHub Repository URL을 입력합니다.
+2. Branch, Tag 또는 실제 Git Commit SHA를 Ref에 입력합니다. 비우면 기본 Branch를
+   사용합니다.
+3. `Repository & Snapshot 가져오기`를 누릅니다.
+4. Repositories 목록에서 저장소를 선택하고 Commit Snapshot을 선택합니다.
+5. `Snapshot Identity · Locator · AccessPlan`에서 식별·조회 계획을 확인합니다.
+6. Tree 필터로 파일을 찾고 UTF-8 파일 원문을 확인합니다.
+
+현재 화면은 임의 문자열 SHA나 콘텐츠 해시를 Git Commit SHA처럼 받지 않습니다.
+Private Repository Credential 입력은 아직 이 Public MVP 화면의 범위가 아닙니다.
+기능이 꺼져 있으면 `SNAPSHOT_CONTROL_PLANE_ENABLED`와 Snapshot 관련 환경설정을
+확인합니다.
+
+### 5. AI · RAG Playground
+
+`/playground`는 Frontend 배포 전에 Backend 계약을 검증하는 관리자용 Chat입니다.
+
+1. 모델 위치와 모델을 선택합니다.
+2. 일반 질의면 `일반 질의`, 프로젝트 근거가 필요하면 인덱싱된 프로젝트를
+   선택합니다.
+3. 필요하면 파일이나 이미지를 첨부합니다.
+4. 질문을 전송하고 상태 표시, Streaming 응답, Markdown, Citation을 확인합니다.
+5. 왼쪽 기록에서 사용자별·Session별 과거 대화를 다시 엽니다.
+
+프로젝트를 선택했는데 Route나 근거가 준비되지 않았다면 일반 모델 응답과 달리
+`NO_EVIDENCE`, Project/Route 오류가 표시될 수 있습니다. 이 경우 Playground의
+모델 문제가 아니라 Vector Route와 인덱싱 상태를 먼저 확인합니다.
+
+### 6. 설정 완료 판정표
+
+| 확인 항목 | 정상 기준 |
+|---|---|
+| `/v1/health` | HTTP `200`, API Process 정상 |
+| 관리자 개요 | 카드와 저장 설정 조회 성공, 관리자 API `403/503` 없음 |
+| 모델 catalog | 최소 1개 사용 가능한 Chat 모델 표시 |
+| 기본 모델 | 관리자 기본 AI 모델 선택 완료 |
+| VectorTarget | Host·Port 저장 및 연결 가능한 상태 |
+| EmbeddingProfile | 모델·차원·Collection 계약 저장 완료 |
+| Project Route | 프로젝트 검색 시 active binding 존재 |
+| Client | 첫 Chat 후 Client ID 생성, `enabled=true` |
+| Playground | 일반 질의 응답 성공, 프로젝트 질의는 Citation/근거 상태 확인 |
+
+`/v1/health`의 HTTP `200`은 Process가 살아 있다는 뜻이며 모든 외부 서비스가
+준비됐다는 뜻은 아닙니다. `runtime_setup.configured`, 모델 상태, Vector Route와
+통신 로그를 함께 확인해야 합니다.
+
+### 서버 IP 확인
+
+```powershell
+Get-NetIPAddress -AddressFamily IPv4 |
+  Where-Object { $_.IPAddress -notlike "127.*" -and $_.PrefixOrigin -ne "WellKnown" } |
+  Select-Object InterfaceAlias, IPAddress
+```
+
+확인한 IPv4를 `<SERVER_IP>`에 넣습니다. 예를 들어 서버 IP가
+`192.168.0.7`이면 관리자 주소는 `http://192.168.0.7/`입니다. 이 IP는
+사용 예시이며 코드와 Compose에 하드코딩되어 있지 않습니다.
+
+`4180` 포트는 서버의 `127.0.0.1`에만 공개되므로 다른 PC에서는 접속할 수
+없습니다. 다른 PC는 `http://<SERVER_IP>/`를 사용합니다.
+
+### 관리자 요청 경로
+
+```text
+Browser
+  -> Traefik :80
+  -> admin-web Nginx :8080
+  -> /admin-api/*
+  -> FastAPI /v1/admin/*
+```
+
+Nginx는 관리자 요청을 Docker의 `admin-internal` 전용 네트워크로 전달합니다.
+공개 Traefik API 경로는 외부에서 임의로 넣은 관리자 프록시 Header를 제거하며,
+`:8000/v1/admin/*` 직접 요청에는 `403`을 반환합니다.
+
+현재 관리자 페이지는 사설망 IP AllowList와 내부 프록시 경계로 보호됩니다.
+공인 인터넷에 직접 노출하지 말고 외부 접근이 필요하면 VPN, Zero Trust 또는
+SSO/MFA Proxy 뒤에서 사용합니다.
+
+### 최초 접속 후 설정 순서
+
+새 DB에서는 `/v1/health`가 `200 OK`여도 `runtime_setup.configured=false`일 수
+있습니다. 이는 장애가 아니라 외부 실행 대상을 아직 지정하지 않은
+`setup-required` 상태입니다.
+
+1. **Network·Service 설정**: Vision이 연결할 AI Server와 RAG Server의
+   Base URL 또는 IP·Port를 등록합니다. Frontend는 Vision으로 들어오는
+   Client이므로 서버 설정에 Frontend IP를 미리 등록할 필요가 없습니다.
+2. **AI Provider**: Ollama, OpenAI-compatible 또는 Cloud Provider를 추가하고
+   모델을 탐색한 뒤 기본 AI 모델을 선택합니다.
+3. **Vector Target**: 외부 VectorDB/RAG Server 또는 선택적인 Vision 기본
+   VectorDB를 등록하고 연결을 검증합니다.
+4. **Embedding Profile**: 감지된 임베딩 모델과 Vector 공간 설정을 선택합니다.
+5. **Repository Source·Snapshot**: Git Source와 Snapshot을 등록하고 프로젝트와
+   Vector Index의 연결 상태를 확인합니다.
+6. **Frontend Client**: 자동 등록된 VS Code Extension을 확인하고
+   `enabled=true/false`로 통신을 허용하거나 차단합니다.
+7. **Playground**: 실제 Frontend와 같은 `/v1/chat` 경로로 모델, 응답,
+   Streaming과 Citation을 검증합니다.
+
+### VS Code Client 자동 등록
+
+다른 PC의 Extension은 먼저 수동 등록하지 않아도 됩니다. 최초
+`POST /v1/chat` 요청에서 Vision이 Client ID를 생성하고 응답 Header로
+반환합니다.
+
+```text
+X-Client-Type: vscode-extension
+X-Client-Instance-ID: <Extension 설치 단위의 영구 UUID>
+X-Client-Name: <사용자에게 보일 이름>
+```
+
+```text
+X-Client-ID: fcli_...
+X-Client-Auto-Registered: true
+```
+
+Extension은 반환된 `X-Client-ID`를 로컬 전역 저장소에 보존하고 다음 요청부터
+같이 보내야 합니다. `X-Client-Instance-ID`도 재시작·Workspace 변경 후 유지되는
+값이어야 합니다. 서버는 `Client ID → Instance ID → 요청 원본 IP` 순서로
+식별하므로 같은 NAT/IP를 공유하는 여러 사용자를 IP만으로 구분하지 않습니다.
+
+첫 Chat이 질문 형식 오류, 모델 미설정 또는 AI Server 중단으로 실패하더라도
+응답 Header의 Client ID는 발급됩니다. 관리자는 **Frontend Client 연결 제어**에서
+자동 등록된 Client를 확인하고 `enabled`를 끄거나 다시 켤 수 있습니다.
+
+`GET /v1/models`, `GET /v1/languages`, `POST /v1/languages/detect`는 Client 등록과
+전체 Runtime 설정 완료 전에도 호출할 수 있습니다. 반면 인덱싱처럼 저장 대상이
+필수인 API는 관리자 설정이 끝나기 전 `503 RUNTIME_CONFIGURATION_REQUIRED`를
+반환합니다.
+
+### VectorDB 관리자 설정 순서
+
+관리자 개요의 **VectorDB · Embedding · Index 운영** 화면은 다음 순서로
+정리되어 있습니다.
+
+1. **VectorDB 연결** — Qdrant-compatible Host와 Port
+2. **Embedding 공간** — 실행 위치, Provider, Base URL, 모델, 차원과 Batch
+3. **Index 식별** — Collection과 Index version
+4. **프로젝트 검색 Route** — 검증된 binding을 실제 검색 authority로 선택
+5. **운영 작업** — 재인덱싱, 외부 Artifact, Indexing Job 상태 확인
+
+VectorDB 주소만 등록한다고 검색이 활성화되지는 않습니다. Embedding 공간과
+Collection이 호환되는지 검증한 뒤 프로젝트별 active Route를 선택해야 합니다.
+
+외부 AI Server나 RAG Server가 꺼져 있어도 Vision API와 관리자 페이지는
+기동됩니다. 해당 연결만 `offline`, `setup-required` 또는 `degraded`로
+표시됩니다.
+
+### 정상 동작 확인
+
+```powershell
+# 공개 API 상태: HTTP 200과 최상위 status=ok 확인
+Invoke-RestMethod http://127.0.0.1:8000/v1/health
+
+# 관리자 UI와 내부 관리자 API: 둘 다 HTTP 200 확인
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:4180/
+Invoke-WebRequest -UseBasicParsing `
+  http://127.0.0.1:4180/admin-api/persistence-status
+
+# 컨테이너와 초기화 로그
+docker compose ps -a
+docker compose logs --tail 100 migrate api admin-build admin-web
+docker compose logs --tail 100 postgres redis qdrant
+```
+
+`api-deps`, `runtime-secrets-init`, `migrate`, `admin-build`는 초기화를 마친 뒤
+`Exited (0)`으로 끝나는 것이 정상입니다. `api`, `worker`, `postgres`, `redis`,
+`qdrant`, `traefik`, `admin-web`은 실행 상태여야 합니다.
+
+### 다른 PC에서 접속
+
+Client PC에서 연결을 확인합니다.
+
+```powershell
+Test-NetConnection <SERVER_IP> -Port 80
+Test-NetConnection <SERVER_IP> -Port 8000
+```
+
+`TcpTestSucceeded: True`이면 `http://<SERVER_IP>/`에 접속합니다. 실패하면 서버의
+Windows Defender Firewall, 공유기/VPN Route, 실제 IPv4와
+`TRAEFIK_BIND_IP`를 확인합니다. 내부망 공개가 필요하면 기본값
+`TRAEFIK_BIND_IP=0.0.0.0`을 유지합니다.
+
+### 접속 오류 해결
+
+#### 관리자 화면이 열리지 않음
+
+```powershell
+docker compose ps -a
+docker compose logs --tail 100 traefik admin-build admin-web
+Get-NetTCPConnection -State Listen -LocalPort 80,8000,4180
+```
+
+#### 관리자 개요가 503을 반환함
+
+```powershell
+docker compose logs --tail 100 migrate postgres api admin-web
+docker compose run --rm migrate
+```
+
+`migrate`의 `Exited (0)`, PostgreSQL의 `healthy`, `/v1/health`의 HTTP `200`,
+브라우저가 `/admin-api/*` 프록시를 사용하는지를 순서대로 확인합니다.
+
+#### 관리자 API가 403을 반환함
+
+`:8000/v1/admin/*`를 직접 호출했을 가능성이 큽니다. 관리자 화면 또는
+`http://127.0.0.1:4180/admin-api/*`를 사용합니다.
+
+#### 수정한 관리자 UI가 반영되지 않음
+
+```powershell
+docker compose up --force-recreate admin-build
+docker compose up -d --force-recreate admin-web
+```
+
+실행 후 브라우저에서 강력 새로고침을 수행합니다.
+
+#### Preview 포트 변경
+
+`compose.env`에 다음 값을 지정합니다.
+
+```env
+ADMIN_PREVIEW_PORT=4280
+```
+
+### 재시작과 데이터 보존
+
+```powershell
+# PostgreSQL, Redis, Qdrant와 runtime secret 볼륨 보존
+docker compose down
+docker compose up -d
+
+# 주의: 모든 영구 볼륨까지 삭제하는 완전 초기화
+docker compose down -v
+```
+
+운영 데이터가 있으면 `down -v`를 실행하기 전에 반드시 백업합니다.
 
 ## 2026-07-24 작업 보고 — 인덱싱 프로젝트 목록 조회
 
