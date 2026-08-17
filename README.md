@@ -7,6 +7,9 @@ Vision은 VS Code Code Assistant와 AI Server, RAG/VectorDB, Git Snapshot을
 Client 자동 등록, 모델·Vector 대상 선택, Snapshot 비교·Hydration, Chat 전달,
 Streaming/Citation 계약과 관리자 감사·운영 기능을 제공합니다.
 
+현재 구현·검증 상태와 다음 작업은
+[2026-08-17 현재 진행 사항](docs/2026-08-17_현재_진행_사항.md)에 정리되어 있습니다.
+
 ## 빠른 시작과 관리자 접속
 
 ```powershell
